@@ -1,0 +1,109 @@
+== HW Bench ==
+target: x86_64-uefi, opt: release
+cpu: AMD Ryzen 7 7735H with Radeon Graphics
+cores: total 16 enabled 16
+xsave: firmware OSXSAVE=off | tool-enabled=YES (CR4.OSXSAVE+XCR0 set by tool)
+-- SIMD cpuid --
+-- leaf1 ECX --
+  SSE3:YES PCLMULQDQ:YES SSSE3:YES FMA:YES
+  CMPXCHG16B:YES SSE4.1:YES SSE4.2:YES MOVBE:YES
+  POPCNT:YES AES-NI:YES XSAVE:YES OSXSAVE:YES
+  AVX:YES F16C:YES RDRAND:YES
+-- leaf1 EDX --
+  MMX:YES FXSR:YES SSE:YES SSE2:YES
+-- leaf7 EBX --
+  FSGSBASE:YES BMI1:YES AVX2:YES BMI2:YES
+  AVX512F:no AVX512DQ:no RDSEED:YES ADX:YES
+  SMAP:YES AVX512IFMA:no CLFLUSHOPT:YES AVX512PF:no
+  AVX512ER:no AVX512CD:no SHA:YES AVX512BW:no
+  AVX512VL:no
+-- leaf7 ECX --
+  AVX512VBMI:no GFNI:no VAES:YES VPCLMULQDQ:YES
+  AVX512VNNI:no AVX512BITALG:no AVX512VPOPCNTDQ:no
+-- leaf7 EDX --
+  AVX5124VNNIW:no AVX5124FMAPS:no AVX512VP2INTERSECT:no AMX-BF16:no
+  AVX512-FP16:no AMX-TILE:no AMX-INT8:no
+-- leaf7.1 EAX: N/A (leaf missing) --
+-- ext 80000001h ECX --
+  LZCNT:YES SSE4a:YES PREFETCHW:YES FMA4:no
+  TBM:no
+-- ext 80000001h EDX --
+  MMXEXT:YES FFXSR:YES 3DNOWEXT:no 3DNOW:no
+xcr0: SSE=YES AVX=YES OPMASK=no ZMM_Hi256=no Hi16_ZMM=no XCR0=0x7
+AVX512-usable: NO
+-- SIMD exec test --
+  SSE2 int add : PASS
+  AVX2 int add : PASS
+  AVX512 int add: SKIP (need AVX512F+XCR0-ZMM)
+tsc: 3200003200 ticks/sec
+-- gop --
+gop: 1920x1080 stride 1920
+gop VideoFill full: 141.1 fps (7.09 ms/frame)
+gop BufferToVideo full: 143.2 fps, 1133.0 MB/s
+gop direct-write full: 526.0 MB/s
+gop BufferToVideo qtr: 3.52 ms (full 15.04 ms, fixed ~0.00 ms)
+gop VideoFill qtr: 3.61 ms
+cpu convert RB-swap: 8159.9 MB/s
+mp: 16 enabled core(s)
+fb fill 1 core: 15.64 ms (505.9 MB/s)
+fb fill 16 cores: 4.23 ms (1870.6 MB/s, x3.70 speedup, eff 23%, ap 75/75)
+anim 1core free: 120 frames, 64.7 fps (15.45 ms/f)
+anim 1core vsync60: 120 frames, 59.8 fps, overruns 13
+anim 2core(1AP) free: 120 frames, 71.3 fps (14.03 ms/f)
+anim 2core(1AP) vsync60: 120 frames, 60.0 fps, overruns 1
+anim Ncore free: 120 frames, 236.0 fps (4.24 ms/f)
+anim Ncore vsync60: 120 frames, 60.0 fps, overruns 0
+anim scale 1->N: x3.65 (free-run fps ratio)
+gop snow gen (xorshift): 2943.0 MB/s
+gop snow direct-write: 65.3 fps (516.2 MB/s) vs solid 66.3 fps (-2%)
+gop snow BufferToVideo: 143.3 fps vs solid 143.3 fps (-0%)
+gop VideoToVideo pingpong: 150.7 fps, 1192.2 MB/s
+gop VideoToBltBuffer readback: 143.6 fps, 1136.0 MB/s
+-- gop-simd: full-ISA pixel path --
+gates: SSE2 YES SSSE3 YES SSE4.2 YES POPCNT YES AVX YES AVX2 YES AVX512F no BW no VL no VBMI no VPOPCNTDQ no RDRAND YES RDSEED YES BMI1/2 YES/YES LZCNT YES PREFETCHW YES
+raw: leaf7.EBX=0x219c97a9 ECX=0x0040068c EDX=0x00000010 leaf7.1(has=no)EAX=0x00000000 ext.ECX=0x75c237ff EDX=0x2fd3fbff
+gop-simd fill avx512-512: SKIP (gate/align)
+gop-simd fill avx512-512-nt: SKIP (gate/align)
+gop-simd fill avx512vl-256: SKIP (gate/align)
+gop-simd fill scalar-u64    :   529.3 MB/s (+0% vs scalar)
+gop-simd fill sse2-128      :  1078.5 MB/s (+104% vs scalar)
+gop-simd fill sse2-128-nt   :  1074.6 MB/s (+103% vs scalar)
+gop-simd fill avx-128-vex   :  1037.2 MB/s (+96% vs scalar)
+gop-simd fill avx2-256      :  2240.9 MB/s (+323% vs scalar)
+gop-simd fill avx2-256-nt   :  2082.5 MB/s (+293% vs scalar)
+gop-simd copy avx512-512: SKIP (gate/align)
+gop-simd copy avx512-512-nt: SKIP (gate/align)
+gop-simd copy scalar-u64    :   526.5 MB/s (+0% vs scalar)
+gop-simd copy sse2-128      :  1086.9 MB/s (+106% vs scalar)
+gop-simd copy sse3-lddqu    :  1065.7 MB/s (+102% vs scalar)
+gop-simd copy sse2-128-nt   :  1030.5 MB/s (+96% vs scalar)
+gop-simd copy avx2-256      :  2207.2 MB/s (+319% vs scalar)
+gop-simd copy avx2-256-nt   :  2053.5 MB/s (+290% vs scalar)
+gop-simd copy avx2-256-pf-none: 2155.8 MB/s
+gop-simd copy avx2-256-pf-nta : 2069.5 MB/s
+gop-simd copy avx2-256-pf-prefetchw: 2202.8 MB/s
+gop-simd convert scalar     : 5387.4 MB/s
+gop-simd convert ssse3-pshufb: 36981.7 MB/s (+586%)
+gop-simd convert avx2-vpshufb : 47598.3 MB/s (+784%)
+gop-simd convert avx512bw-shuf: SKIP (need AVX512F+BW+XCR0-ZMM)
+gop-simd checksum scalar-sum: 24931.6 MB/s (chk=0x4320)
+gop-simd checksum sse42-crc32: 11712.2 MB/s (-53%)
+gop-simd density popcnt: 17836.0 MB/s (bits/byte=4.00)
+gop-simd density vpopcntq: SKIP (need AVX512VPOPCNTDQ+XCR0-ZMM)
+gop-simd rng xorshift: 2974.2 MB/s
+gop-simd rng rdrand: 252.0 MB/s (fails=0)
+gop-simd rng rdseed: 0.1 MB/s (fails=0, half-buf)
+gop-simd gpr bmi1-bextr: 17728.9 MB/s
+gop-simd gpr bmi2-pext : 17024.5 MB/s
+gop-simd gpr lzcnt     : 17464.7 MB/s
+verdict: gop-simd widths compared against same-run scalar (no stale baselines)
+verdict: nt-stream wins only if WC-write-combining not already optimal; else temporal wins (fence cost)
+verdict: shufb-lanes are per-128b; 256/512 speedups come from width, not fewer shuffles
+note: not-applicable (no pixel-path use): MMX, SSE-FP, FMA/FMA4, F16C, AVX512-FP16/BF16/IFMA/4FMAPS/4VNNIW/VP2INTERSECT, AES/VAES/PCLMUL/VPCLMULQDQ/SHA/GFNI/VNNI/BITALG/AMX, MOVBE(order), ADX/FSGSBASE/SMAP/XSAVE/CET, 3DNOW/MMXEXT/FFXSR/SSE4a/TBM
+verdict: engine-bound (blit 1133 ~= direct 526 MB/s)
+verdict: pipeline blit-bound (convert 8160 >= blit 1133 MB/s)
+verdict: gpu fabric faster than CPU write path (v2v 1192 > direct 526 MB/s)
+verdict: readback 1136 MB/s vs write 526 MB/s (ratio 0.5x)
+verdict: blit data-independent (snow -0% — dumb pipe)
+memcpy: 48735.4 MB/s (chk=165)
+int ALU: 9285.7 Mops/s (chk=0xbf8)

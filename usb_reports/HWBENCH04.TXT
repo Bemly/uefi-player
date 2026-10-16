@@ -1,0 +1,67 @@
+== HW Bench ==
+target: x86_64-uefi, opt: release
+cpu: AMD Ryzen 7 7735H with Radeon Graphics
+cores: total 16 enabled 16
+-- SIMD cpuid --
+-- leaf1 ECX --
+  SSE3:YES PCLMULQDQ:YES SSSE3:YES FMA:YES
+  CMPXCHG16B:YES SSE4.1:YES SSE4.2:YES MOVBE:YES
+  POPCNT:YES AES-NI:YES XSAVE:YES OSXSAVE:no
+  AVX:YES F16C:YES RDRAND:YES
+-- leaf1 EDX --
+  MMX:YES FXSR:YES SSE:YES SSE2:YES
+-- leaf7 EBX --
+  FSGSBASE:YES BMI1:YES AVX2:YES BMI2:YES
+  AVX512F:no AVX512DQ:no RDSEED:YES ADX:YES
+  SMAP:YES AVX512IFMA:no CLFLUSHOPT:YES AVX512PF:no
+  AVX512ER:no AVX512CD:no SHA:YES AVX512BW:no
+  AVX512VL:no
+-- leaf7 ECX --
+  AVX512VBMI:no GFNI:no VAES:YES VPCLMULQDQ:YES
+  AVX512VNNI:no AVX512BITALG:no AVX512VPOPCNTDQ:no
+-- leaf7 EDX --
+  AVX5124VNNIW:no AVX5124FMAPS:no AVX512VP2INTERSECT:no AMX-BF16:no
+  AVX512-FP16:no AMX-TILE:no AMX-INT8:no
+-- leaf7.1 EAX: N/A (leaf missing) --
+-- ext 80000001h ECX --
+  LZCNT:YES SSE4a:YES PREFETCHW:YES FMA4:no
+  TBM:no
+-- ext 80000001h EDX --
+  MMXEXT:YES FFXSR:YES 3DNOWEXT:no 3DNOW:no
+xcr0: SKIPPED (no OSXSAVE)
+AVX512-usable: NO
+-- SIMD exec test --
+  SSE2 int add : PASS
+  AVX2 int add : SKIP (need AVX+XCR0+AVX2-hw)
+  AVX512 int add: SKIP (need AVX512F+XCR0-ZMM)
+tsc: 3200003520 ticks/sec
+-- gop --
+gop: 1920x1080 stride 1920
+gop VideoFill full: 139.3 fps (7.18 ms/frame)
+gop BufferToVideo full: 143.1 fps, 1131.9 MB/s
+gop direct-write full: 527.5 MB/s
+gop BufferToVideo qtr: 3.48 ms (full 15.00 ms, fixed ~0.00 ms)
+gop VideoFill qtr: 3.61 ms
+cpu convert RB-swap: 8156.3 MB/s
+mp: 16 enabled core(s)
+fb fill 1 core: 15.63 ms (506.2 MB/s)
+fb fill 16 cores: 4.23 ms (1871.4 MB/s, x3.70 speedup, eff 23%, ap 75/75)
+anim 1core free: 120 frames, 64.7 fps (15.44 ms/f)
+anim 1core vsync60: 120 frames, 59.7 fps, overruns 19
+anim 2core(1AP) free: 120 frames, 70.8 fps (14.12 ms/f)
+anim 2core(1AP) vsync60: 120 frames, 60.0 fps, overruns 4
+anim Ncore free: 120 frames, 236.2 fps (4.23 ms/f)
+anim Ncore vsync60: 120 frames, 60.0 fps, overruns 0
+anim scale 1->N: x3.65 (free-run fps ratio)
+gop snow gen (xorshift): 2942.2 MB/s
+gop snow direct-write: 65.2 fps (515.6 MB/s) vs solid 66.6 fps (-2%)
+gop snow BufferToVideo: 143.1 fps vs solid 142.8 fps (+0%)
+gop VideoToVideo pingpong: 149.3 fps, 1181.1 MB/s
+gop VideoToBltBuffer readback: 143.6 fps, 1136.1 MB/s
+verdict: engine-bound (blit 1132 ~= direct 527 MB/s)
+verdict: pipeline blit-bound (convert 8156 >= blit 1132 MB/s)
+verdict: gpu fabric faster than CPU write path (v2v 1181 > direct 527 MB/s)
+verdict: readback 1136 MB/s vs write 527 MB/s (ratio 0.5x)
+verdict: blit data-independent (snow +0% — dumb pipe)
+memcpy: 52693.7 MB/s (chk=165)
+int ALU: 9401.7 Mops/s (chk=0xbf8)

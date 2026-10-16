@@ -1,0 +1,54 @@
+== FW Collect ==
+cpu: Intel(R) Celeron(R) J4125 CPU @ 2.00GHz
+cpu simd: AVX-HW no | AVX2-HW no | AVX512F-HW no | OSXSAVE YES | AVX-usable NO
+-- smbios --
+[BIOS] American Megatrends Inc. | $(AMI_ROM_NAME)_T$(2021)$(04)$(16)$(17)$(55) | date 04/16/2021 | rom 4928KB
+[System] GREATWALL | EQJ4M | ver Default string | sn Default string | uuid 03000200-0400-0500-0006-000700080009 | sku Default string | family NOTEBOOK
+[Board] GREATWALL | EQJ4M | ver Default string | sn Default string | asset Default string | type Some(MotherBoard)
+[Chassis] Default string | Notebook | ver Default string | sn Default string | asset Default string | boot Some(Safe)
+[Mem] A1_DIMM0 | 3072MB | LpDdr4 | 123456789012345678 | 2133MT/s(cfg 2133) | ABCD | sn 1234 | 1100mV
+[Mem] A1_DIMM1 | 3072MB | LpDdr4 | 123456789012345678 | 2133MT/s(cfg 2133) | ABCD | sn 1234 | 1100mV
+[Mem] A1_DIMM2 | 3072MB | LpDdr4 | 123456789012345678 | 2133MT/s(cfg 2133) | ABCD | sn 1234 | 1100mV
+[Mem] A1_DIMM3 | 3072MB | LpDdr4 | 123456789012345678 | 2133MT/s(cfg 2133) | ABCD | sn 1234 | 1100mV
+smbios: bios=1 system=1 board=1 chassis=1 memdev=4
+-- pci --
+pci: 1 root bridge(s)
+pci 00:00.0 8086:31f0 [Host bridge] subsys 0000:0000 rev 06
+pci 00:00.1 8086:318c [class 11:80] subsys 8086:7270 rev 06
+pci 00:02.0 8086:3185 [VGA] subsys f000:02f3 rev 06
+pci 00:0d.0 8086:3192 [Memory ctrl] subsys 8086:7270 rev 06
+pci 00:0d.2 8086:3196 [Serial bus] subsys 8086:7270 rev 06
+pci 00:0e.0 8086:3198 [Multimedia] subsys 02f3:f000 rev 06
+pci 00:0f.0 8086:319a [Comm] subsys 8086:7270 rev 06
+pci 00:12.0 8086:31e3 [SATA] subsys 8086:7270 rev 06
+pci 00:13.0 8086:31d8 [PCI-PCI bridge] subsys 0000:0000 rev f6
+pci 00:13.1 8086:31d9 [PCI-PCI bridge] subsys 0000:0000 rev f6
+pci 00:13.2 8086:31da [PCI-PCI bridge] subsys 0000:0000 rev f6
+pci 00:13.3 8086:31db [PCI-PCI bridge] subsys 0000:0000 rev f6
+pci 00:14.0 8086:31d6 [PCI-PCI bridge] subsys 0000:0000 rev f6
+pci 00:14.1 8086:31d7 [PCI-PCI bridge] subsys 0000:0000 rev f6
+pci 00:15.0 8086:31a8 [USB XHCI] subsys 8086:7270 rev 06
+pci 00:16.0 8086:31ac [class 11:80] subsys 8086:7270 rev 06
+pci 00:16.1 8086:31ae [class 11:80] subsys 8086:7270 rev 06
+pci 00:16.2 8086:31b0 [class 11:80] subsys 8086:7270 rev 06
+pci 00:16.3 8086:31b2 [class 11:80] subsys 8086:7270 rev 06
+pci 00:17.0 8086:31b4 [class 11:80] subsys 8086:7270 rev 06
+pci 00:17.1 8086:31b6 [class 11:80] subsys 8086:7270 rev 06
+pci 00:17.2 8086:31b8 [class 11:80] subsys 8086:7270 rev 06
+pci 00:17.3 8086:31ba [class 11:80] subsys 8086:7270 rev 06
+pci 00:18.0 8086:31bc [class 11:80] subsys 8086:7270 rev 06
+pci 00:18.1 8086:31be [class 11:80] subsys 8086:7270 rev 06
+pci 00:18.2 8086:31c0 [class 11:80] subsys 8086:7270 rev 06
+pci 00:18.3 8086:31ee [class 11:80] subsys 8086:7270 rev 06
+pci 00:19.0 8086:31c2 [class 11:80] subsys 8086:7270 rev 06
+pci 00:19.1 8086:31c4 [class 11:80] subsys 8086:7270 rev 06
+pci 00:19.2 8086:31c6 [class 11:80] subsys 8086:7270 rev 06
+pci 00:1c.0 8086:31cc [System peripheral] subsys 8086:7270 rev 06
+pci 00:1e.0 8086:31d0 [System peripheral] subsys 8086:7270 rev 06
+pci 00:1f.0 8086:31e8 [ISA bridge] subsys 8086:7270 rev 06
+pci 00:1f.1 8086:31d4 [Serial bus] subsys 8086:7270 rev 06
+pci: 34 function(s) total
+-- block --
+block: 2 handle(s)
+  [0] disk 58.6GiB bs=512 removable [MBR]
+  [1] part 58.6GiB bs=512 removable [MBR]

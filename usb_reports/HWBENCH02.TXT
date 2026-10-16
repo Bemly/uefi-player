@@ -1,0 +1,37 @@
+== HW Bench ==
+target: x86_64-uefi, opt: release
+cpu: Intel(R) Celeron(R) J4125 CPU @ 2.00GHz
+cores: total 4 enabled 4
+-- SIMD cpuid --
+  SSE        YES
+  SSE2       YES
+  SSE3       YES
+  SSSE3      YES
+  SSE4.1     YES
+  SSE4.2     YES
+  PCLMULQDQ  YES
+  AES-NI     YES
+  FMA        no
+  AVX(hw)    no
+  AVX2(hw)   no
+  OSXSAVE    no
+xcr0: SKIPPED (no OSXSAVE)
+-- SIMD exec test --
+  SSE2 int add : PASS
+  AVX2 int add : SKIP (need AVX+XCR0+AVX2-hw)
+tsc: 1996988160 ticks/sec
+-- gop --
+gop: 1920x1080 stride 1920
+gop VideoFill full: 26.2 fps (38.14 ms/frame)
+gop BufferToVideo full: 26.1 fps, 206.1 MB/s
+gop direct-write full: 103.7 MB/s
+gop BufferToVideo qtr: 9.59 ms (full 76.25 ms, fixed ~0.00 ms)
+gop VideoFill qtr: 9.56 ms
+cpu convert RB-swap: 1073.8 MB/s
+mp: 4 enabled core(s)
+fb fill 1 core: 76.26 ms (103.7 MB/s)
+fb fill 4 cores: 19.36 ms (408.6 MB/s, x3.94 speedup, eff 98%, ap 15/15)
+verdict: engine-bound (blit 206 ~= direct 104 MB/s)
+verdict: pipeline blit-bound (convert 1074 >= blit 206 MB/s)
+memcpy: 3874.9 MB/s (chk=165)
+int ALU: 2303.1 Mops/s (chk=0xbf8)

@@ -1,0 +1,45 @@
+== FW Collect ==
+cpu: ZHAOXIN KaiXian KX-6640MA@2.2+GHz
+cpu simd: AVX-HW YES | AVX2-HW no | AVX512F-HW no | OSXSAVE YES | AVX-usable YES
+-- smbios --
+[BIOS] Byosoft | R16 | date 01/26/2021 | rom 8192KB
+[System] Shanghai Zhaoxin Semiconductor Co., Ltd. | ZXE CRB | ver TBD | sn TBD | uuid ffffffff-ffff-ffff-ffff-ffffffffffff | sku TBD | family ZXE
+[Chassis] Shanghai Zhaoxin Semiconductor Co., Ltd. | Notebook | ver TBD | sn TBD | asset TBD | boot Some(Other)
+[Board] Shanghai Zhaoxin Semiconductor Co., Ltd. | ZEN1 | ver TBD | sn TBD | asset TBD | type Some(MotherBoard)
+[Mem] DIMM 0 | empty | Ddr4 | Unknown | 0MT/s(cfg 0) | Unknown | sn Unknown | 1200mV
+[Mem] DIMM 1 | 8192MB | Ddr4 | WPBH26D408SWA-8G   | 2666MT/s(cfg 2666) | Shenzhen WODPOSIT Technology Co | sn 576D231B | 1200mV
+smbios: bios=1 system=1 board=1 chassis=1 memdev=2
+-- pci --
+pci: 1 root bridge(s)
+pci 00:00.0 1d17:1003 [Host bridge] subsys 1d17:1003 rev 80
+pci 00:00.1 1d17:31b0 [Host bridge] subsys 1d17:31b0 rev 04
+pci 00:00.2 1d17:31b1 [Host bridge] subsys 1d17:31b1 rev 04
+pci 00:00.3 1d17:31b2 [Host bridge] subsys 1d17:31b2 rev 04
+pci 00:00.4 1d17:31b3 [Host bridge] subsys 1d17:31b3 rev 04
+pci 00:00.5 1d17:31b4 [Host bridge] subsys 1d17:31b4 rev 04
+pci 00:00.6 1d17:31b5 [Host bridge] subsys 1d17:31b5 rev 04
+pci 00:01.0 1d17:3a04 [VGA] subsys 1d17:3a04 rev 00
+pci 00:01.1 1d17:9144 [Audio] subsys 1d17:9144 rev 00
+pci 00:03.0 1d17:0717 [PCI-PCI bridge] subsys 0000:0000 rev 01
+pci 00:04.0 1d17:071b [PCI-PCI bridge] subsys 0000:0000 rev 01
+pci 00:04.1 1d17:071c [PCI-PCI bridge] subsys 0000:0000 rev 01
+pci 00:05.0 1d17:071d [PCI-PCI bridge] subsys 0000:0000 rev 01
+pci 00:05.1 1d17:071e [PCI-PCI bridge] subsys 0000:0000 rev 01
+pci 00:0f.0 1d17:9083 [SATA] subsys 9083:1d17 rev 01
+pci 00:10.0 1d17:3038 [USB UHCI] subsys 1d17:3038 rev a0
+pci 00:10.1 1d17:3038 [USB UHCI] subsys 1d17:3038 rev a0
+pci 00:10.7 1d17:3104 [USB EHCI] subsys 1d17:3104 rev 90
+pci 00:11.0 1d17:1001 [ISA bridge] subsys 1d17:1001 rev 03
+pci 00:11.7 1d17:31b7 [Host bridge] subsys 1d17:31b7 rev 04
+pci 00:12.0 1d17:9204 [USB XHCI] subsys 1d17:9204 rev 00
+pci 00:14.0 1d17:3288 [Audio] subsys 10ec:111e rev 20
+pci 04:00.0 8086:095a [Network] subsys 8086:5010 rev 59
+pci: 23 function(s) total
+-- block --
+block: 6 handle(s)
+  [0] disk 58.6GiB bs=512 removable [MBR]
+  [1] part 58.6GiB bs=512 removable [MBR]
+  [2] disk 238.5GiB bs=512 [MBR]
+  [3] part 300.0MiB bs=512 [MBR]
+  [4] part 16.0MiB bs=512 [raw]
+  [5] part 238.2GiB bs=512 [MBR]

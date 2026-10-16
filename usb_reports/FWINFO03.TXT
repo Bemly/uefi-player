@@ -1,0 +1,48 @@
+== FW Collect ==
+cpu: 12th Gen Intel(R) Core(TM) i3-12100F
+cpu simd: AVX-HW YES | AVX2-HW YES | AVX512F-HW no | OSXSAVE no | AVX-usable NO
+-- smbios --
+[BIOS] American Megatrends International, LLC. | FD | date 09/27/2024 | rom 16MB+
+[System] Gigabyte Technology Co., Ltd. | H610M K DDR4 | ver -CF | sn Default string | uuid 03ff0210-04e0-05a7-7306-6c0700080009 | sku Default string | family H610 MB
+[Board] Gigabyte Technology Co., Ltd. | H610M K DDR4 | ver x.x | sn Default string | asset Default string | type Some(MotherBoard)
+[Chassis] Default string | Desktop | ver Default string | sn Default string | asset Default string | boot Some(Safe)
+[Mem] DDR4-A1 | 8192MB | Ddr4 | J8G1B8AA0-USHPC      | 2667MT/s(cfg 2666) | 0x0C83 | sn 00723659 | 1200mV
+[Mem] DDR4-B1 | 8192MB | Ddr4 | J8G1B8AA0-USHPC      | 2667MT/s(cfg 2666) | 0x0C83 | sn 00723652 | 1200mV
+smbios: bios=1 system=1 board=1 chassis=1 memdev=2
+-- pci --
+pci: 1 root bridge(s)
+pci 00:00.0 8086:4630 [Host bridge] subsys 1458:5000 rev 05
+pci 00:01.0 8086:460d [PCI-PCI bridge] subsys 0042:0000 rev 05
+pci 00:14.0 8086:7ae0 [USB XHCI] subsys 1458:5007 rev 11
+pci 00:14.2 8086:7aa7 [Memory ctrl] subsys 0000:0000 rev 11
+pci 00:15.0 8086:7acc [Serial bus] subsys 0000:0000 rev 11
+pci 00:15.1 8086:7acd [Serial bus] subsys 0000:0000 rev 11
+pci 00:15.2 8086:7ace [Serial bus] subsys 0000:0000 rev 11
+pci 00:15.3 8086:7acf [Serial bus] subsys 0000:0000 rev 11
+pci 00:16.0 8086:7ae8 [Comm] subsys 1458:1c3a rev 11
+pci 00:17.0 8086:7ae2 [SATA] subsys 1458:b005 rev 11
+pci 00:19.0 8086:7afc [Serial bus] subsys 0000:0000 rev 11
+pci 00:19.1 8086:7afd [Serial bus] subsys 0000:0000 rev 11
+pci 00:1c.0 8086:7ab8 [PCI-PCI bridge] subsys 0042:0000 rev 11
+pci 00:1c.2 8086:7aba [PCI-PCI bridge] subsys 0000:0000 rev 11
+pci 00:1f.0 8086:7a87 [ISA bridge] subsys 1458:5001 rev 11
+pci 00:1f.3 8086:7ad0 [Audio] subsys 1458:a194 rev 11
+pci 00:1f.4 8086:7aa3 [Serial bus] subsys 1458:5001 rev 11
+pci 00:1f.5 8086:7aa4 [Serial bus] subsys 0000:0000 rev 11
+pci 01:00.0 1ed5:0202 [VGA] subsys 1ed5:0202 rev 00
+pci 01:00.1 1ed5:02ff [Multimedia] subsys 1ed5:02ff rev 00
+pci 03:00.0 10ec:8168 [Network] subsys 1458:e000 rev 15
+pci: 21 function(s) total
+-- block --
+block: 11 handle(s)
+  [0] disk 59.6GiB bs=512 [MBR]
+  [1] disk 298.1GiB bs=512 [MBR]
+  [2] disk 58.6GiB bs=512 removable [MBR]
+  [3] part 58.6GiB bs=512 removable [MBR]
+  [4] part 100.0MiB bs=512 [MBR]
+  [5] part 16.0MiB bs=512 [raw]
+  [6] part 58.8GiB bs=512 [MBR]
+  [7] part 704.0MiB bs=512 [MBR]
+  [8] part 234.1GiB bs=512 [MBR]
+  [9] part 1.0GiB bs=512 [MBR]
+  [10] part 63.0GiB bs=512 [raw]

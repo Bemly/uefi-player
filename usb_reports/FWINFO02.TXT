@@ -1,0 +1,69 @@
+== FW Collect ==
+cpu: AMD Ryzen 7 7735H with Radeon Graphics
+cpu simd: AVX-HW YES | AVX2-HW YES | AVX512F-HW no | OSXSAVE no | AVX-usable NO
+-- smbios --
+[BIOS] American Megatrends International, LLC. | FA617NS.419 | date 11/05/2024 | rom 32MB+
+[System] ASUSTeK COMPUTER INC. | ASUS TUF Gaming A16 FA617NS_FA617NS | ver 1.0 | sn R6NRKD00485523F | uuid 79d113eb-b72d-3e4c-8306-76e0dfbc3fce | sku   | family ASUS TUF Gaming A16
+[Board] ASUSTeK COMPUTER INC. | FA617NS | ver 1.0 | sn CD735M2000C | asset ATN12345678901234567 | type Some(MotherBoard)
+[Chassis] ASUSTeK COMPUTER INC. | Notebook | ver 1.0 | sn R6NRKD00485523F | asset No Asset Tag | boot Some(Safe)
+[Mem] DIMM 0 | 8192MB | Ddr5 | MTC4C10163S1SC48BA1  | 4800MT/s(cfg 4800) | Micron Technology | sn 3AD3331B | 1100mV
+[Mem] DIMM 0 | 8192MB | Ddr5 | MTC4C10163S1SC48BA1  | 4800MT/s(cfg 4800) | Micron Technology | sn 3AD35804 | 1100mV
+smbios: bios=1 system=1 board=1 chassis=1 memdev=2
+-- pci --
+pci: 1 root bridge(s)
+pci 00:00.0 1022:14b5 [Host bridge] subsys 1043:1513 rev 01
+pci 00:00.2 1022:14b6 [System peripheral] subsys 1043:1513 rev 00
+pci 00:01.0 1022:14b7 [Host bridge] subsys 0000:0000 rev 01
+pci 00:01.1 1022:14b8 [PCI-PCI bridge] subsys 007e:0000 rev 00
+pci 00:01.2 1022:14ba [PCI-PCI bridge] subsys 0000:0000 rev 00
+pci 00:02.0 1022:14b7 [Host bridge] subsys 0000:0000 rev 01
+pci 00:02.1 1022:14ba [PCI-PCI bridge] subsys 0000:0000 rev 00
+pci 00:02.2 1022:14ba [PCI-PCI bridge] subsys 0000:0000 rev 00
+pci 00:02.4 1022:14b8 [PCI-PCI bridge] subsys 0000:0000 rev 00
+pci 00:03.0 1022:14b7 [Host bridge] subsys 0000:0000 rev 01
+pci 00:03.1 1022:14cd [PCI-PCI bridge] subsys 007e:0000 rev 00
+pci 00:04.0 1022:14b7 [Host bridge] subsys 0000:0000 rev 01
+pci 00:08.0 1022:14b7 [Host bridge] subsys 0000:0000 rev 01
+pci 00:08.1 1022:14b9 [PCI-PCI bridge] subsys 007e:0000 rev 10
+pci 00:08.3 1022:14b9 [PCI-PCI bridge] subsys 0000:0000 rev 10
+pci 00:14.0 1022:790b [Serial bus] subsys 1043:1513 rev 71
+pci 00:14.3 1022:790e [ISA bridge] subsys 1043:1513 rev 51
+pci 00:18.0 1022:1679 [Host bridge] subsys 0000:0000 rev 00
+pci 00:18.1 1022:167a [Host bridge] subsys 0000:0000 rev 00
+pci 00:18.2 1022:167b [Host bridge] subsys 0000:0000 rev 00
+pci 00:18.3 1022:167c [Host bridge] subsys 0000:0000 rev 00
+pci 00:18.4 1022:167d [Host bridge] subsys 0000:0000 rev 00
+pci 00:18.5 1022:167e [Host bridge] subsys 0000:0000 rev 00
+pci 00:18.6 1022:167f [Host bridge] subsys 0000:0000 rev 00
+pci 00:18.7 1022:1680 [Host bridge] subsys 0000:0000 rev 00
+pci 01:00.0 1002:1478 [PCI-PCI bridge] subsys 007e:0000 rev 12
+pci 02:00.0 1002:1479 [PCI-PCI bridge] subsys 007e:0000 rev 12
+pci 03:00.0 1002:7480 [VGA] subsys 1043:231d rev c3
+pci 03:00.1 1002:ab30 [Audio] subsys 1043:231d rev 00
+pci 04:00.0 1e4b:1202 [NVMe] subsys 1e4b:1202 rev 01
+pci 05:00.0 10ec:8168 [Network] subsys 1043:208f rev 15
+pci 06:00.0 10ec:b852 [Network] subsys 1a3b:5471 rev 00
+pci 07:00.0 15b7:5017 [NVMe] subsys 15b7:5017 rev 01
+pci 78:00.0 1002:1681 [VGA] subsys 1043:231d rev 0a
+pci 78:00.1 1002:1640 [Audio] subsys 1043:231d rev 00
+pci 78:00.2 1022:1649 [class 10:80] subsys 1043:1513 rev 00
+pci 78:00.3 1022:161d [USB XHCI] subsys 1043:20af rev 00
+pci 78:00.4 1022:161e [USB XHCI] subsys 1043:20af rev 00
+pci 78:00.5 1022:15e2 [Multimedia] subsys 1043:1513 rev 60
+pci 78:00.6 1022:15e3 [Audio] subsys 1043:1513 rev 00
+pci 79:00.0 1022:161f [USB XHCI] subsys 1043:20af rev 00
+pci 79:00.3 1022:15d6 [USB XHCI] subsys 1043:20af rev 00
+pci 79:00.4 1022:15d7 [USB XHCI] subsys 1043:20af rev 00
+pci 79:00.5 1022:162e [USB] subsys 1043:20af rev 00
+pci: 44 function(s) total
+-- block --
+block: 9 handle(s)
+  [0] disk 58.6GiB bs=512 removable [MBR]
+  [1] part 58.6GiB bs=512 removable [MBR]
+  [2] disk 476.9GiB bs=512 [MBR]
+  [3] part 476.9GiB bs=512 [MBR]
+  [4] disk 476.9GiB bs=512 [MBR]
+  [5] part 200.0MiB bs=512 [MBR]
+  [6] part 16.0MiB bs=512 [raw]
+  [7] part 475.7GiB bs=512 [MBR]
+  [8] part 1.0GiB bs=512 [MBR]

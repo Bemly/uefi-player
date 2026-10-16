@@ -1,0 +1,28 @@
+== HW Bench ==
+target: x86_64-uefi, opt: release
+cpu: 12th Gen Intel(R) Core(TM) i3-12100F
+cores: total 8 enabled 8
+-- SIMD cpuid --
+  SSE        YES
+  SSE2       YES
+  SSE3       YES
+  SSSE3      YES
+  SSE4.1     YES
+  SSE4.2     YES
+  PCLMULQDQ  YES
+  AES-NI     YES
+  FMA        YES
+  AVX(hw)    YES
+  AVX2(hw)   YES
+  OSXSAVE    no
+xcr0: SKIPPED (no OSXSAVE)
+-- SIMD exec test --
+  SSE2 int add : PASS
+  AVX2 int add : SKIP (need AVX+XCR0+AVX2-hw)
+tsc: 3302440420 ticks/sec
+gop: 1024x768 stride 1024
+screen VideoFill: 96.9 fps (10.32 ms/frame)
+gop BufferToVideo: 97.0 fps, 290.9 MB/s
+gop direct-write: 79.2 MB/s
+memcpy: 18954.1 MB/s (chk=165)
+int ALU: 6330.1 Mops/s (chk=0xbf8)

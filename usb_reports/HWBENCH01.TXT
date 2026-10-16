@@ -1,0 +1,28 @@
+== HW Bench ==
+target: x86_64-uefi, opt: release
+cpu: ZHAOXIN KaiXian KX-6640MA@2.2+GHz
+cores: total 4 enabled 4
+-- SIMD cpuid --
+  SSE        YES
+  SSE2       YES
+  SSE3       YES
+  SSSE3      YES
+  SSE4.1     YES
+  SSE4.2     YES
+  PCLMULQDQ  YES
+  AES-NI     YES
+  FMA        no
+  AVX(hw)    YES
+  AVX2(hw)   no
+  OSXSAVE    no
+xcr0: SKIPPED (no OSXSAVE)
+-- SIMD exec test --
+  SSE2 int add : PASS
+  AVX2 int add : SKIP (need AVX+XCR0+AVX2-hw)
+tsc: 2594843680 ticks/sec
+gop: 1920x1080 stride 1920
+screen VideoFill: 20.2 fps (49.40 ms/frame)
+gop BufferToVideo: 8.6 fps, 67.7 MB/s
+gop direct-write: 329.8 MB/s
+memcpy: 2931.2 MB/s (chk=165)
+int ALU: 1885.7 Mops/s (chk=0xbf8)
