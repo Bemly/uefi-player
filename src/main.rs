@@ -20,6 +20,14 @@ use crate::menu::run_menu;
 fn main() -> Status {
     uefi::helpers::init().expect("Failed to init UEFI");
 
+    // 关固件看门狗：UEFI 规范要求镜像加载后 5 分钟倒计时，到时未
+    // ExitBootServices 就复位机器。菜单 8 全矩阵实测常超过 5 分钟
+    // （QEMU HVF 下已复现无征兆复位），必须在入口立即禁用。
+    // timeout=0 即禁用；部分固件无看门狗会报 UNSUPPORTED，忽略。
+    if uefi::boot::set_watchdog_timer(0, 0x10000, None).is_err() {
+        log::warn!("cfg: no firmware watchdog (or disable failed), continuing");
+    }
+
     // 固件原始 XSAVE 状态必须在任何菜单项（可能自行 enable）之前采一次，
     // 否则报告会被工具自己的 enable 污染。
     diag::common::capture_firmware_osxsave();
