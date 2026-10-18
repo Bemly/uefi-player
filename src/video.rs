@@ -9,7 +9,7 @@ use uefi::{boot, cstr16, CStr16, Status};
 use uefi::proto::console::gop::BltPixel;
 use uefi::proto::media::file::{File, FileInfo, RegularFile};
 use uefi::proto::pi::mp::MpServices;
-use crate::config::{self, CopyWidth};
+use crate::config::{self, CopyWidth, DistMode};
 use crate::fs::Fs;
 use crate::graphics::{Screen, copy_block};
 use crate::video::buffer::{BltFrameBuffer, QoiFrameBuffer, RawFrameBuffer};
@@ -374,9 +374,38 @@ struct PlayTask<'a> {
     tps: u64,
     /// P2 位宽（`config::copy_width` 快照；AP/BSP 同值，见 `copy_block` 门控）。
     copy: u8,
+    /// P2 调度（`config::effective_dist` 快照；tile 时 BSP+AP 从 `tile` 领活）。
+    dist: u8,
+    tile: &'a AtomicUsize,
+    tile_rows: usize,
+    tiles_total: usize,
     /// P3 掉帧指令（BSP 独写、AP 只读；`drop_gen` 是世代号，见循环注释）。
     drop_gen: &'a AtomicUsize,
     drop_flag: &'a AtomicUsize,
+}
+
+/// OSD 行数（顶条）：tile 搬运跳过这些行，AP 不再盖 OSD 字
+///（静态分区遗留行为：AP 全区直盖，OSD 闪烁，见 `player.md`）。
+pub const OSD_ROWS: usize = 20;
+
+/// tile 行区搬运：逐行 `copy_block`（P2 位宽选路），OSD 行由调用方先钳掉。
+/// edition 2024：unsafe fn 体内显式 unsafe 块。
+unsafe fn copy_tile_rows(
+    dst_base: *mut u8,
+    dst_stride: usize,
+    src_frame: *const u8,
+    row_bytes: usize,
+    y0: usize,
+    y1: usize,
+    w: CopyWidth,
+) {
+    unsafe {
+        for y in y0..y1 {
+            let d = dst_base.add(y * dst_stride);
+            let s = src_frame.add(y * row_bytes);
+            copy_block(d, s, row_bytes, w);
+        }
+    }
 }
 
 extern "efiapi" fn play_task(arg: *mut c_void) {
@@ -458,7 +487,8 @@ extern "efiapi" fn play_task(arg: *mut c_void) {
     let mut fps_counter = 0;
     let mut last_sample_ticks = unsafe { core::arch::x86_64::_rdtsc() };
     let stride = (ctx.stride_bytes / 4) as usize;
-    let ui_height = 20;
+    let frame_row_bytes = ctx.width * 4;
+    let ui_height = OSD_ROWS;
     let start_y = ui_height;
     let end_y = (ctx.height / 4) as usize;
     let dst_ptr = ctx.fb_base as *mut u32;
@@ -481,26 +511,58 @@ extern "efiapi" fn play_task(arg: *mut c_void) {
         }
         let fi = (local_frame_idx + skip) % ctx.total_frames.max(1);
         let fstart = rdtsc();
-        // 1. 搬运 (生产)
-        unsafe {
-            if my_id == 0 {
-                // 1. 获取当前帧的源地址（这个不能移出去，因为每帧 index 不同）
-                let src_frame_base = unsafe { *my_frames_list.add(fi) as *const u32 };
-
-                // 2. 镂空搬运（P2 位宽选路，OSD 行区留白由 copy_size 保证）
-                if copy_size > 0 {
-                    copy_block(
-                        unsafe { dst_ptr.add(offset) as *mut u8 },
-                        unsafe { src_frame_base.add(offset) as *const u8 },
-                        copy_size,
+        // 1. 搬运 (生产)：static 按核分区；tile 从共享游标领活
+        //    （`tile` 单调递增，`base = iter*N`，永不回绕；OSD 行跳过）。
+        let tiled = ctx.dist == DistMode::Tile as u8;
+        if tiled {
+            let base = (iter as u64).saturating_mul(ctx.tiles_total as u64);
+            let src_frame_base = unsafe { *my_frames_list.add(fi) as *const u8 };
+            loop {
+                let t = ctx.tile.fetch_add(1, Ordering::SeqCst) as u64;
+                let rel = t.saturating_sub(base) as usize;
+                if rel >= ctx.tiles_total {
+                    break;
+                }
+                let mut ty0 = rel * ctx.tile_rows;
+                let ty1 = (ty0 + ctx.tile_rows).min(ctx.height);
+                if ty0 < OSD_ROWS {
+                    ty0 = OSD_ROWS;
+                }
+                if ty0 >= ty1 {
+                    continue;
+                }
+                unsafe {
+                    copy_tile_rows(
+                        ctx.fb_base,
+                        ctx.stride_bytes,
+                        src_frame_base,
+                        frame_row_bytes,
+                        ty0,
+                        ty1,
                         copy_w,
                     );
                 }
-            }else {
-                let src_ptr = *my_frames_list.add(fi);
-                copy_block(my_fb_ptr, src_ptr, my_block_size, copy_w);
             }
+        } else {
+            unsafe {
+                if my_id == 0 {
+                    // 1. 获取当前帧的源地址（这个不能移出去，因为每帧 index 不同）
+                    let src_frame_base = unsafe { *my_frames_list.add(fi) as *const u32 };
 
+                    // 2. 镂空搬运（P2 位宽选路，OSD 行区留白由 copy_size 保证）
+                    if copy_size > 0 {
+                        copy_block(
+                            unsafe { dst_ptr.add(offset) as *mut u8 },
+                            unsafe { src_frame_base.add(offset) as *const u8 },
+                            copy_size,
+                            copy_w,
+                        );
+                    }
+                }else {
+                    let src_ptr = *my_frames_list.add(fi);
+                    copy_block(my_fb_ptr, src_ptr, my_block_size, copy_w);
+                }
+            }
         }
 
         // 2. 打卡 (原子加法)
@@ -564,14 +626,14 @@ extern "efiapi" fn play_task(arg: *mut c_void) {
 
                 // --- 绘制逻辑 ---
                 let fps_str = format!("FPS: {:>4}", fps);
-                let ft_str  = format!("FT: {:>5} us", ft_us);
-                let mg_str  = format!("Margin: {:>5} us Drop:{}", margin_us, drops_total);
+                let ft_str = format!("FT: {:>5} us", ft_us);
+                let mg_str = format!("Margin: {:>5} us Drop:{}", margin_us, drops_total);
 
                 unsafe {
                     // 并排显示在最顶层 (y=0)
-                    draw_string_opaque(fb, stride, 0,   0, fps_str.as_bytes(), 0x00FF00); // 绿色
-                    draw_string_opaque(fb, stride, 200, 0, ft_str.as_bytes(), 0x00FFFF);  // 青色
-                    draw_string_opaque(fb, stride, 450, 0, mg_str.as_bytes(), 0xFFA500);  // 橙色
+                    draw_string_opaque(fb, stride, 0, 0, fps_str.as_bytes(), 0x00FF00); // 绿色
+                    draw_string_opaque(fb, stride, 200, 0, ft_str.as_bytes(), 0x00FFFF); // 青色
+                    draw_string_opaque(fb, stride, 450, 0, mg_str.as_bytes(), 0xFFA500); // 橙色
                 }
             }
 
@@ -725,6 +787,8 @@ pub fn mp_draw(
     // P3 掉帧世代：gen 预置 0（首轮即就绪），flag 预置 0（不丢）。
     let drop_gen = Box::leak(Box::new(AtomicUsize::new(0)));
     let drop_flag = Box::leak(Box::new(AtomicUsize::new(0)));
+    // P2 tile 游标：单调递增，`base = iter * tiles_total`，永不回绕。
+    let tile = Box::leak(Box::new(AtomicUsize::new(0)));
 
     // --- 构造统一 Context ---
     let ctx = Box::leak(Box::new(PlayTask {
@@ -740,6 +804,10 @@ pub fn mp_draw(
         target_fps: target.unwrap_or(0),
         tps,
         copy: config::copy_width() as u8,
+        dist: config::effective_dist() as u8,
+        tile,
+        tile_rows: crate::graphics::CAL_TILE_ROWS,
+        tiles_total: scr_height.div_ceil(crate::graphics::CAL_TILE_ROWS),
         drop_gen,
         drop_flag,
     }));

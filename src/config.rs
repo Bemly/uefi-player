@@ -10,11 +10,13 @@
 //! [render]
 //! mode    = "auto"        # "auto" | "direct" | "blt"
 //! workers = "auto"        # "auto" | "bsp_only" | "all"（多核开关）
+//! dist    = "auto"        # "auto" | "static" | "tile"（多核分工，只对 direct+all 有效）
 //! vsync   = "auto"        # "auto" | "on" | "off"（软件 60fps 帧预算）
 //! blt_op  = "buffer_to_video"
 //! # 首启校准记忆（固件回写，GUI 只读展示；"auto"/0 = 未测，下次启动必测）：
 //! measured_render  = "auto"  # "direct" | "blt"
 //! measured_workers = "auto"  # "bsp_only" | "all"
+//! measured_dist    = "auto"  # "static" | "tile"
 //! measured_vsync   = "auto"  # "on" | "off"
 //! measured_cores   = 0       # 校准时机型 AP+BSP 总数
 //! [render.tune]
@@ -170,6 +172,35 @@ impl CopyWidth {
     }
 }
 
+/// 多核分工（P2 调度矩阵）：`Static` = 每核固定行区（零调度开销，同构最优）；
+/// `Tile` = 帧切小块（行区），BSP+AP 从原子游标自助领活（异构大小核/负载不均时赢，
+/// 顺带把 OSD 行区划出 tile，AP 不再盖 OSD 字）。`Auto` = 同机实测二选一。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum DistMode {
+    #[default]
+    Auto,
+    Static,
+    Tile,
+}
+
+impl DistMode {
+    fn as_u8(self) -> u8 {
+        match self {
+            Self::Auto => 0,
+            Self::Static => 1,
+            Self::Tile => 2,
+        }
+    }
+    fn from_u8(v: u8) -> Self {
+        match v {
+            1 => Self::Static,
+            2 => Self::Tile,
+            _ => Self::Auto,
+        }
+    }
+}
+
 /// 垂直同步（软件 60fps 帧预算）：开 = 每帧按 60Hz 预算自旋（防撕裂只保证节奏，
 /// GOP 无硬件 vsync）；关 = 只按 `play.fps` 限速。`Auto` = 校准时看冠军路径
 /// 能否零超期跑满 60fps，能则开否则关。
@@ -238,6 +269,7 @@ impl Default for RenderTune {
 pub struct RenderConfig {
     pub mode: RenderMode,
     pub workers: WorkersMode,
+    pub dist: DistMode,
     pub vsync: VsyncMode,
     pub blt_op: BltOpKind,
     pub tune: RenderTune,
@@ -247,6 +279,8 @@ pub struct RenderConfig {
     pub measured_render: RenderMode,
     #[serde(default)]
     pub measured_workers: WorkersMode,
+    #[serde(default)]
+    pub measured_dist: DistMode,
     #[serde(default)]
     pub measured_vsync: VsyncMode,
     /// 校准时机型 AP+BSP 总数（0 = 未测，供矩阵归因/复核）。
@@ -388,12 +422,14 @@ pub fn parse() -> (Config, Option<String>) {
 static ACCEL: AtomicU8 = AtomicU8::new(0);
 static RENDER: AtomicU8 = AtomicU8::new(0);
 static WORKERS: AtomicU8 = AtomicU8::new(0);
+static DIST: AtomicU8 = AtomicU8::new(0);
 static VSYNC: AtomicU8 = AtomicU8::new(0);
 static BLTOP: AtomicU8 = AtomicU8::new(0);
 /// auto 校准记忆（`Auto`/`0` = 未测）：随配置加载，校准后同步更新内存。
 static MEASURED_RENDER: AtomicU8 = AtomicU8::new(0);
 static MEASURED_WORKERS: AtomicU8 = AtomicU8::new(0);
 static MEASURED_VSYNC: AtomicU8 = AtomicU8::new(0);
+static MEASURED_DIST: AtomicU8 = AtomicU8::new(0);
 static MEASURED_CORES: AtomicU32 = AtomicU32::new(0);
 static WALLPAPER_ENABLE: AtomicU8 = AtomicU8::new(0);
 static WALLPAPER_FPS: AtomicU32 = AtomicU32::new(default_wallpaper_fps());
@@ -411,6 +447,8 @@ static RESOLVED_RENDER: AtomicU8 = AtomicU8::new(0);
 static RESOLVED_WORKERS: AtomicU8 = AtomicU8::new(0);
 /// 0 = 未测，1 = on，2 = off（`vsync = "auto"` 的探测结论）
 static RESOLVED_VSYNC: AtomicU8 = AtomicU8::new(0);
+/// 0 = 未测，1 = static，2 = tile（`dist = "auto"` 的矩阵结论）
+static RESOLVED_DIST: AtomicU8 = AtomicU8::new(0);
 /// 硬件实测最大搬运位宽（`CopyWidth` 判别值；0 = 未探，按 X128 保守用）。
 /// `auto` 取它，显式档位超出它会被钳住并警告（不断 boot）。
 static MAX_ACCEL: AtomicU8 = AtomicU8::new(0);
@@ -421,9 +459,11 @@ pub fn load() -> Option<String> {
     ACCEL.store(cfg.accel.level.as_u8(), Ordering::Relaxed);
     RENDER.store(cfg.render.mode.as_u8(), Ordering::Relaxed);
     WORKERS.store(cfg.render.workers.as_u8(), Ordering::Relaxed);
+    DIST.store(cfg.render.dist.as_u8(), Ordering::Relaxed);
     VSYNC.store(cfg.render.vsync.as_u8(), Ordering::Relaxed);
     MEASURED_RENDER.store(cfg.render.measured_render.as_u8(), Ordering::Relaxed);
     MEASURED_WORKERS.store(cfg.render.measured_workers.as_u8(), Ordering::Relaxed);
+    MEASURED_DIST.store(cfg.render.measured_dist.as_u8(), Ordering::Relaxed);
     MEASURED_VSYNC.store(cfg.render.measured_vsync.as_u8(), Ordering::Relaxed);
     MEASURED_CORES.store(cfg.render.measured_cores, Ordering::Relaxed);
     BLTOP.store(cfg.render.blt_op as u8, Ordering::Relaxed);
@@ -442,16 +482,18 @@ pub fn load() -> Option<String> {
     WALLPAPER_FRAMES.store(cfg.wallpaper.frames, Ordering::Relaxed);
     WALLPAPER_PRELOAD.store(cfg.wallpaper.preload.clamp(1, 32).max(1), Ordering::Relaxed);
     log::info!(
-        "cfg: version={} accel.level={:?} render.mode={:?} workers={:?} vsync={:?} blt_op={:?} tune.frames={} measured(render={:?} workers={:?} vsync={:?} cores={}) play.fps={} measured_max_fps={}",
+        "cfg: version={} accel.level={:?} render.mode={:?} workers={:?} dist={:?} vsync={:?} blt_op={:?} tune.frames={} measured(render={:?} workers={:?} dist={:?} vsync={:?} cores={}) play.fps={} measured_max_fps={}",
         cfg.version,
         cfg.accel.level,
         cfg.render.mode,
         cfg.render.workers,
+        cfg.render.dist,
         cfg.render.vsync,
         cfg.render.blt_op,
         cfg.render.tune.frames,
         cfg.render.measured_render,
         cfg.render.measured_workers,
+        cfg.render.measured_dist,
         cfg.render.measured_vsync,
         cfg.render.measured_cores,
         cfg.play.fps,
@@ -501,6 +543,10 @@ pub fn workers_mode() -> WorkersMode {
     WorkersMode::from_u8(WORKERS.load(Ordering::Relaxed))
 }
 
+pub fn dist_mode() -> DistMode {
+    DistMode::from_u8(DIST.load(Ordering::Relaxed))
+}
+
 pub fn vsync_mode() -> VsyncMode {
     VsyncMode::from_u8(VSYNC.load(Ordering::Relaxed))
 }
@@ -511,6 +557,21 @@ pub fn effective_workers() -> WorkersMode {
         WorkersMode::Auto => match RESOLVED_WORKERS.load(Ordering::Relaxed) {
             1 => WorkersMode::BspOnly,
             _ => WorkersMode::All,
+        },
+        explicit => explicit,
+    }
+}
+
+/// 实际生效的分工：直写 + 全核才有意义，其余路径恒返回 `Tile`（无害默认，
+/// 调用方只在 `mp_draw` 里读）。`auto` 用矩阵结论（未测退回 tile）。
+pub fn effective_dist() -> DistMode {
+    if effective_render() != RenderMode::Direct || effective_workers() != WorkersMode::All {
+        return DistMode::Tile;
+    }
+    match dist_mode() {
+        DistMode::Auto => match RESOLVED_DIST.load(Ordering::Relaxed) {
+            1 => DistMode::Static,
+            _ => DistMode::Tile,
         },
         explicit => explicit,
     }
@@ -623,6 +684,9 @@ pub fn measured_render() -> RenderMode {
 pub fn measured_workers() -> WorkersMode {
     WorkersMode::from_u8(MEASURED_WORKERS.load(Ordering::Relaxed))
 }
+pub fn measured_dist() -> DistMode {
+    DistMode::from_u8(MEASURED_DIST.load(Ordering::Relaxed))
+}
 pub fn measured_vsync() -> VsyncMode {
     VsyncMode::from_u8(MEASURED_VSYNC.load(Ordering::Relaxed))
 }
@@ -667,12 +731,23 @@ pub fn needs_render_bench() -> bool {
     {
         return true;
     }
+    // dist 只在“直写 + 全核可能”时有意义：Blt 定死，或 workers 定死 bsp_only
+    // （含 auto 已记忆为 bsp_only），都跳过 dist 维度，否则空转。
+    let dist_in_play = !render_is_blt
+        && workers_mode() != WorkersMode::BspOnly
+        && !(workers_mode() == WorkersMode::Auto && measured_workers() == WorkersMode::BspOnly);
+    if dist_in_play && dist_mode() == DistMode::Auto && measured_dist() == DistMode::Auto {
+        return true;
+    }
     vsync_mode() == VsyncMode::Auto && measured_vsync() == VsyncMode::Auto
 }
 
 /// 把记忆/结论写进运行内存（校准完，或复用盘上记忆时调用）。
 pub fn set_resolved_workers(w: WorkersMode) {
     RESOLVED_WORKERS.store(w.as_u8(), Ordering::Relaxed);
+}
+pub fn set_resolved_dist(d: DistMode) {
+    RESOLVED_DIST.store(d.as_u8(), Ordering::Relaxed);
 }
 pub fn set_resolved_vsync(v: VsyncMode) {
     RESOLVED_VSYNC.store(v.as_u8(), Ordering::Relaxed);
@@ -685,6 +760,9 @@ pub fn apply_measured_render() {
     if measured_workers() != WorkersMode::Auto {
         set_resolved_workers(measured_workers());
     }
+    if measured_dist() != DistMode::Auto {
+        set_resolved_dist(measured_dist());
+    }
     if measured_vsync() != VsyncMode::Auto {
         set_resolved_vsync(measured_vsync());
     }
@@ -695,6 +773,7 @@ pub fn apply_measured_render() {
 pub fn persist_render_measured(
     render: Option<RenderMode>,
     workers: Option<WorkersMode>,
+    dist: Option<DistMode>,
     vsync: Option<VsyncMode>,
     cores: u32,
 ) -> crate::error::Result {
@@ -705,6 +784,10 @@ pub fn persist_render_measured(
     if let Some(w) = workers {
         MEASURED_WORKERS.store(w.as_u8(), Ordering::Relaxed);
         set_resolved_workers(w);
+    }
+    if let Some(d) = dist {
+        MEASURED_DIST.store(d.as_u8(), Ordering::Relaxed);
+        set_resolved_dist(d);
     }
     if let Some(v) = vsync {
         MEASURED_VSYNC.store(v.as_u8(), Ordering::Relaxed);
@@ -723,6 +806,9 @@ pub fn persist_render_measured(
     }
     if let Some(w) = workers {
         cfg.render.measured_workers = w;
+    }
+    if let Some(d) = dist {
+        cfg.render.measured_dist = d;
     }
     if let Some(v) = vsync {
         cfg.render.measured_vsync = v;

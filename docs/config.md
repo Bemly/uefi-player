@@ -14,12 +14,14 @@ level = "auto"          # auto | scalar | sse2 | ssse3 | sse41 | sse42 | avx | a
 [render]
 mode    = "auto"        # auto | direct | blt
 workers = "auto"        # auto | bsp_only | all（只对 direct 有效；Blt 恒单线程）
+dist    = "auto"        # auto | static | tile（多核分工；只对 direct+all 有效）
 vsync   = "auto"        # auto | on | off（软件 60fps 帧预算）
 blt_op  = "buffer_to_video"  # buffer_to_video | video_to_video | video_fill | video_to_blt_buffer
-# 首启校准记忆（固件回写，GUI 只读 + 重校准清零；"auto"/0 = 未测，下次启动必测）：
-measured_render  = "auto"  # direct | blt
-measured_workers = "auto"  # bsp_only | all
-measured_vsync   = "auto"  # on | off
+# 首启校准记忆（固件回写，GUI 只读展示；"auto"/0 = 未测，下次启动必测）：
+measured_render  = "auto"  # "direct" | "blt"
+measured_workers = "auto"  # "bsp_only" | "all"
+measured_dist    = "auto"  # "static" | "tile"
+measured_vsync   = "auto"  # "on" | "off"
 measured_cores   = 0       # 校准时机型 AP+BSP 总数
 
 [render.tune]
@@ -41,6 +43,9 @@ preload = 8             # 预载帧数上限（1-32；1080p BGRA 单帧约 8MB�
 
 - `render.mode=auto`：有记忆复用（快启），无记忆全矩阵校准（direct/blt ×
   BSP/全核 × vsync 探测）并回写 `measured_*`；全显式跳过矩阵。
-- `workers=auto`：直写路 BSP vs 全核取快；Blt 路径忽略本项。
+- `workers=auto`：直写路 BSP 单核 vs 全核取快；Blt 路径忽略本项。
+- `dist=auto`：全核路静态分区 vs tile 自调度取快（tile 按 64 行切块，
+  BSP+AP 从共享游标领活；异构大小核/负载不均时赢；OSD 行划出 tile，
+  AP 不再盖 OSD 字）。单核/Blt 下无意义，不记。
 - `vsync=auto`：冠军路径 60fps 零超期则开，否则关；开 = 播放叠 60fps 帽。
 - `accel.level=auto`：探最高可用位宽；显式档位只管上限语义，实际搬运走位宽。

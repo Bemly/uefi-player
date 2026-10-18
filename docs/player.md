@@ -11,7 +11,11 @@
 
 - `RenderMode::Blt` → `blt_loop`（单线程 GOP Blt）。
 - `direct + bsp_only` → `direct_loop`（BSP 单核直写）。
-- `direct + all` → `mp_draw`（AP/BSP 分核直写，`copy_block` 位宽选路，OSD 镂空）。
+- `direct + all` → `mp_draw`（`copy_block` 位宽选路，OSD 镂空）。
+  分工由 `[render] dist` 定：`static` 按核固定行区（同构核最优）；
+  `tile` 按 64 行切块、BSP+AP 从共享原子游标领活（异构核/负载不均时赢，
+  OSD 行划出 tile，AP 不再盖字——旧 static 路 AP 会盖掉 OSD，属已知瑕疵，
+  保留作扩展比对照）。
 
 ## 格式校验 + 掉帧（P3 闭环项）
 

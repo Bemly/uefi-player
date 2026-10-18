@@ -131,6 +131,27 @@ impl WorkersMode {
     }
 }
 
+/// 多核分工（与固件 `DistMode` 同构；`Tile` = tile 自调度，`Static` = 固定分区）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum DistMode {
+    #[default]
+    Auto,
+    Static,
+    Tile,
+}
+
+impl DistMode {
+    const ALL: [Self; 3] = [Self::Auto, Self::Static, Self::Tile];
+    fn file_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Static => "static",
+            Self::Tile => "tile",
+        }
+    }
+}
+
 /// 垂直同步（与固件 `VsyncMode` 同构；开 = 叠加 60fps 软件帧预算）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -248,6 +269,7 @@ impl Default for RenderTune {
 struct RenderConfig {
     mode: RenderMode,
     workers: WorkersMode,
+    dist: DistMode,
     vsync: VsyncMode,
     blt_op: BltOpKind,
     tune: RenderTune,
@@ -256,6 +278,8 @@ struct RenderConfig {
     measured_render: RenderMode,
     #[serde(default)]
     measured_workers: WorkersMode,
+    #[serde(default)]
+    measured_dist: DistMode,
     #[serde(default)]
     measured_vsync: VsyncMode,
     #[serde(default)]
@@ -387,6 +411,15 @@ fn workers_desc(v: WorkersMode) -> String {
         WorkersMode::Auto => t!("accel.desc_workers_auto"),
         WorkersMode::BspOnly => t!("accel.desc_workers_bsp"),
         WorkersMode::All => t!("accel.desc_workers_all"),
+    }
+    .into_owned()
+}
+
+fn dist_desc(v: DistMode) -> String {
+    match v {
+        DistMode::Auto => t!("accel.desc_dist_auto"),
+        DistMode::Static => t!("accel.desc_dist_static"),
+        DistMode::Tile => t!("accel.desc_dist_tile"),
     }
     .into_owned()
 }
@@ -525,11 +558,12 @@ impl App {
         }
     }
 
-    /// 渲染矩阵记忆行：四项全未测提示切 auto，否则报记忆值 + 校准时机型核数。
+    /// 渲染矩阵记忆行：全未测提示切 auto，否则报记忆值 + 校准时机型核数。
     fn render_measured_line(&self) -> String {
         let m = &self.cfg.render;
         if m.measured_render == RenderMode::Auto
             && m.measured_workers == WorkersMode::Auto
+            && m.measured_dist == DistMode::Auto
             && m.measured_vsync == VsyncMode::Auto
             && m.measured_cores == 0
         {
@@ -538,9 +572,10 @@ impl App {
             t!(
                 "render.measured",
                 v = format!(
-                    "{}/{}/{}, {} cores",
+                    "{}/{}/{}/{}, {} cores",
                     m.measured_render.file_str(),
                     m.measured_workers.file_str(),
+                    m.measured_dist.file_str(),
                     m.measured_vsync.file_str(),
                     m.measured_cores
                 )
@@ -785,6 +820,7 @@ impl App {
         page.label(
             egui::RichText::new(t!("sum.workers", v = self.cfg.render.workers.file_str())).weak(),
         );
+        page.label(egui::RichText::new(t!("sum.dist", v = self.cfg.render.dist.file_str())).weak());
         page.label(
             egui::RichText::new(t!("sum.vsync", v = self.cfg.render.vsync.file_str())).weak(),
         );
@@ -892,6 +928,23 @@ impl App {
                     ui.small(workers_desc(self.cfg.render.workers));
                 }
                 ui.add_space(10.0);
+                ui.label(t!("accel.dist"));
+                // dist 只在直写 + 全核时有意义：Blt 下无 workers 也就无 dist。
+                if self.cfg.render.mode == RenderMode::Blt
+                    || self.cfg.render.workers == WorkersMode::BspOnly
+                {
+                    ui.small(t!("accel.dist_hidden"));
+                } else {
+                    ui.horizontal(|ui| {
+                        for v in DistMode::ALL {
+                            if self.option_button(ui, self.cfg.render.dist == v, v.file_str()) {
+                                self.cfg.render.dist = v;
+                            }
+                        }
+                    });
+                    ui.small(dist_desc(self.cfg.render.dist));
+                }
+                ui.add_space(10.0);
                 ui.label(t!("accel.vsync"));
                 ui.horizontal(|ui| {
                     for v in VsyncMode::ALL {
@@ -910,6 +963,7 @@ impl App {
                         // 清零记忆并存盘：任一 auto 下次启动重校准。
                         self.cfg.render.measured_render = RenderMode::Auto;
                         self.cfg.render.measured_workers = WorkersMode::Auto;
+                        self.cfg.render.measured_dist = DistMode::Auto;
                         self.cfg.render.measured_vsync = VsyncMode::Auto;
                         self.cfg.render.measured_cores = 0;
                         let p = self.path.clone();
@@ -1020,6 +1074,7 @@ impl App {
                     ui.label(t!("sum.blt", v = self.cfg.render.blt_op.file_str()));
                 }
                 ui.label(t!("sum.workers", v = self.cfg.render.workers.file_str()));
+                ui.label(t!("sum.dist", v = self.cfg.render.dist.file_str()));
                 ui.label(t!("sum.vsync", v = self.cfg.render.vsync.file_str()));
                 ui.label(self.render_measured_line());
                 ui.label(t!(
@@ -1143,6 +1198,7 @@ impl eframe::App for App {
                     ui.small(t!("sum.accel", v = self.cfg.accel.level.file_str()));
                     ui.small(t!("sum.render", v = self.cfg.render.mode.file_str()));
                     ui.small(t!("sum.workers", v = self.cfg.render.workers.file_str()));
+                    ui.small(t!("sum.dist", v = self.cfg.render.dist.file_str()));
                     ui.small(t!("sum.vsync", v = self.cfg.render.vsync.file_str()));
                     ui.small(t!("sum.version", v = self.cfg.version));
                 });
@@ -1196,6 +1252,8 @@ mod schema_tests {
         assert!(!cfg.wallpaper.enable);
         assert_eq!(cfg.wallpaper.fps, default_wallpaper_fps());
         assert_eq!(cfg.wallpaper.preload, default_wallpaper_preload());
+        assert_eq!(cfg.render.dist, DistMode::Auto);
+        assert_eq!(cfg.render.measured_dist, DistMode::Auto);
     }
 
     #[test]

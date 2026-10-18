@@ -3,12 +3,12 @@ use alloc::string::{String, ToString};
 use alloc::vec;
 use core::arch::asm;
 use core::ffi::c_void;
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use core::time::Duration;
 use uefi::boot::{create_event, get_handle_for_protocol, open_protocol_exclusive, stall, EventType, ScopedProtocol, Tpl};
 use uefi::proto::console::gop::{BltOp, BltPixel, BltRegion, GraphicsOutput, Mode};
 use uefi::proto::pi::mp::MpServices;
-use crate::config::{self, CopyWidth, RenderMode, VsyncMode, WorkersMode};
+use crate::config::{self, CopyWidth, DistMode, RenderMode, VsyncMode, WorkersMode};
 use crate::error::Result;
 use crate::video::ascii_font::FONT_8X16;
 use crate::video::decoder::VideoMemoryRaw;
@@ -343,11 +343,12 @@ impl Screen {
         Ok(())
     }
 
-    /// `render.mode/workers/vsync = "auto"` 的开机矩阵校准（`\player.toml` 驱动）。
+    /// `render.mode/workers/dist/vsync = "auto"` 的开机矩阵校准（`\player.toml` 驱动）。
     ///
     /// - 首启（任一 auto 无记忆，见 `config::needs_render_bench`）必跑全矩阵：
-    ///   直写 vs Blt 取快；直写路再比 BSP 单核 vs 全核并行；冠军路按 60fps
-    ///   预算跑一遍，零超期则 vsync 开否则关。
+    ///   直写 vs Blt 取快；直写路再比 BSP 单核 vs 全核并行，全核路再比
+    ///   静态分区 vs tile 自调度；冠军路按 60fps 预算跑一遍，
+    ///   零超期则 vsync 开否则关。
     /// - 全核 cell 用 AP 常驻循环 + 轮次同步（`gop_bench` 方法论：单发 startup
     ///   测到的是 SIPI 唤醒开销而非扩展性，必须常驻 + 热身吸收后再计时）。
     /// - 同组变体轮转交替计时（`gop_simd` 方法论：杀时间漂移），结论写回
@@ -357,9 +358,10 @@ impl Screen {
         if !config::needs_render_bench() {
             config::apply_measured_render();
             log::info!(
-                "render auto: reuse measured render={:?} workers={:?} vsync={:?} cores={}",
+                "render auto: reuse measured render={:?} workers={:?} dist={:?} vsync={:?} cores={}",
                 config::measured_render(),
                 config::measured_workers(),
+                config::measured_dist(),
                 config::measured_vsync(),
                 config::measured_cores(),
             );
@@ -401,6 +403,19 @@ impl Screen {
         };
         let probe_vsync =
             config::vsync_mode() == VsyncMode::Auto && config::measured_vsync() == VsyncMode::Auto;
+        // dist 只在“直写 + 全核可能”时有意义（Blt/单核下忽略，免空转）。
+        let mp_all_in_play =
+            direct_in_play && (probe_workers || fixed_workers == Some(WorkersMode::All));
+        let probe_dist = mp_all_in_play
+            && config::dist_mode() == DistMode::Auto
+            && config::measured_dist() == DistMode::Auto;
+        let fixed_dist = if probe_dist {
+            None
+        } else if config::dist_mode() == DistMode::Auto {
+            Some(config::measured_dist())
+        } else {
+            Some(config::dist_mode())
+        };
 
         // ---- MP 会话（全核 cell / 全核冠军的 vsync 探测共用，用完即退） ----
         let mut mp_store = None;
@@ -418,6 +433,9 @@ impl Screen {
         // AP 常驻会话（栈上 ctx + 轮次号驱动，方法论见 gop_bench 计时轮）。
         let cal_round = AtomicUsize::new(0);
         let cal_done = AtomicUsize::new(0);
+        // tile 游标 + 模式开关（static/tile 双 cell 共用一个会话，轮次间翻转）。
+        let cal_mode = AtomicU8::new(0);
+        let cal_tile = AtomicUsize::new(0);
         let mut mp_drive: Option<MpDrive> = None;
         if want_mp {
             if let Some(mp) = mp_store.as_deref() {
@@ -433,6 +451,10 @@ impl Screen {
                     n: n_cores,
                     round: &cal_round,
                     done: &cal_done,
+                    mode: &cal_mode,
+                    tile: &cal_tile,
+                    tile_rows: CAL_TILE_ROWS,
+                    tiles_total: h.div_ceil(CAL_TILE_ROWS),
                 };
                 // ctx 必须活到 AP 退场：Box 漏存，函数尾 QUIT + stall 后不再访问。
                 let arg_ptr = Box::leak(Box::new(ctx)) as *mut _ as *mut c_void;
@@ -450,11 +472,16 @@ impl Screen {
                                 fb_stride,
                                 src: pixels.as_ptr() as *const u8,
                                 row_bytes: w * 4,
+                                height: h,
                                 bsp_y0: by0,
                                 bsp_y1: by1,
                                 expected: n_cores.saturating_sub(1),
                                 round: &cal_round,
                                 done: &cal_done,
+                                mode: &cal_mode,
+                                tile: &cal_tile,
+                                tile_rows: CAL_TILE_ROWS,
+                                tiles_total: h.div_ceil(CAL_TILE_ROWS),
                                 next: 0,
                                 tps,
                             });
@@ -479,12 +506,19 @@ impl Screen {
         let time_blt = fixed_render.map(|m| m == RenderMode::Blt).unwrap_or(true);
         let time_mp =
             mp_drive.is_some() && (probe_workers || fixed_workers == Some(WorkersMode::All));
-        // 多核热身 1 轮（吸收 AP 唤醒延迟，不计时）。
-        if time_mp {
-            mp_drive.as_mut().expect("mp drive").warmup();
+        // static/tile 双 cell：只测需要的（auto 全测，显式只测选中的）。
+        let time_static = time_mp && (probe_dist || fixed_dist == Some(DistMode::Static));
+        let time_tile = time_mp && (probe_dist || fixed_dist == Some(DistMode::Tile));
+        // 多核热身各 1 轮（吸收 AP 唤醒延迟，不计时）。
+        if time_static {
+            mp_drive.as_mut().expect("mp drive").warmup_static();
+        }
+        if time_tile {
+            mp_drive.as_mut().expect("mp drive").warmup_tiled();
         }
         let mut acc_direct = 0u64;
-        let mut acc_mp = 0u64;
+        let mut acc_static = 0u64;
+        let mut acc_tile = 0u64;
         let mut acc_blt = 0u64;
         for _ in 0..frames {
             if time_direct {
@@ -492,15 +526,32 @@ impl Screen {
                 let _ = self.upload_direct(w, h, &pixels);
                 acc_direct += tsc().saturating_sub(t);
             }
-            if time_mp {
+            if time_static {
                 let t = tsc();
                 let ok = mp_drive.as_mut().expect("mp drive").run_round();
                 let dt = tsc().saturating_sub(t);
                 if ok {
-                    acc_mp += dt;
+                    acc_static += dt;
                 } else {
-                    // 熔断：本轮 AP 没跟上，该 cell 作废并退回单核。
-                    acc_mp = 0;
+                    // 熔断：本轮 AP 没跟上，会话作废，两个 MP cell 全退回单核。
+                    acc_static = 0;
+                    acc_tile = 0;
+                    mp_drive = None;
+                    break;
+                }
+            }
+            if time_tile {
+                let Some(drive) = mp_drive.as_mut() else {
+                    break;
+                };
+                let t = tsc();
+                let ok = drive.run_round_tiled();
+                let dt = tsc().saturating_sub(t);
+                if ok {
+                    acc_tile += dt;
+                } else {
+                    acc_static = 0;
+                    acc_tile = 0;
                     mp_drive = None;
                     break;
                 }
@@ -511,20 +562,34 @@ impl Screen {
                 acc_blt += tsc().saturating_sub(t);
             }
         }
-        let time_mp = time_mp && mp_drive.is_some();
+        let mp_alive = mp_drive.is_some();
+        let time_static = time_static && mp_alive;
+        let time_tile = time_tile && mp_alive;
 
         // ---- 决胜 ----
         // 直写冠军：多核 cell 跳过/失败则退回单核。
-        let mp_valid = time_mp && acc_mp > 0;
-        let direct_ticks = if mp_valid && acc_mp < acc_direct {
-            acc_mp
-        } else {
-            acc_direct
-        };
+        let static_valid = time_static && acc_static > 0;
+        let tile_valid = time_tile && acc_tile > 0;
+        let mut direct_ticks = if time_direct { acc_direct } else { u64::MAX };
+        if static_valid {
+            direct_ticks = direct_ticks.min(acc_static);
+        }
+        if tile_valid {
+            direct_ticks = direct_ticks.min(acc_tile);
+        }
+        // 只在“计时且有效”的 cell 里取最小（未测的 acc 为 0，不能参与 min）。
+        let mut mp_best_ticks = u64::MAX;
+        if static_valid {
+            mp_best_ticks = mp_best_ticks.min(acc_static.max(1));
+        }
+        if tile_valid {
+            mp_best_ticks = mp_best_ticks.min(acc_tile.max(1));
+        }
+        let mp_best = mp_best_ticks != u64::MAX;
         let winner_workers = if !direct_in_play {
             WorkersMode::BspOnly // Blt 路径恒单线程，workers 无意义
         } else if probe_workers {
-            if mp_valid && acc_mp < acc_direct {
+            if mp_best && mp_best_ticks < acc_direct.max(1) {
                 WorkersMode::All
             } else {
                 WorkersMode::BspOnly
@@ -541,9 +606,38 @@ impl Screen {
         } else {
             fixed_render.unwrap_or(RenderMode::Direct)
         };
+        // 多核分工：Blt/single 下无意义不记；显式值直接采用。
+        let winner_dist =
+            if winner_render != RenderMode::Direct || winner_workers != WorkersMode::All {
+                DistMode::Tile // 无害默认，实际不用（effective_dist 短路）
+            } else if probe_dist {
+                match (static_valid, tile_valid) {
+                    (true, true) => {
+                        if acc_tile <= acc_static {
+                            DistMode::Tile
+                        } else {
+                            DistMode::Static
+                        }
+                    }
+                    (true, false) => DistMode::Static,
+                    _ => DistMode::Tile,
+                }
+            } else {
+                fixed_dist.unwrap_or(DistMode::Tile)
+            };
         // Blt 冠军吞掉 workers 记忆（无意义，不记，避免误导）。
         let persist_workers = if winner_render == RenderMode::Direct && probe_workers {
             Some(winner_workers)
+        } else {
+            None
+        };
+        // 单核冠军 / MP 全失败吞掉 dist 记忆（无实测不记，避免误导）。
+        let persist_dist = if winner_render == RenderMode::Direct
+            && winner_workers == WorkersMode::All
+            && probe_dist
+            && (static_valid || tile_valid)
+        {
+            Some(winner_dist)
         } else {
             None
         };
@@ -558,11 +652,14 @@ impl Screen {
                 let use_mp = winner_render == RenderMode::Direct
                     && winner_workers == WorkersMode::All
                     && mp_drive.is_some();
+                let use_tile = use_mp && winner_dist == DistMode::Tile;
                 for _ in 0..frames {
                     let fstart = tsc();
                     let mut frame_over = false;
                     if winner_render == RenderMode::Blt {
                         let _ = self.upload_blt(w, h, &pixels);
+                    } else if use_tile {
+                        frame_over = !mp_drive.as_mut().expect("mp drive").run_round_tiled();
                     } else if use_mp {
                         frame_over = !mp_drive.as_mut().expect("mp drive").run_round();
                     } else {
@@ -597,27 +694,37 @@ impl Screen {
         drop(mp_drive);
         stall(Duration::from_millis(50));
 
+        let cell_str = |timed: bool, acc: u64| {
+            if timed && acc > 0 {
+                acc.to_string()
+            } else {
+                String::from("SKIP")
+            }
+        };
         log::info!(
-            "render auto: direct_bsp {} ticks vs direct_all {} vs blt {} ({} frames, {} cores) -> render={:?} workers={:?} vsync={:?} (overruns {}/{})",
-            acc_direct,
-            if mp_valid {
-                acc_mp.to_string()
+            "render auto: direct_bsp {} ticks vs mp_static {} vs mp_tile {} vs blt {} ({} frames, {} cores) -> render={:?} workers={:?} dist={:?} vsync={:?} (overruns {}/{})",
+            if time_direct {
+                acc_direct.to_string()
             } else {
                 String::from("SKIP")
             },
-            acc_blt,
+            cell_str(time_static, acc_static),
+            cell_str(time_tile, acc_tile),
+            cell_str(time_blt, acc_blt),
             frames,
             n_cores,
             winner_render,
             winner_workers,
+            winner_dist,
             winner_vsync,
             overruns,
             if probe_vsync { frames } else { 0 },
         );
         self.draw_str(&alloc::format!(
-            "render auto: {:?}/{:?}/vsync {:?} ({} cores)",
+            "render auto: {:?}/{:?}/{:?}/vsync {:?} ({} cores)",
             winner_render,
             winner_workers,
+            winner_dist,
             winner_vsync,
             n_cores
         ));
@@ -625,6 +732,7 @@ impl Screen {
         if let Err(e) = config::persist_render_measured(
             probe_render.then_some(winner_render),
             persist_workers,
+            persist_dist,
             probe_vsync.then_some(winner_vsync),
             n_cores as u32,
         ) {
@@ -659,6 +767,13 @@ pub(crate) fn calibrate_tps() -> u64 {
 /// AP 退场哨兵：BSP 写 QUIT 后 AP 跳出常驻循环（同 `gop_bench::FILL_QUIT` 做法）。
 const CAL_QUIT: usize = usize::MAX;
 
+/// tile 高度（行）：1080p 切 17 块，BSP+AP 自助领取（见 `video::play_task` 同构实现）。
+pub(crate) const CAL_TILE_ROWS: usize = 64;
+
+/// 模式：0 = 静态分区（每核固定行区），1 = tile 自调度（原子游标领活）。
+const CAL_MODE_STATIC: u8 = 0;
+const CAL_MODE_TILED: u8 = 1;
+
 struct MpCalCtx<'a> {
     mp: &'a MpServices,
     fb_base: *mut u8,
@@ -669,9 +784,14 @@ struct MpCalCtx<'a> {
     n: usize,
     round: &'a AtomicUsize,
     done: &'a AtomicUsize,
+    mode: &'a AtomicU8,
+    tile: &'a AtomicUsize,
+    tile_rows: usize,
+    tiles_total: usize,
 }
 
-/// AP 常驻循环：等新轮次号，拷自己行区，打卡。BSP 发 QUIT 后退出。
+/// AP 常驻循环：等新轮次号，按本轮模式拷（静态分区 / tile 游标领活），打卡。
+/// BSP 发 QUIT 后退出。mode 由 BSP 在发布轮次号前写好（SeqCst，先 mode 后 round）。
 extern "efiapi" fn ap_cal_copy(arg: *mut c_void) {
     if arg.is_null() {
         return;
@@ -690,36 +810,63 @@ extern "efiapi" fn ap_cal_copy(arg: *mut c_void) {
             continue;
         }
         my_round = g;
-        unsafe { copy_rows_cal(ctx.fb_base, ctx.fb_stride, ctx.src, ctx.row_bytes, y0, y1) };
+        if ctx.mode.load(Ordering::Acquire) == CAL_MODE_TILED {
+            let base = (g as u64).saturating_mul(ctx.tiles_total as u64);
+            loop {
+                let t = ctx.tile.fetch_add(1, Ordering::SeqCst) as u64;
+                let rel = t.saturating_sub(base) as usize;
+                if rel >= ctx.tiles_total {
+                    break;
+                }
+                let ty0 = rel * ctx.tile_rows;
+                let ty1 = (ty0 + ctx.tile_rows).min(ctx.height);
+                unsafe {
+                    copy_rows_cal(ctx.fb_base, ctx.fb_stride, ctx.src, ctx.row_bytes, ty0, ty1)
+                };
+            }
+        } else {
+            unsafe { copy_rows_cal(ctx.fb_base, ctx.fb_stride, ctx.src, ctx.row_bytes, y0, y1) };
+        }
         ctx.done.fetch_add(1, Ordering::SeqCst);
     }
 }
 
-/// BSP 侧驱动器：发轮次号 → 拷自己行区 → 等 AP 打卡齐（单轮 5 秒熔断）。
+/// BSP 侧驱动器：发轮次号 → 拷自己份（分区/领活）→ 等 AP 打卡齐（单轮 5 秒熔断）。
 struct MpDrive<'a> {
     fb_base: *mut u8,
     fb_stride: usize,
     src: *const u8,
     row_bytes: usize,
+    height: usize,
     bsp_y0: usize,
     bsp_y1: usize,
     expected: usize,
     round: &'a AtomicUsize,
     done: &'a AtomicUsize,
+    mode: &'a AtomicU8,
+    tile: &'a AtomicUsize,
+    tile_rows: usize,
+    tiles_total: usize,
     next: usize,
     tps: u64,
 }
 
 impl MpDrive<'_> {
-    /// 热身 1 轮（吸收 AP 唤醒延迟，不计时）。
-    fn warmup(&mut self) {
+    /// 热身 1 轮静态分区（吸收 AP 唤醒延迟，不计时）。
+    fn warmup_static(&mut self) {
         let _ = self.run_round();
     }
 
-    /// 跑一轮，返回是否全员跟上（false = 熔断，调用方作废该 cell）。
+    /// 热身 1 轮 tile（同上）。
+    fn warmup_tiled(&mut self) {
+        let _ = self.run_round_tiled();
+    }
+
+    /// 跑一轮静态分区，返回是否全员跟上（false = 熔断，调用方作废 MP 双 cell）。
     fn run_round(&mut self) -> bool {
         self.next += 1;
         let r = self.next;
+        self.mode.store(CAL_MODE_STATIC, Ordering::SeqCst);
         self.round.store(r, Ordering::SeqCst);
         unsafe {
             copy_rows_cal(
@@ -731,6 +878,41 @@ impl MpDrive<'_> {
                 self.bsp_y1,
             )
         };
+        self.wait_done(r)
+    }
+
+    /// 跑一轮 tile 自调度（游标按轮次编址 `[r*N, (r+1)*N)`，BSP 也领活）。
+    fn run_round_tiled(&mut self) -> bool {
+        self.next += 1;
+        let r = self.next;
+        let base = (r as u64).saturating_mul(self.tiles_total as u64);
+        self.tile.store(base as usize, Ordering::SeqCst);
+        self.mode.store(CAL_MODE_TILED, Ordering::SeqCst);
+        self.round.store(r, Ordering::SeqCst);
+        loop {
+            let t = self.tile.fetch_add(1, Ordering::SeqCst) as u64;
+            let rel = t.saturating_sub(base) as usize;
+            if rel >= self.tiles_total {
+                break;
+            }
+            let y0 = rel * self.tile_rows;
+            let y1 = (y0 + self.tile_rows).min(self.height);
+            unsafe {
+                copy_rows_cal(
+                    self.fb_base,
+                    self.fb_stride,
+                    self.src,
+                    self.row_bytes,
+                    y0,
+                    y1,
+                )
+            };
+        }
+        self.wait_done(r)
+    }
+
+    /// 等本轮 AP 打卡齐（5 秒熔断）。
+    fn wait_done(&self, r: usize) -> bool {
         let target = r.saturating_mul(self.expected);
         let deadline = tsc().saturating_add(5 * self.tps.max(1));
         while self.done.load(Ordering::Acquire) < target {
@@ -790,8 +972,7 @@ unsafe fn copy_block_u64(dst: *mut u8, src: *const u8, len: usize) {
     unsafe {
         let mut i = 0;
         while i + 8 <= len {
-            (dst.add(i) as *mut u64)
-                .write((src.add(i) as *const u64).read_unaligned());
+            (dst.add(i) as *mut u64).write((src.add(i) as *const u64).read_unaligned());
             i += 8;
         }
         while i < len {
