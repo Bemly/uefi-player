@@ -9,9 +9,9 @@ use uefi::{boot, cstr16, CStr16, Status};
 use uefi::proto::console::gop::BltPixel;
 use uefi::proto::media::file::{File, FileInfo, RegularFile};
 use uefi::proto::pi::mp::MpServices;
-use crate::config;
+use crate::config::{self, CopyWidth};
 use crate::fs::Fs;
-use crate::graphics::Screen;
+use crate::graphics::{Screen, copy_block};
 use crate::video::buffer::{BltFrameBuffer, QoiFrameBuffer, RawFrameBuffer};
 use crate::video::decoder::{VideoMemory, VideoMemoryRaw};
 use crate::error::Result;
@@ -40,14 +40,39 @@ fn calibrate_tps() -> u64 {
     rdtsc().saturating_sub(s).saturating_mul(10).max(1)
 }
 
-/// 限速到目标帧率：从帧起始自旋到预算。`None` = 不限速（max 模式）。
-#[inline]
-fn pace_frame(fstart: u64, tps: u64, target: Option<u32>) {
-    if let Some(fps) = target {
-        let budget = tps.max(1) / fps.max(1) as u64;
+/// 限速 + 掉帧（P3，单线程路）：帧内耗时超预算先自旋补齐；迟到超出一整帧则
+/// 丢帧追赶（最多连丢 2 帧防雪崩）。记数只走串口（屏显不刷，不污染画面）。
+fn pace_or_drop(
+    video: &mut VideoMemoryRaw,
+    target: Option<u32>,
+    tps: u64,
+    fstart: u64,
+    drops: &mut u64,
+) {
+    let Some(fps) = target else { return };
+    let budget = tps.max(1) / fps.max(1) as u64;
+    let dt = rdtsc().saturating_sub(fstart);
+    if dt <= budget {
         while rdtsc().saturating_sub(fstart) < budget {
             core::hint::spin_loop();
         }
+        return;
+    }
+    let mut late = dt - budget;
+    let mut n = 0;
+    while late >= budget && n < 2 {
+        match video.next_frame() {
+            Some(_) => *drops += 1,
+            None => {
+                video.rewind();
+                break;
+            }
+        }
+        late = late.saturating_sub(budget);
+        n += 1;
+    }
+    if *drops > 0 && *drops % 512 == 0 {
+        log::warn!("play: dropped {} frames total (late)", *drops);
     }
 }
 
@@ -141,13 +166,14 @@ fn blt_loop(
     tps: u64,
 ) -> Result {
     let mut video = VideoMemoryRaw::new(file)?;
+    let mut drops = 0u64;
     loop {
         let fstart = rdtsc();
         match video.next_frame() {
             Some(frame) => screen.upload_frame(width, height, frame)?,
             None => video.rewind(),
         }
-        pace_frame(fstart, tps, target);
+        pace_or_drop(&mut video, target, tps, fstart, &mut drops);
     }
 }
 
@@ -163,13 +189,14 @@ fn direct_loop(
     tps: u64,
 ) -> Result {
     let mut video = VideoMemoryRaw::new(file)?;
+    let mut drops = 0u64;
     loop {
         let fstart = rdtsc();
         match video.next_frame() {
             Some(frame) => screen.upload_frame(width, height, frame)?,
             None => video.rewind(),
         }
-        pace_frame(fstart, tps, target);
+        pace_or_drop(&mut video, target, tps, fstart, &mut drops);
     }
 }
 
@@ -340,6 +367,11 @@ struct PlayTask<'a> {
     sync_counter: &'a AtomicUsize, // 关键：原子计数器
     target_fps: u32, // 0 = 不限速（max 模式）
     tps: u64,
+    /// P2 位宽（`config::copy_width` 快照；AP/BSP 同值，见 `copy_block` 门控）。
+    copy: u8,
+    /// P3 掉帧指令（BSP 独写、AP 只读；`drop_gen` 是世代号，见循环注释）。
+    drop_gen: &'a AtomicUsize,
+    drop_flag: &'a AtomicUsize,
 }
 
 extern "efiapi" fn play_task(arg: *mut c_void) {
@@ -362,6 +394,11 @@ extern "efiapi" fn play_task(arg: *mut c_void) {
 
     let mut local_frame_idx = 0;
     let n_cores = ctx.num_cores;
+    // P2：本核搬运位宽（快照自 boot 时 `resolve_accel`，全核一致）。
+    let copy_w = CopyWidth::from_u8(ctx.copy);
+    // P3：掉帧迭代计数 + BSP 侧累计（确定性：全核读同一发布值，见下）。
+    let mut iter: usize = 0;
+    let mut drops_total: u64 = 0;
     // 初始化第一个目标值：第一帧写完时，计数器应该达到 n_cores
     let mut my_next_target = n_cores;
 
@@ -425,26 +462,38 @@ extern "efiapi" fn play_task(arg: *mut c_void) {
     let offset = start_y * stride;
     let copy_size = if end_y > start_y { (end_y - start_y) * stride } else { 0 };
     loop {
+        // 0. 取本轮掉帧指令（P3 确定性设计）：
+        //    BSP 在上轮末尾发布 `(drop_gen = iter, drop_flag)`，AP 自旋等到可见再开工。
+        //    首轮 gen 预置 0 即就绪。逐核按自家时钟判迟早会发散（栅栏 skew），
+        //    所以只有 BSP 的判定算数，全核执行同一结论，索引永不发散。
+        //    max 模式（target=0）不发布、固定不丢（flag 恒 0）。
+        let mut skip = 0usize;
+        if ctx.target_fps > 0 {
+            while ctx.drop_gen.load(Ordering::Acquire) < iter {
+                core::hint::spin_loop();
+            }
+            skip = ctx.drop_flag.load(Ordering::Acquire).min(1);
+        }
+        let fi = (local_frame_idx + skip) % ctx.total_frames.max(1);
         let fstart = rdtsc();
         // 1. 搬运 (生产)
         unsafe {
             if my_id == 0 {
                 // 1. 获取当前帧的源地址（这个不能移出去，因为每帧 index 不同）
-                let src_frame_base = unsafe { *my_frames_list.add(local_frame_idx) as *const u32 };
+                let src_frame_base = unsafe { *my_frames_list.add(fi) as *const u32 };
 
-                // 2. 镂空搬运
+                // 2. 镂空搬运（P2 位宽选路，OSD 行区留白由 copy_size 保证）
                 if copy_size > 0 {
-                    unsafe {
-                        core::ptr::copy_nonoverlapping(
-                            src_frame_base.add(offset), // 基于当前帧地址偏移
-                            dst_ptr.add(offset),        // 基于显存地址偏移
-                            copy_size
-                        );
-                    }
+                    copy_block(
+                        unsafe { dst_ptr.add(offset) as *mut u8 },
+                        unsafe { src_frame_base.add(offset) as *const u8 },
+                        copy_size,
+                        copy_w,
+                    );
                 }
             }else {
-                let src_ptr = *my_frames_list.add(local_frame_idx);
-                core::ptr::copy_nonoverlapping(src_ptr, my_fb_ptr, my_block_size);
+                let src_ptr = *my_frames_list.add(fi);
+                copy_block(my_fb_ptr, src_ptr, my_block_size, copy_w);
             }
 
         }
@@ -459,12 +508,26 @@ extern "efiapi" fn play_task(arg: *mut c_void) {
             core::hint::spin_loop();
         }
 
-        // 3.5 限速：栅栏刚对齐过，各核按同一预算自旋（漂移可忽略）。
-        // BSP 不特殊处理——它慢下来 AP 也会在下轮栅栏处等齐，整管线自然限速。
+        // 3.5 限速 + 下轮掉帧指令发布：栅栏刚对齐过，各核按同一预算自旋。
+        // BSP 判迟（本轮耗时超 2 倍预算 → 下轮丢 1 帧追赶），独写发布；
+        // AP 只等 gen 可见。BSP 不等（自己刚发布），AP 等（发布必达，无死锁：
+        // BSP 发布前不依赖 AP，AP 等待前已过本轮栅栏）。
         if ctx.target_fps > 0 {
             let budget = ctx.tps.max(1) / ctx.target_fps.max(1) as u64;
             while rdtsc().saturating_sub(fstart) < budget {
                 core::hint::spin_loop();
+            }
+            if my_id == 0 {
+                let late = rdtsc().saturating_sub(fstart) > budget.saturating_mul(2);
+                if late {
+                    drops_total += 1;
+                }
+                ctx.drop_flag.store(late as usize, Ordering::SeqCst);
+                ctx.drop_gen.store(iter + 1, Ordering::SeqCst);
+            } else {
+                while ctx.drop_gen.load(Ordering::Acquire) < iter + 1 {
+                    core::hint::spin_loop();
+                }
             }
         }
 
@@ -497,7 +560,7 @@ extern "efiapi" fn play_task(arg: *mut c_void) {
                 // --- 绘制逻辑 ---
                 let fps_str = format!("FPS: {:>4}", fps);
                 let ft_str  = format!("FT: {:>5} us", ft_us);
-                let mg_str  = format!("Margin: {:>5} us", margin_us);
+                let mg_str  = format!("Margin: {:>5} us Drop:{}", margin_us, drops_total);
 
                 unsafe {
                     // 并排显示在最顶层 (y=0)
@@ -512,10 +575,9 @@ extern "efiapi" fn play_task(arg: *mut c_void) {
 
         // 5. 为下一轮做准备 (全是加法)
         my_next_target += n_cores;
-        local_frame_idx += 1;
-        if local_frame_idx >= ctx.total_frames {
-            local_frame_idx  = 0;
-        }
+        // fi 已含本轮 skip，下一起点顺延（全核同公式，永不发散）。
+        local_frame_idx = (fi + 1) % ctx.total_frames.max(1);
+        iter += 1;
     }
 }
 
@@ -556,6 +618,7 @@ pub fn mp_draw(
 
     // 原始单帧空间初始化
     let mut single_raw: Frame = vec![0u8; width * height * 4];
+    let mut skipped = 0u32;
     // 文件末尾越界保护
     while offset + 4 <= compressed_buffer.len() {
         let len_bytes = &compressed_buffer[offset..offset + 4];
@@ -569,7 +632,9 @@ pub fn mp_draw(
         // 获取当前Qoi帧
         let frame_data = &compressed_buffer[data_start..next_frame_pos];
 
+        // 错位闭环：坏帧记数跳过（曾无限静默丢帧，见 decoder.rs）。
         if qoi::decode_to_buf(&mut single_raw, frame_data).is_err() {
+            skipped += 1;
             offset = next_frame_pos;
             continue
         }
@@ -618,6 +683,17 @@ pub fn mp_draw(
         offset = next_frame_pos;
     }
 
+    // 空集守卫：全坏文件直接报错，不进“AP 读空指针 + 无限循环”（曾 OOB）。
+    if core_frames[0].is_empty() {
+        return Err(crate::error::NyaStatus::_Debug(alloc::format!(
+            "video: no valid frames ({} skipped)",
+            skipped
+        )));
+    }
+    if skipped > 0 {
+        log::warn!("video: mp predecoded {} frames, skipped {} bad", core_frames[0].len(), skipped);
+    }
+
     // 2 构造参数
     let stride_bytes = scr_stride * 4;
 
@@ -637,6 +713,9 @@ pub fn mp_draw(
     let fb_base = screen.get_gop().frame_buffer().as_mut_ptr();
 
     let sync_counter = Box::leak(Box::new(AtomicUsize::new(0)));
+    // P3 掉帧世代：gen 预置 0（首轮即就绪），flag 预置 0（不丢）。
+    let drop_gen = Box::leak(Box::new(AtomicUsize::new(0)));
+    let drop_flag = Box::leak(Box::new(AtomicUsize::new(0)));
 
     // --- 构造统一 Context ---
     let ctx = Box::leak(Box::new(PlayTask {
@@ -651,6 +730,9 @@ pub fn mp_draw(
         sync_counter,
         target_fps: target.unwrap_or(0),
         tps,
+        copy: config::copy_width() as u8,
+        drop_gen,
+        drop_flag,
     }));
 
     let arg_ptr = ctx as *mut _ as *mut c_void;

@@ -147,6 +147,29 @@ impl WorkersMode {
     }
 }
 
+/// 帧搬运位宽（P2 真分发的落点）：`accel.level` 只管“档位语义”，
+/// 真正上屏/播放走这个位宽。128 位档（SSE2~SSE4.2）同宽，AVX 是 VEX-128。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CopyWidth {
+    U64 = 1,
+    X128 = 2,
+    V128 = 3,
+    Y256 = 4,
+    Z512 = 5,
+}
+
+impl CopyWidth {
+    pub(crate) fn from_u8(v: u8) -> Self {
+        match v {
+            5 => Self::Z512,
+            4 => Self::Y256,
+            3 => Self::V128,
+            2 | 0 => Self::X128,
+            _ => Self::U64,
+        }
+    }
+}
+
 /// 垂直同步（软件 60fps 帧预算）：开 = 每帧按 60Hz 预算自旋（防撕裂只保证节奏，
 /// GOP 无硬件 vsync）；关 = 只按 `play.fps` 限速。`Auto` = 校准时看冠军路径
 /// 能否零超期跑满 60fps，能则开否则关。
@@ -388,6 +411,9 @@ static RESOLVED_RENDER: AtomicU8 = AtomicU8::new(0);
 static RESOLVED_WORKERS: AtomicU8 = AtomicU8::new(0);
 /// 0 = 未测，1 = on，2 = off（`vsync = "auto"` 的探测结论）
 static RESOLVED_VSYNC: AtomicU8 = AtomicU8::new(0);
+/// 硬件实测最大搬运位宽（`CopyWidth` 判别值；0 = 未探，按 X128 保守用）。
+/// `auto` 取它，显式档位超出它会被钳住并警告（不断 boot）。
+static MAX_ACCEL: AtomicU8 = AtomicU8::new(0);
 
 /// 开机读一次；返回需要屏显的警告行。
 pub fn load() -> Option<String> {
@@ -504,6 +530,90 @@ pub fn effective_vsync() -> VsyncMode {
 /// vsync 开关量（播放限速用）：开 = 叠加 60fps 预算。
 pub fn vsync_enabled() -> bool {
     effective_vsync() == VsyncMode::On
+}
+
+/// 开机探一次硬件最大搬运位宽（P2）：先 `ensure_xsave_enabled`（CPL0 直接开，
+/// 幂等），再按 CPUID/XCR0 取最高可用。调一次，`upload_frame` 每次读结论。
+/// 必须在任何上屏/bench 之前调（`main` 里调，bench/播放只读）。
+pub fn resolve_accel() {
+    #[cfg(target_arch = "x86_64")]
+    {
+        crate::diag::common::ensure_xsave_enabled();
+        let max = probe_max_width();
+        MAX_ACCEL.store(max as u8, Ordering::Relaxed);
+        // 显式档位超硬件：警告 + 钳住（不断 boot，兼容兜底）。
+        let want = accel_level();
+        if want != AccelLevel::Auto && level_width(want) as u8 > max as u8 {
+            log::warn!(
+                "accel: level {:?} beyond hardware ({:?}), clamped",
+                want,
+                max_width_name(max)
+            );
+        }
+        log::info!("accel: hardware max width = {:?}", max_width_name(max));
+    }
+}
+
+/// 实际生效的搬运位宽：`auto` 取硬件最大；显式档位钳到硬件最大。
+pub fn copy_width() -> CopyWidth {
+    let max = CopyWidth::from_u8(MAX_ACCEL.load(Ordering::Relaxed));
+    let want = match accel_level() {
+        AccelLevel::Auto => max,
+        explicit => level_width(explicit),
+    };
+    if want as u8 > max as u8 { max } else { want }
+}
+
+fn level_width(l: AccelLevel) -> CopyWidth {
+    match l {
+        AccelLevel::Auto => CopyWidth::X128,
+        AccelLevel::Scalar => CopyWidth::U64,
+        AccelLevel::Sse2 | AccelLevel::Ssse3 | AccelLevel::Sse41 | AccelLevel::Sse42 => {
+            CopyWidth::X128
+        }
+        AccelLevel::Avx => CopyWidth::V128,
+        AccelLevel::Avx2 => CopyWidth::Y256,
+        AccelLevel::Avx512 => CopyWidth::Z512,
+    }
+}
+
+fn max_width_name(w: CopyWidth) -> &'static str {
+    match w {
+        CopyWidth::U64 => "scalar-u64",
+        CopyWidth::X128 => "sse2-128",
+        CopyWidth::V128 => "avx-128",
+        CopyWidth::Y256 => "avx2-256",
+        CopyWidth::Z512 => "avx512-512",
+    }
+}
+
+/// CPUID/XCR0 探最高可用位宽（P2 矩阵的“探”；bench 只出数，选择看这里）。
+/// 判定位与 `hw_bench`/`gop_simd` 同源（AVX512 五位门、`check_avx_support`）。
+#[cfg(target_arch = "x86_64")]
+fn probe_max_width() -> CopyWidth {
+    use core::arch::x86_64::{__cpuid, __cpuid_count, _xgetbv};
+
+    let c1 = __cpuid(1);
+    let has7 = crate::diag::common::cpuid_max_basic() >= 7;
+    let b7 = if has7 { __cpuid_count(7, 0).ebx } else { 0 };
+    // AVX512：硬件位 + OSXSAVE + XCR0 五位全开，缺一个执行就 #UD。
+    if has7 && b7 & (1 << 16) != 0 && c1.ecx & (1 << 27) != 0 {
+        let xcr0 = unsafe { _xgetbv(0) };
+        const ZMM_MASK: u64 = (1 << 1) | (1 << 2) | (1 << 5) | (1 << 6) | (1 << 7);
+        if xcr0 & ZMM_MASK == ZMM_MASK {
+            return CopyWidth::Z512;
+        }
+    }
+    if crate::diag::avx_checker::check_avx_support() && has7 && b7 & (1 << 5) != 0 {
+        return CopyWidth::Y256;
+    }
+    if crate::diag::avx_checker::check_avx_support() {
+        return CopyWidth::V128;
+    }
+    if c1.edx & (1 << 26) != 0 {
+        return CopyWidth::X128;
+    }
+    CopyWidth::U64
 }
 
 /// 已记忆的 auto 矩阵结论（`Auto`/`0` = 未测）。

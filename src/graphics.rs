@@ -1,13 +1,14 @@
 use alloc::boxed::Box;
 use alloc::string::{String, ToString};
 use alloc::vec;
+use core::arch::asm;
 use core::ffi::c_void;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use core::time::Duration;
 use uefi::boot::{create_event, get_handle_for_protocol, open_protocol_exclusive, stall, EventType, ScopedProtocol, Tpl};
 use uefi::proto::console::gop::{BltOp, BltPixel, BltRegion, GraphicsOutput, Mode};
 use uefi::proto::pi::mp::MpServices;
-use crate::config::{self, RenderMode, VsyncMode, WorkersMode};
+use crate::config::{self, CopyWidth, RenderMode, VsyncMode, WorkersMode};
 use crate::error::Result;
 use crate::video::ascii_font::FONT_8X16;
 use crate::video::decoder::VideoMemoryRaw;
@@ -304,37 +305,39 @@ impl Screen {
                 let mut fb = self.gop.frame_buffer();
                 let dst = fb.as_mut_ptr();
                 let src = pixels.as_ptr() as *const u8;
-                unsafe {
-                    for y in y0..height {
-                        core::ptr::copy_nonoverlapping(
-                            src.add(y * width * 4),
-                            dst.add(y * stride * 4),
-                            width * 4,
-                        );
-                    }
+                let w = config::copy_width();
+                for y in y0..height {
+                    copy_block(
+                        unsafe { dst.add(y * stride * 4) },
+                        unsafe { src.add(y * width * 4) },
+                        width * 4,
+                        w,
+                    );
                 }
                 Ok(())
             }
         }
     }
 
-    /// CPU 直写 framebuffer（stride 感知）。
+    /// CPU 直写 framebuffer（stride 感知），按 P2 位宽选路。
+    /// 位宽来自 `config::copy_width()`（`accel.level` × 硬件上限），调用方已门控，
+    /// 这里只管执行（AVX 系跑完 `vzeroupper`，不污染后续 SSE）。
     fn upload_direct(&mut self, width: usize, height: usize, pixels: &[BltPixel]) -> Result {
         let stride = self.gop.current_mode_info().stride();
         let mut fb = self.gop.frame_buffer();
         let dst = fb.as_mut_ptr();
         let src = pixels.as_ptr() as *const u8;
-        unsafe {
-            if stride == width {
-                core::ptr::copy_nonoverlapping(src, dst, width * height * 4);
-            } else {
-                for y in 0..height {
-                    core::ptr::copy_nonoverlapping(
-                        src.add(y * width * 4),
-                        dst.add(y * stride * 4),
-                        width * 4,
-                    );
-                }
+        let w = config::copy_width();
+        if stride == width {
+            copy_block(dst, src, width * height * 4, w);
+        } else {
+            for y in 0..height {
+                copy_block(
+                    unsafe { dst.add(y * stride * 4) },
+                    unsafe { src.add(y * width * 4) },
+                    width * 4,
+                    w,
+                );
             }
         }
         Ok(())
@@ -763,6 +766,113 @@ unsafe fn copy_rows_cal(
             let d = dst_base.add(y * dst_stride);
             let s = src_frame.add(y * row_bytes);
             core::ptr::copy_nonoverlapping(s, d, row_bytes);
+        }
+    }
+}
+
+/// P2 位宽分发：安全外壳 + 运行时门控（调用方保证 CPU 支持该位宽，
+/// 见 `config::copy_width`），内部分 unsafe 执行。AVX 系自带 `vzeroupper`。
+/// `video::mp_draw` 的 AP/BSP 行区搬运复用同一个（同 semantics）。
+pub(crate) fn copy_block(dst: *mut u8, src: *const u8, len: usize, w: CopyWidth) {
+    unsafe {
+        match w {
+            CopyWidth::U64 => copy_block_u64(dst, src, len),
+            CopyWidth::X128 => copy_block_x128(dst, src, len),
+            CopyWidth::V128 => copy_block_v128(dst, src, len),
+            CopyWidth::Y256 => copy_block_y256(dst, src, len),
+            CopyWidth::Z512 => copy_block_z512(dst, src, len),
+        }
+    }
+}
+
+/// 标量兜底（`accel.level = scalar` 或史前 CPU）：u64 步进。
+unsafe fn copy_block_u64(dst: *mut u8, src: *const u8, len: usize) {
+    unsafe {
+        let mut i = 0;
+        while i + 8 <= len {
+            (dst.add(i) as *mut u64)
+                .write((src.add(i) as *const u64).read_unaligned());
+            i += 8;
+        }
+        while i < len {
+            dst.add(i).write(src.add(i).read());
+            i += 1;
+        }
+    }
+}
+
+/// 128 位整数向量（SSE2~SSE4.2 同宽）：`movdqu` 非对齐载存。
+/// 约束见 `gop_simd.rs` 头注释：只碰整数 `asm!`，内在函数会被标量化。
+#[target_feature(enable = "sse2")]
+unsafe fn copy_block_x128(dst: *mut u8, src: *const u8, len: usize) {
+    unsafe {
+        let mut i = 0;
+        let n = len & !15;
+        while i < n {
+            asm!("movdqu {t}, [{s}]", "movdqu [{d}], {t}",
+                t = out(xmm_reg) _, s = in(reg) src.add(i), d = in(reg) dst.add(i), options(nostack));
+            i += 16;
+        }
+        while i < len {
+            dst.add(i).write(src.add(i).read());
+            i += 1;
+        }
+    }
+}
+
+/// 128 位 VEX 编码（`accel.level = avx`）：同宽换 VEX，对照语义。
+#[target_feature(enable = "avx")]
+unsafe fn copy_block_v128(dst: *mut u8, src: *const u8, len: usize) {
+    unsafe {
+        let mut i = 0;
+        let n = len & !15;
+        while i < n {
+            asm!("vmovdqu {t}, [{s}]", "vmovdqu [{d}], {t}",
+                t = out(xmm_reg) _, s = in(reg) src.add(i), d = in(reg) dst.add(i), options(nostack));
+            i += 16;
+        }
+        asm!("vzeroupper", options(nostack, preserves_flags));
+        while i < len {
+            dst.add(i).write(src.add(i).read());
+            i += 1;
+        }
+    }
+}
+
+/// 256 位向量（`accel.level = avx2`）：调用前必须过 CPUID+XCR0 门控。
+#[target_feature(enable = "avx2")]
+unsafe fn copy_block_y256(dst: *mut u8, src: *const u8, len: usize) {
+    unsafe {
+        let mut i = 0;
+        let n = len & !31;
+        while i < n {
+            asm!("vmovdqu {t}, [{s}]", "vmovdqu [{d}], {t}",
+                t = out(ymm_reg) _, s = in(reg) src.add(i), d = in(reg) dst.add(i), options(nostack));
+            i += 32;
+        }
+        asm!("vzeroupper", options(nostack, preserves_flags));
+        while i < len {
+            dst.add(i).write(src.add(i).read());
+            i += 1;
+        }
+    }
+}
+
+/// 512 位向量（`accel.level = avx512`）：调用前必须过 AVX512F+XCR0 五位门控。
+#[target_feature(enable = "avx512f")]
+unsafe fn copy_block_z512(dst: *mut u8, src: *const u8, len: usize) {
+    unsafe {
+        let mut i = 0;
+        let n = len & !63;
+        while i < n {
+            asm!("vmovdqu8 {t}, [{s}]", "vmovdqu8 [{d}], {t}",
+                t = out(zmm_reg) _, s = in(reg) src.add(i), d = in(reg) dst.add(i), options(nostack));
+            i += 64;
+        }
+        asm!("vzeroupper", options(nostack, preserves_flags));
+        while i < len {
+            dst.add(i).write(src.add(i).read());
+            i += 1;
         }
     }
 }

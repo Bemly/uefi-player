@@ -37,6 +37,10 @@ fn main() -> Status {
     // 读加速矩阵配置（\player.toml）；缺失/非法 → 默认 + 一行警告。
     let cfg_warn = config::load();
 
+    // P2：探硬件最大搬运位宽（开 XSAVE + CPUID/XCR0 门控），之后所有上屏/
+    // 播放按 `accel.level` × 硬件上限选路。必须在首次上屏前完成。
+    config::resolve_accel();
+
     let mut screen = Screen::new().expect("Failed to create screen");
     if let Some(w) = cfg_warn {
         log::warn!("{}", w);

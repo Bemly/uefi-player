@@ -1,3 +1,4 @@
+use alloc::format;
 use alloc::vec;
 use alloc::vec::Vec;
 use uefi::proto::console::gop::BltPixel;
@@ -38,7 +39,8 @@ impl VideoMemory {
 
     /// 模仿之前的 read_frame_next，但改为从内存切片
     pub fn next_frame(&mut self, qoi_buf: &mut Vec<u8>) -> bool {
-        if self.cursor >= self.data.len() {
+        // 越界守卫：尾部不足 4 字节长度头时直接结束（此前直切会 panic）。
+        if self.cursor + 4 > self.data.len() {
             return false;
         }
 
@@ -48,6 +50,10 @@ impl VideoMemory {
 
         self.cursor += 4;
         let end = self.cursor + frame_len;
+        // 长度超出剩余数据：文件截断，按结束处理（不 panic）。
+        if end > self.data.len() {
+            return false;
+        }
 
         // 将这一帧的数据拷贝到 qoi_buf
         qoi_buf.clear();
@@ -85,9 +91,12 @@ impl VideoMemoryRaw {
         let mut compressed_buffer = vec![0u8; info.file_size() as usize];
         file.read(&mut compressed_buffer)?;
 
-        // 预解码
+        // 预解码。错位闭环（P3）：坏帧只记数跳过，但全坏/几何不一致直接报错，
+        // 不再静默进“无限 rewind 空转”（此前空集会导致 blt_loop 永远打空转）。
         let mut frames = Vec::new();
+        let mut skipped = 0u32;
         let mut offset = 0;
+        let mut expect: Option<(u32, u32)> = None;
 
         while offset + 4 <= compressed_buffer.len() {
             // 读取长度信息
@@ -103,33 +112,64 @@ impl VideoMemoryRaw {
 
             // 解码这一帧
             // 我们先解码头来获取分辨率，或者假设你已知分辨率
-            // TODO:严重错误 真机上会出现数据错位的情况,概率极大
-            let Ok(header) = qoi::decode_header(frame_data) else {
-                offset = next_frame_pos;
-                continue
+            let (header, pixel_count) = match qoi::decode_header(frame_data) {
+                Ok(h) => {
+                    let n = (h.width * h.height) as usize;
+                    if n == 0 || n > 16 * 1024 * 1024 {
+                        skipped += 1;
+                        offset = next_frame_pos;
+                        continue;
+                    }
+                    (h, n)
+                }
+                // 真机错位多半落在这里：记数跳过，阈值见文末（曾无限静默丢帧）。
+                Err(_) => {
+                    skipped += 1;
+                    offset = next_frame_pos;
+                    continue;
+                }
             };
-            let pixel_count = (header.width * header.height) as usize;
+            // 同一文件内几何必须一致（混入异形帧会撕裂后面所有帧定位）。
+            match expect {
+                None => expect = Some((header.width, header.height)),
+                Some((w, h)) if (header.width, header.height) != (w, h) => {
+                    skipped += 1;
+                    offset = next_frame_pos;
+                    continue;
+                }
+                _ => {}
+            }
 
             let mut pixel_buffer = vec![BltPixel::new(0, 0, 0); pixel_count];
 
             // 完成解码，存入 pixel_buffer
-            let Ok(_) = qoi::decode_to_buf(
-                // TODO: 4 -> step
+            if qoi::decode_to_buf(
                 unsafe { core::slice::from_raw_parts_mut(pixel_buffer.as_mut_ptr() as *mut u8, pixel_count * 4) },
                 frame_data
-            ) else {
+            ).is_err() {
+                skipped += 1;
                 offset = next_frame_pos;
-                continue
+                continue;
             };
 
-            for pixel in pixel_buffer.iter_mut() {
-                let r = pixel.red;
-                pixel.red = pixel.blue;
-                pixel.blue = r;
+            for pixel_buffer in pixel_buffer.iter_mut() {
+                let r = pixel_buffer.red;
+                pixel_buffer.red = pixel_buffer.blue;
+                pixel_buffer.blue = r;
             }
 
             frames.push(pixel_buffer);
             offset = next_frame_pos;
+        }
+
+        if frames.is_empty() {
+            return Err(crate::error::NyaStatus::_Debug(alloc::format!(
+                "video: no valid frames ({} skipped)",
+                skipped
+            )));
+        }
+        if skipped > 0 {
+            log::warn!("video: predecoded {} frames, skipped {} bad", frames.len(), skipped);
         }
 
         Ok(Self {
