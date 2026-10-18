@@ -41,10 +41,9 @@ fn main() -> Status {
         screen.draw_str(&w);
     }
 
-    // render.mode = "auto"：开机微基准在 直写 / Blt 之间选快的。
-    if config::render_mode() == config::RenderMode::Auto {
-        screen.bench_render(config::tune_frames());
-    }
+    // render auto 矩阵：首启必校准（direct/blt × BSP/全核 × vsync 探测），
+    // 有记忆直接复用快启，结论回写 `\palyer.toml` 的 `measured_*`。
+    screen.ensure_render_calibrated();
 
     // 默认停留等待：由菜单分发播放视频或各诊断项，不再直进 video_run。
     run_menu(screen);

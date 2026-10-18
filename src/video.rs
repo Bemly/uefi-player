@@ -63,24 +63,31 @@ pub fn video_run(screen: &mut Screen) -> Result {
     let mut fs = Fs::new()?;
     let file = fs.open_file(cstr16!("1080p\\video.qois"))?;
 
-    // 渲染路径矩阵（\palyer.toml）：
-    //   blt    → 单线程走 GOP Blt 引擎
-    //   direct → 原来的多核直写
+    // 渲染路径矩阵（\palyer.toml，见 `Screen::ensure_render_calibrated`）：
+    //   blt            → 单线程走 GOP Blt 引擎（workers 无意义）
+    //   direct + bsp   → BSP 单核直写（MP 关闭或校准判单核更快）
+    //   direct + all   → 原来的多核直写
     match crate::config::effective_render() {
         crate::config::RenderMode::Blt => blt_loop(screen, file, VIDEO_W, VIDEO_H, target, tps),
-        _ => {
-            let mut file = file;
-            mp_draw(screen, &mut file, VIDEO_W, VIDEO_H, target, tps)
-        }
+        _ => match crate::config::effective_workers() {
+            crate::config::WorkersMode::BspOnly => {
+                direct_loop(screen, file, VIDEO_W, VIDEO_H, target, tps)
+            }
+            _ => {
+                let mut file = file;
+                mp_draw(screen, &mut file, VIDEO_W, VIDEO_H, target, tps)
+            }
+        },
     }
 }
 
 /// 播放帧率决策：max 不限速；capped 直接用；auto 无实测就现测并回写，
 /// 按 `min(视频帧率, 实测*3/4)` 跑。返回 `None` = 不限速。
+/// 最后叠 vsync 开关：开 = 再封顶 60fps（软件帧预算，GOP 无硬件 vsync）。
 fn resolve_play_target(screen: &mut Screen, tps: u64) -> Result<Option<u32>> {
-    match config::play_policy() {
-        config::FpsPolicy::Max => Ok(None),
-        config::FpsPolicy::Capped(n) => Ok(Some(n)),
+    let base = match config::play_policy() {
+        config::FpsPolicy::Max => None,
+        config::FpsPolicy::Capped(n) => Some(n),
         config::FpsPolicy::Auto => {
             let m = config::measured_max_fps();
             let m = if m == 0 {
@@ -90,13 +97,20 @@ fn resolve_play_target(screen: &mut Screen, tps: u64) -> Result<Option<u32>> {
             } else {
                 m
             };
-            Ok(Some((m as u64 * 3 / 4).min(VIDEO_NATIVE_FPS as u64).max(1) as u32))
+            Some((m as u64 * 3 / 4).min(VIDEO_NATIVE_FPS as u64).max(1) as u32)
         }
+    };
+    if config::vsync_enabled() {
+        Ok(Some(base.map(|t| t.min(60)).unwrap_or(60)))
+    } else {
+        Ok(base)
     }
 }
 
 /// 首启实测：全量预解码后，用生效渲染路径整轮推一遍，算最大播放帧率。
 /// 纯展示性快进（和开机 render bench 一样会刷屏），一次性的，结果回写配置。
+/// 注意这里是单线程 `upload_frame` 推送：workers=all 的真实多核路只会更快，
+/// 测出来是保守下限，auto 取 3/4 本来就有余量。
 fn measure_max_fps(screen: &mut Screen, tps: u64) -> Result<u32> {
     screen.draw_str("play: benching max playback fps (one fast pass)...");
     let mut fs = Fs::new()?;
@@ -119,6 +133,28 @@ fn measure_max_fps(screen: &mut Screen, tps: u64) -> Result<u32> {
 /// 单线程 Blt 播放：`VideoMemoryRaw` 预解码全部帧（含 RGBA→BGRA），
 /// 每帧经 `upload_frame` 交给 GOP Blt 引擎。牺牲多核并行，换引擎搬运。
 fn blt_loop(
+    screen: &mut Screen,
+    file: RegularFile,
+    width: usize,
+    height: usize,
+    target: Option<u32>,
+    tps: u64,
+) -> Result {
+    let mut video = VideoMemoryRaw::new(file)?;
+    loop {
+        let fstart = rdtsc();
+        match video.next_frame() {
+            Some(frame) => screen.upload_frame(width, height, frame)?,
+            None => video.rewind(),
+        }
+        pace_frame(fstart, tps, target);
+    }
+}
+
+/// BSP 单核直写播放：与 `blt_loop` 同结构，只是走 CPU 直写显存
+///（校准判单核更快，或用户关掉 MP 时用；`upload_frame` 按生效路径分发，
+/// 这里 render 已定 direct，实际就是 `upload_direct`）。
+fn direct_loop(
     screen: &mut Screen,
     file: RegularFile,
     width: usize,

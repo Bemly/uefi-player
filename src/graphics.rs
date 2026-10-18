@@ -1,8 +1,13 @@
+use alloc::boxed::Box;
+use alloc::string::{String, ToString};
 use alloc::vec;
-use uefi::boot::{get_handle_for_protocol, open_protocol_exclusive, ScopedProtocol};
+use core::ffi::c_void;
+use core::sync::atomic::{AtomicUsize, Ordering};
+use core::time::Duration;
+use uefi::boot::{create_event, get_handle_for_protocol, open_protocol_exclusive, stall, EventType, ScopedProtocol, Tpl};
 use uefi::proto::console::gop::{BltOp, BltPixel, BltRegion, GraphicsOutput, Mode};
 use uefi::proto::pi::mp::MpServices;
-use crate::config::{self, RenderMode};
+use crate::config::{self, RenderMode, VsyncMode, WorkersMode};
 use crate::error::Result;
 use crate::video::ascii_font::FONT_8X16;
 use crate::video::decoder::VideoMemoryRaw;
@@ -296,41 +301,294 @@ impl Screen {
         Ok(())
     }
 
-    /// `render.mode = "auto"`：开机各跑 `frames` 帧，直写 vs Blt 取快的。
-    /// 会短暂刷花屏（随后菜单/播放会重画）。
-    pub fn bench_render(&mut self, frames: u32) -> RenderMode {
+    /// `render.mode/workers/vsync = "auto"` 的开机矩阵校准（`\palyer.toml` 驱动）。
+    ///
+    /// - 首启（任一 auto 无记忆，见 `config::needs_render_bench`）必跑全矩阵：
+    ///   直写 vs Blt 取快；直写路再比 BSP 单核 vs 全核并行；冠军路按 60fps
+    ///   预算跑一遍，零超期则 vsync 开否则关。
+    /// - 全核 cell 用 AP 常驻循环 + 轮次同步（`gop_bench` 方法论：单发 startup
+    ///   测到的是 SIPI 唤醒开销而非扩展性，必须常驻 + 热身吸收后再计时）。
+    /// - 同组变体轮转交替计时（`gop_simd` 方法论：杀时间漂移），结论写回
+    ///   `measured_*`（`None` 维度不动盘），下次启动有记忆直接复用快启。
+    /// - 会短暂刷花屏（随后菜单/播放会重画）。
+    pub fn ensure_render_calibrated(&mut self) {
+        if !config::needs_render_bench() {
+            config::apply_measured_render();
+            log::info!(
+                "render auto: reuse measured render={:?} workers={:?} vsync={:?} cores={}",
+                config::measured_render(),
+                config::measured_workers(),
+                config::measured_vsync(),
+                config::measured_cores(),
+            );
+            return;
+        }
+        // 记忆先装进本启动结论，校准只覆盖本次实测的维度。
+        config::apply_measured_render();
+
+        let frames = config::tune_frames().max(1) as u64;
+        let tps = calibrate_tps();
+
         let (w, h) = self.gop.current_mode_info().resolution();
         let (w, h) = (w as usize, h as usize);
         let pixels = vec![BltPixel::new(0x11, 0x22, 0x33); w * h];
-        let frames = frames.max(1) as u64;
 
-        // 各热身一次
+        // ---- 待定维度：显式值直接采用，只测 auto 且无记忆的 ----
+        let probe_render = config::render_mode() == RenderMode::Auto
+            && config::measured_render() == RenderMode::Auto;
+        let fixed_render = if probe_render {
+            None
+        } else if config::render_mode() == RenderMode::Auto {
+            Some(config::measured_render())
+        } else {
+            Some(config::render_mode())
+        };
+        // workers 只在直写路径有意义（Blt 恒单线程）：渲染定死 Blt 则不测。
+        let direct_in_play = fixed_render
+            .map(|m| m == RenderMode::Direct)
+            .unwrap_or(true);
+        let probe_workers = direct_in_play
+            && config::workers_mode() == WorkersMode::Auto
+            && config::measured_workers() == WorkersMode::Auto;
+        let fixed_workers = if probe_workers {
+            None
+        } else if config::workers_mode() == WorkersMode::Auto {
+            Some(config::measured_workers())
+        } else {
+            Some(config::workers_mode())
+        };
+        let probe_vsync =
+            config::vsync_mode() == VsyncMode::Auto && config::measured_vsync() == VsyncMode::Auto;
+
+        // ---- MP 会话（全核 cell / 全核冠军的 vsync 探测共用，用完即退） ----
+        let mut mp_store = None;
+        if let Ok(h) = get_handle_for_protocol::<MpServices>() {
+            if let Ok(m) = open_protocol_exclusive::<MpServices>(h) {
+                mp_store = Some(m);
+            }
+        }
+        let n_cores = mp_store
+            .as_deref()
+            .and_then(|m| m.get_number_of_processors().ok())
+            .map(|c| c.enabled.max(1))
+            .unwrap_or(1);
+        let want_mp = direct_in_play && (probe_workers || fixed_workers == Some(WorkersMode::All));
+        // AP 常驻会话（栈上 ctx + 轮次号驱动，方法论见 gop_bench 计时轮）。
+        let cal_round = AtomicUsize::new(0);
+        let cal_done = AtomicUsize::new(0);
+        let mut mp_drive: Option<MpDrive> = None;
+        if want_mp {
+            if let Some(mp) = mp_store.as_deref() {
+                let fb_base = self.gop.frame_buffer().as_mut_ptr();
+                let fb_stride = self.gop.current_mode_info().stride() * 4;
+                let ctx = MpCalCtx {
+                    mp,
+                    fb_base,
+                    fb_stride,
+                    src: pixels.as_ptr() as *const u8,
+                    row_bytes: w * 4,
+                    height: h,
+                    n: n_cores,
+                    round: &cal_round,
+                    done: &cal_done,
+                };
+                // ctx 必须活到 AP 退场：Box 漏存，函数尾 QUIT + stall 后不再访问。
+                let arg_ptr = Box::leak(Box::new(ctx)) as *mut _ as *mut c_void;
+                match unsafe { create_event(EventType::empty(), Tpl::CALLBACK, None, None) } {
+                    Ok(ev) => {
+                        // Event 无 Drop，移进启动调用后固件侧保持有效（同 video.rs）。
+                        if mp
+                            .startup_all_aps(false, ap_cal_copy, arg_ptr, Some(ev), None)
+                            .is_ok()
+                        {
+                            let bsp_id = mp.who_am_i().unwrap_or(0) % n_cores.max(1);
+                            let (by0, by1) = rows_for_cal(bsp_id, n_cores, h);
+                            mp_drive = Some(MpDrive {
+                                fb_base,
+                                fb_stride,
+                                src: pixels.as_ptr() as *const u8,
+                                row_bytes: w * 4,
+                                bsp_y0: by0,
+                                bsp_y1: by1,
+                                expected: n_cores.saturating_sub(1),
+                                round: &cal_round,
+                                done: &cal_done,
+                                next: 0,
+                                tps,
+                            });
+                        } else {
+                            log::warn!("render auto: MP startup failed, all-core cell SKIP");
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!("render auto: MP event failed: {:?}, all-core cell SKIP", e)
+                    }
+                }
+            }
+        }
+
+        // 各热身一次（单核路；多核路热身在会话计时里做）。
         let _ = self.upload_direct(w, h, &pixels);
         let _ = self.upload_blt(w, h, &pixels);
 
-        let t0 = tsc();
-        for _ in 0..frames {
-            let _ = self.upload_direct(w, h, &pixels);
+        // ---- 轮转交替计时：每轮各跑一次，累加 ticks ----
+        let time_direct =
+            direct_in_play && (probe_render || fixed_render == Some(RenderMode::Direct));
+        let time_blt = fixed_render.map(|m| m == RenderMode::Blt).unwrap_or(true);
+        let time_mp =
+            mp_drive.is_some() && (probe_workers || fixed_workers == Some(WorkersMode::All));
+        // 多核热身 1 轮（吸收 AP 唤醒延迟，不计时）。
+        if time_mp {
+            mp_drive.as_mut().expect("mp drive").warmup();
         }
-        let dt_direct = tsc().saturating_sub(t0);
-
-        let t0 = tsc();
+        let mut acc_direct = 0u64;
+        let mut acc_mp = 0u64;
+        let mut acc_blt = 0u64;
         for _ in 0..frames {
-            let _ = self.upload_blt(w, h, &pixels);
+            if time_direct {
+                let t = tsc();
+                let _ = self.upload_direct(w, h, &pixels);
+                acc_direct += tsc().saturating_sub(t);
+            }
+            if time_mp {
+                let t = tsc();
+                let ok = mp_drive.as_mut().expect("mp drive").run_round();
+                let dt = tsc().saturating_sub(t);
+                if ok {
+                    acc_mp += dt;
+                } else {
+                    // 熔断：本轮 AP 没跟上，该 cell 作废并退回单核。
+                    acc_mp = 0;
+                    mp_drive = None;
+                    break;
+                }
+            }
+            if time_blt {
+                let t = tsc();
+                let _ = self.upload_blt(w, h, &pixels);
+                acc_blt += tsc().saturating_sub(t);
+            }
         }
-        let dt_blt = tsc().saturating_sub(t0);
+        let time_mp = time_mp && mp_drive.is_some();
 
-        let chosen = if dt_blt < dt_direct { RenderMode::Blt } else { RenderMode::Direct };
+        // ---- 决胜 ----
+        // 直写冠军：多核 cell 跳过/失败则退回单核。
+        let mp_valid = time_mp && acc_mp > 0;
+        let direct_ticks = if mp_valid && acc_mp < acc_direct {
+            acc_mp
+        } else {
+            acc_direct
+        };
+        let winner_workers = if !direct_in_play {
+            WorkersMode::BspOnly // Blt 路径恒单线程，workers 无意义
+        } else if probe_workers {
+            if mp_valid && acc_mp < acc_direct {
+                WorkersMode::All
+            } else {
+                WorkersMode::BspOnly
+            }
+        } else {
+            fixed_workers.unwrap_or(WorkersMode::BspOnly)
+        };
+        let winner_render = if probe_render {
+            if time_blt && acc_blt < direct_ticks {
+                RenderMode::Blt
+            } else {
+                RenderMode::Direct
+            }
+        } else {
+            fixed_render.unwrap_or(RenderMode::Direct)
+        };
+        // Blt 冠军吞掉 workers 记忆（无意义，不记，避免误导）。
+        let persist_workers = if winner_render == RenderMode::Direct && probe_workers {
+            Some(winner_workers)
+        } else {
+            None
+        };
+
+        // ---- vsync 探测：冠军路按 60fps 预算跑 `frames` 帧，零超期才开 ----
+        let mut overruns = 0u64;
+        let winner_vsync = if probe_vsync {
+            let budget = tps / 60;
+            if budget == 0 {
+                VsyncMode::Off
+            } else {
+                let use_mp = winner_render == RenderMode::Direct
+                    && winner_workers == WorkersMode::All
+                    && mp_drive.is_some();
+                for _ in 0..frames {
+                    let fstart = tsc();
+                    let mut frame_over = false;
+                    if winner_render == RenderMode::Blt {
+                        let _ = self.upload_blt(w, h, &pixels);
+                    } else if use_mp {
+                        frame_over = !mp_drive.as_mut().expect("mp drive").run_round();
+                    } else {
+                        let _ = self.upload_direct(w, h, &pixels);
+                    }
+                    if !frame_over && tsc().saturating_sub(fstart) > budget {
+                        frame_over = true;
+                    }
+                    if frame_over {
+                        overruns += 1;
+                    }
+                    while tsc().saturating_sub(fstart) < budget {
+                        core::hint::spin_loop();
+                    }
+                }
+                if overruns == 0 {
+                    VsyncMode::On
+                } else {
+                    VsyncMode::Off
+                }
+            }
+        } else if config::vsync_mode() == VsyncMode::Auto {
+            Some(config::measured_vsync())
+                .filter(|v| *v != VsyncMode::Auto)
+                .unwrap_or(VsyncMode::Off)
+        } else {
+            config::vsync_mode()
+        };
+
+        // AP 退场（发 QUIT 后给一个循环周期退出，免得 Box 泄漏的 ctx 被踩）。
+        cal_round.store(CAL_QUIT, Ordering::SeqCst);
+        drop(mp_drive);
+        stall(Duration::from_millis(50));
+
         log::info!(
-            "render auto: direct {} ticks vs blt {} ticks -> {:?}",
-            dt_direct,
-            dt_blt,
-            chosen
+            "render auto: direct_bsp {} ticks vs direct_all {} vs blt {} ({} frames, {} cores) -> render={:?} workers={:?} vsync={:?} (overruns {}/{})",
+            acc_direct,
+            if mp_valid {
+                acc_mp.to_string()
+            } else {
+                String::from("SKIP")
+            },
+            acc_blt,
+            frames,
+            n_cores,
+            winner_render,
+            winner_workers,
+            winner_vsync,
+            overruns,
+            if probe_vsync { frames } else { 0 },
         );
-        config::set_resolved_render(chosen);
-        chosen
-    }
+        self.draw_str(&alloc::format!(
+            "render auto: {:?}/{:?}/vsync {:?} ({} cores)",
+            winner_render,
+            winner_workers,
+            winner_vsync,
+            n_cores
+        ));
 
+        if let Err(e) = config::persist_render_measured(
+            probe_render.then_some(winner_render),
+            persist_workers,
+            probe_vsync.then_some(winner_vsync),
+            n_cores as u32,
+        ) {
+            log::warn!("render auto: persist failed: {:?}", e);
+        }
+    }
 }
 
 /// 时间戳计数。非 x86_64 返回 0（auto 会退回 direct）。
@@ -343,6 +601,130 @@ fn tsc() -> u64 {
     #[cfg(not(target_arch = "x86_64"))]
     {
         0
+    }
+}
+
+/// TSC 频率校准（100ms × 2，和 `hw_bench` 同方法）。vsync 60fps 预算用。
+fn calibrate_tps() -> u64 {
+    uefi::boot::stall(Duration::from_millis(100));
+    let s = tsc();
+    uefi::boot::stall(Duration::from_millis(100));
+    tsc().saturating_sub(s).saturating_mul(10).max(1)
+}
+
+// ---------- 矩阵校准的多核会话 ----------
+
+/// AP 退场哨兵：BSP 写 QUIT 后 AP 跳出常驻循环（同 `gop_bench::FILL_QUIT` 做法）。
+const CAL_QUIT: usize = usize::MAX;
+
+struct MpCalCtx<'a> {
+    mp: &'a MpServices,
+    fb_base: *mut u8,
+    fb_stride: usize,
+    src: *const u8,
+    row_bytes: usize,
+    height: usize,
+    n: usize,
+    round: &'a AtomicUsize,
+    done: &'a AtomicUsize,
+}
+
+/// AP 常驻循环：等新轮次号，拷自己行区，打卡。BSP 发 QUIT 后退出。
+extern "efiapi" fn ap_cal_copy(arg: *mut c_void) {
+    if arg.is_null() {
+        return;
+    }
+    let ctx = unsafe { &*(arg as *const MpCalCtx) };
+    let id = ctx.mp.who_am_i().unwrap_or(usize::MAX) % ctx.n.max(1);
+    let (y0, y1) = rows_for_cal(id, ctx.n, ctx.height);
+    let mut my_round = 0usize;
+    loop {
+        let g = ctx.round.load(Ordering::Acquire);
+        if g == CAL_QUIT {
+            break;
+        }
+        if g == 0 || g == my_round {
+            core::hint::spin_loop();
+            continue;
+        }
+        my_round = g;
+        unsafe { copy_rows_cal(ctx.fb_base, ctx.fb_stride, ctx.src, ctx.row_bytes, y0, y1) };
+        ctx.done.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+/// BSP 侧驱动器：发轮次号 → 拷自己行区 → 等 AP 打卡齐（单轮 5 秒熔断）。
+struct MpDrive<'a> {
+    fb_base: *mut u8,
+    fb_stride: usize,
+    src: *const u8,
+    row_bytes: usize,
+    bsp_y0: usize,
+    bsp_y1: usize,
+    expected: usize,
+    round: &'a AtomicUsize,
+    done: &'a AtomicUsize,
+    next: usize,
+    tps: u64,
+}
+
+impl MpDrive<'_> {
+    /// 热身 1 轮（吸收 AP 唤醒延迟，不计时）。
+    fn warmup(&mut self) {
+        let _ = self.run_round();
+    }
+
+    /// 跑一轮，返回是否全员跟上（false = 熔断，调用方作废该 cell）。
+    fn run_round(&mut self) -> bool {
+        self.next += 1;
+        let r = self.next;
+        self.round.store(r, Ordering::SeqCst);
+        unsafe {
+            copy_rows_cal(
+                self.fb_base,
+                self.fb_stride,
+                self.src,
+                self.row_bytes,
+                self.bsp_y0,
+                self.bsp_y1,
+            )
+        };
+        let target = r.saturating_mul(self.expected);
+        let deadline = tsc().saturating_add(5 * self.tps.max(1));
+        while self.done.load(Ordering::Acquire) < target {
+            if tsc() >= deadline {
+                return false;
+            }
+            core::hint::spin_loop();
+        }
+        true
+    }
+}
+
+/// 按核 id 划分行区，尾核吃掉余数（同 `gop_bench::rows_for`）。
+fn rows_for_cal(id: usize, n: usize, h: usize) -> (usize, usize) {
+    let per = h / n.max(1);
+    let y0 = id * per;
+    let y1 = if id + 1 >= n { h } else { y0 + per };
+    (y0.min(h), y1.min(h))
+}
+
+/// 从合成帧行区拷到显存行区（显存 stride 可能大于行宽，逐行拷）。
+/// edition 2024：unsafe fn 体内显式 unsafe 块。
+unsafe fn copy_rows_cal(
+    dst_base: *mut u8,
+    dst_stride: usize,
+    src_frame: *const u8,
+    row_bytes: usize,
+    y0: usize,
+    y1: usize,
+) {
+    unsafe {
+        for y in y0..y1 {
+            let d = dst_base.add(y * dst_stride);
+            let s = src_frame.add(y * row_bytes);
+            core::ptr::copy_nonoverlapping(s, d, row_bytes);
+        }
     }
 }
 

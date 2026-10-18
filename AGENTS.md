@@ -93,6 +93,5 @@ cargo run --manifest-path tools/config-gui/Cargo.toml --target "$(rustc -vV | se
   （`registry.rs` 的两种 `Entry`，不要第三种）。
 - 诊断项可返回式报错，只生产路径（播视频）走 `handle_fatal`。
 - 提交用 Conventional Commits（`feat/fix/docs`），不加 Agent 署名。
-- 每次改完自动提交并推送：`check/clippy/fmt` 全绿就 `commit + push`，
-  不必等用户开口；只提交本次意图内的文件（`usb_reports/` 下的本地实测
-  产物、`target/` 等不在内）。
+- 每次改完自动提交并推送到 GitHub：`check/clippy/fmt` 全绿就 `commit + push`，
+  不必等用户开口；以用户最新说明为准。

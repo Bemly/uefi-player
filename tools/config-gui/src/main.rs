@@ -110,6 +110,48 @@ impl RenderMode {
     }
 }
 
+/// 多核开关（与固件 `WorkersMode` 同构；Blt 路径恒单线程，忽略本项）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum WorkersMode {
+    #[default]
+    Auto,
+    BspOnly,
+    All,
+}
+
+impl WorkersMode {
+    const ALL: [Self; 3] = [Self::Auto, Self::BspOnly, Self::All];
+    fn file_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::BspOnly => "bsp_only",
+            Self::All => "all",
+        }
+    }
+}
+
+/// 垂直同步（与固件 `VsyncMode` 同构；开 = 叠加 60fps 软件帧预算）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum VsyncMode {
+    #[default]
+    Auto,
+    On,
+    Off,
+}
+
+impl VsyncMode {
+    const ALL: [Self; 3] = [Self::Auto, Self::On, Self::Off];
+    fn file_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::On => "on",
+            Self::Off => "off",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum BltOpKind {
@@ -197,8 +239,19 @@ impl Default for RenderTune {
 #[serde(default)]
 struct RenderConfig {
     mode: RenderMode,
+    workers: WorkersMode,
+    vsync: VsyncMode,
     blt_op: BltOpKind,
     tune: RenderTune,
+    /// auto 校准记忆（`Auto`/`0` = 未测）：只由固件回写，这里只读展示 + 重测清零。
+    #[serde(default)]
+    measured_render: RenderMode,
+    #[serde(default)]
+    measured_workers: WorkersMode,
+    #[serde(default)]
+    measured_vsync: VsyncMode,
+    #[serde(default)]
+    measured_cores: u32,
 }
 
 /// `[play]`：`fps` 是字符串（三态没法用纯数字表达），`measured_max_fps`
@@ -281,6 +334,24 @@ fn blt_desc(v: BltOpKind) -> String {
         BltOpKind::VideoToVideo => t!("accel.desc_v2v"),
         BltOpKind::VideoFill => t!("accel.desc_fill"),
         BltOpKind::VideoToBltBuffer => t!("accel.desc_v2b"),
+    }
+    .into_owned()
+}
+
+fn workers_desc(v: WorkersMode) -> String {
+    match v {
+        WorkersMode::Auto => t!("accel.desc_workers_auto"),
+        WorkersMode::BspOnly => t!("accel.desc_workers_bsp"),
+        WorkersMode::All => t!("accel.desc_workers_all"),
+    }
+    .into_owned()
+}
+
+fn vsync_desc(v: VsyncMode) -> String {
+    match v {
+        VsyncMode::Auto => t!("accel.desc_vsync_auto"),
+        VsyncMode::On => t!("accel.desc_vsync_on"),
+        VsyncMode::Off => t!("accel.desc_vsync_off"),
     }
     .into_owned()
 }
@@ -390,11 +461,36 @@ impl App {
     }
 
     /// 实测行：有值报数，无值提示切 auto 下次启动测。
+    /// `&self`：背景纸（`page_backdrop`）只读重排也能调，不写状态。
     fn measured_line(&self) -> String {
         if self.cfg.play.measured_max_fps > 0 {
             t!("play.measured", v = self.cfg.play.measured_max_fps).into_owned()
         } else {
             t!("play.unmeasured").into_owned()
+        }
+    }
+
+    /// 渲染矩阵记忆行：四项全未测提示切 auto，否则报记忆值 + 校准时机型核数。
+    fn render_measured_line(&self) -> String {
+        let m = &self.cfg.render;
+        if m.measured_render == RenderMode::Auto
+            && m.measured_workers == WorkersMode::Auto
+            && m.measured_vsync == VsyncMode::Auto
+            && m.measured_cores == 0
+        {
+            t!("render.unmeasured").into_owned()
+        } else {
+            t!(
+                "render.measured",
+                v = format!(
+                    "{}/{}/{}, {} cores",
+                    m.measured_render.file_str(),
+                    m.measured_workers.file_str(),
+                    m.measured_vsync.file_str(),
+                    m.measured_cores
+                )
+            )
+            .into_owned()
         }
     }
 
@@ -631,6 +727,12 @@ impl App {
                 egui::RichText::new(t!("sum.blt", v = self.cfg.render.blt_op.file_str())).weak(),
             );
         }
+        page.label(
+            egui::RichText::new(t!("sum.workers", v = self.cfg.render.workers.file_str())).weak(),
+        );
+        page.label(
+            egui::RichText::new(t!("sum.vsync", v = self.cfg.render.vsync.file_str())).weak(),
+        );
         page.label(egui::RichText::new(t!("sum.play", v = self.play_text())).weak());
         page.label(egui::RichText::new(self.measured_line()).weak());
     }
@@ -709,6 +811,46 @@ impl App {
                     ui.small(t!("accel.blt_hidden"));
                 }
                 ui.add_space(10.0);
+                ui.label(t!("accel.workers"));
+                // Blt 恒单线程，workers 无意义：只给提示，不摆开关。
+                if self.cfg.render.mode == RenderMode::Blt {
+                    ui.small(t!("accel.workers_hidden"));
+                } else {
+                    ui.horizontal(|ui| {
+                        for v in WorkersMode::ALL {
+                            if self.option_button(ui, self.cfg.render.workers == v, v.file_str()) {
+                                self.cfg.render.workers = v;
+                            }
+                        }
+                    });
+                    ui.small(workers_desc(self.cfg.render.workers));
+                }
+                ui.add_space(10.0);
+                ui.label(t!("accel.vsync"));
+                ui.horizontal(|ui| {
+                    for v in VsyncMode::ALL {
+                        if self.option_button(ui, self.cfg.render.vsync == v, v.file_str()) {
+                            self.cfg.render.vsync = v;
+                        }
+                    }
+                });
+                ui.small(vsync_desc(self.cfg.render.vsync));
+                ui.horizontal(|ui| {
+                    ui.label(self.render_measured_line());
+                    if egui_glass::GlassButton::new(t!("render.rebench"))
+                        .show(ui)
+                        .clicked()
+                    {
+                        // 清零记忆并存盘：任一 auto 下次启动重校准。
+                        self.cfg.render.measured_render = RenderMode::Auto;
+                        self.cfg.render.measured_workers = WorkersMode::Auto;
+                        self.cfg.render.measured_vsync = VsyncMode::Auto;
+                        self.cfg.render.measured_cores = 0;
+                        let p = self.path.clone();
+                        self.save_to(&p);
+                    }
+                });
+                ui.add_space(10.0);
                 ui.label(t!("play.fps"));
                 // 三段滑杆：0 = auto，1-240 = 限速，241 = max。
                 // 文本先算好：滑杆拿 &mut play_f 时不能再借 self。
@@ -751,6 +893,9 @@ impl App {
                 if self.cfg.render.mode == RenderMode::Blt {
                     ui.label(t!("sum.blt", v = self.cfg.render.blt_op.file_str()));
                 }
+                ui.label(t!("sum.workers", v = self.cfg.render.workers.file_str()));
+                ui.label(t!("sum.vsync", v = self.cfg.render.vsync.file_str()));
+                ui.label(self.render_measured_line());
                 ui.label(t!("sum.play", v = self.play_text()));
                 ui.label(self.measured_line());
                 ui.label(t!("sum.version", v = self.cfg.version));
@@ -856,6 +1001,8 @@ impl eframe::App for App {
                     ui.add_space(8.0);
                     ui.small(t!("sum.accel", v = self.cfg.accel.level.file_str()));
                     ui.small(t!("sum.render", v = self.cfg.render.mode.file_str()));
+                    ui.small(t!("sum.workers", v = self.cfg.render.workers.file_str()));
+                    ui.small(t!("sum.vsync", v = self.cfg.render.vsync.file_str()));
                     ui.small(t!("sum.version", v = self.cfg.version));
                 });
                 ui.add_space(8.0);
