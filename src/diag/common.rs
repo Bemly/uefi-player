@@ -82,6 +82,15 @@ pub fn wait_key() -> char {
     wait_key_ex().0
 }
 
+/// 非阻塞探一个可打印按键（菜单壁纸 idle 循环用）：有键返回，无键立即 `None`。
+/// 归一化规则与 `wait_key_ex` 一致（小写 + 原始码），不排空队列、不 stall。
+pub fn poll_key() -> Option<(char, u16)> {
+    uefi::system::with_stdin(|input| match input.read_key() {
+        Ok(Some(key)) => key_to_char(key).map(|(c, raw)| (c.to_ascii_lowercase(), raw)),
+        _ => None,
+    })
+}
+
 /// 子项跑完后的统一收尾：提示 + 等任意键回菜单。
 pub fn pause_return(screen: &mut Screen) {
     screen.draw_str("-- Done. Press any key back to menu --");

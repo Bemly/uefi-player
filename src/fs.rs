@@ -1,3 +1,4 @@
+use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 use uefi::boot::{get_image_file_system, image_handle};
@@ -59,6 +60,39 @@ impl Fs {
         file.write(data).map_err(|e| e.status())?;
         file.flush()?;
         Ok(())
+    }
+
+    /// 打开子目录（BLS `loader/entries`、壁纸 `wallpaper/` 枚举用）。
+    pub fn open_dir(&mut self, path: &CStr16) -> Result<Directory> {
+        self.root_dir
+            .open(path, FileMode::Read, FileAttribute::empty())?
+            .into_directory()
+            .ok_or(NyaStatus::NotRegularFile)
+    }
+
+    /// 列目录直属项 `(名, 是否目录)`。`uefi-rs` 没有现成 walker，
+    /// `read_entry` 循环 20 行自研（见 `src/boot/entries.rs` 头注释轮子结论）。
+    /// 固定 512B 缓冲：FAT 长文件名一般够用，超长返回 BUFFER_TOO_SMALL 即停
+    /// （调用方记 warning，不炸；BLS/壁纸文件名都是短名）。
+    pub fn list_dir(&mut self, path: &CStr16) -> Result<Vec<(String, bool)>> {
+        let mut dir = self.open_dir(path)?;
+        let mut out = Vec::new();
+        let mut buf = vec![0u8; 512];
+        loop {
+            match dir.read_entry(&mut buf) {
+                Ok(None) => break,
+                Ok(Some(info)) => {
+                    let name = String::from(info.file_name());
+                    if name == "." || name == ".." {
+                        continue;
+                    }
+                    out.push((name, info.is_directory()));
+                }
+                Err(e) if e.status() == Status::BUFFER_TOO_SMALL => break,
+                Err(e) => Err(e.status())?,
+            }
+        }
+        Ok(out)
     }
 
     // 一次性读取全部内容，慎用

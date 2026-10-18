@@ -3,6 +3,7 @@
 
 extern crate alloc;
 
+mod boot;
 mod config;
 mod diag;
 mod error;
@@ -10,6 +11,7 @@ mod fs;
 mod graphics;
 mod menu;
 mod video;
+mod wallpaper;
 
 use uefi::prelude::*;
 

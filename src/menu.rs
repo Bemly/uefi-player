@@ -9,10 +9,11 @@ use core::time::Duration;
 
 use uefi::boot::stall;
 
-use crate::diag::common::{flush_keys, pause_return, wait_key_ex};
+use crate::diag::common::{flush_keys, pause_return, poll_key};
 use crate::diag::registry::{Entry, ITEMS};
 use crate::error::{handle_fatal, NyaStatus, Result};
-use crate::graphics::Screen;
+use crate::graphics::{Screen, calibrate_tps, tsc};
+use crate::wallpaper::{self, WP_H, WP_TOP, WP_W, WallpaperSet};
 
 fn draw_menu(screen: &mut Screen) {
     let _ = screen.clear();
@@ -44,6 +45,58 @@ fn run_shared(screen: &mut Screen, f: fn(&mut Screen) -> Result, fatal: bool) {
     }
 }
 
+/// 开机预载菜单背景：开关关/无片源/分辨率不对都返回 `None`。
+fn load_background(screen: &mut Screen) -> Option<WpState> {
+    let set = wallpaper::load().unwrap_or(None)?;
+    if set.is_empty() {
+        return None;
+    }
+    let (w, h) = screen.get_gop().current_mode_info().resolution();
+    if (w as usize, h as usize) != (WP_W, WP_H) {
+        log::warn!("wallpaper: menu bg skipped (mode {}x{}, need 1920x1080)", w, h);
+        return None;
+    }
+    let tps = calibrate_tps();
+    let budget = tps.max(1) / crate::config::wallpaper_fps().max(1) as u64;
+    Some(WpState {
+        set,
+        idx: 0,
+        last: tsc(),
+        budget,
+    })
+}
+
+/// 阻塞等按键，空闲时按帧预算在文字区下方播壁纸（`WP_TOP` 以下行区，
+/// 菜单文字不重画——`draw_str` 逐像素 `VideoFill` 跟不上帧率）。
+/// 无壁纸时等价旧 `wait_key_ex`（轮询 + 短 stall）。
+fn wait_key_or_animate(screen: &mut Screen, wp: &mut Option<WpState>) -> (char, u16) {
+    loop {
+        if let Some((key, raw)) = poll_key() {
+            return (key, raw);
+        }
+        let mut kill_wp = false;
+        if let Some(st) = wp {
+            let now = tsc();
+            if now.saturating_sub(st.last) >= st.budget {
+                st.last = now;
+                // 行区 paint 失败（如 GOP 抖动）就停背景，不炸菜单。
+                if screen
+                    .upload_frame_region(WP_W, WP_H, WP_TOP, st.set.frame(st.idx))
+                    .is_ok()
+                {
+                    st.idx += 1;
+                } else {
+                    kill_wp = true;
+                }
+            }
+        }
+        if kill_wp {
+            *wp = None;
+        }
+        stall(Duration::from_millis(5));
+    }
+}
+
 /// 兜底比对：部分固件把扫描码/高位塞进 unicode_char（如数字键给 0x8038
 /// 而非 0x0038），直接比字符就全线 Unknown。这里再拿低 8 位/低 7 位试一次。
 fn key_match(want: char, key: char, raw: u16) -> bool {
@@ -52,11 +105,27 @@ fn key_match(want: char, key: char, raw: u16) -> bool {
         || want == ((raw & 0x7F) as u8 as char).to_ascii_lowercase()
 }
 
+/// 壁纸 idle 状态：预载集 + 下一帧序号 + 上一帧 ticks + 帧预算。
+struct WpState {
+    set: WallpaperSet,
+    idx: usize,
+    last: u64,
+    budget: u64,
+}
+
 pub fn run_menu(mut screen: Screen) -> ! {
+    // P4-A：菜单背景预载（关/无片源/分辨率不对 → None，纯静态菜单）。
+    let mut wp = load_background(&mut screen);
+    let mut wp_warned = false;
     loop {
         draw_menu(&mut screen);
+        // 开着但没片源：提示一次（随后重画不再刷，避免挤占行区预留）。
+        if crate::config::wallpaper_enabled() && wp.is_none() && !wp_warned {
+            screen.draw_str("wallpaper: enabled but no frames, static menu.");
+            wp_warned = true;
+        }
         flush_keys();
-        let (key, raw) = wait_key_ex();
+        let (key, raw) = wait_key_or_animate(&mut screen, &mut wp);
 
         if key_match('r', key, raw) {
             uefi::runtime::reset(uefi::runtime::ResetType::COLD, uefi::Status::SUCCESS, None);

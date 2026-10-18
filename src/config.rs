@@ -22,6 +22,11 @@
 //! [play]
 //! fps = "auto"            # "auto" | "max" | "1".."240"
 //! measured_max_fps = 0    # 固件实测后回写，GUI 只读展示
+//! [wallpaper]
+//! enable = false          # 菜单背景 + 引导过渡总开关（默认关）
+//! fps = 15                # 背景循环帧率（低帧即可）
+//! frames = 0              # B 过渡封顶帧数（0 = 全播预载集）
+//! preload = 8             # A/B 共用预载帧数上限（1080p BGRA ≈ 8MB/帧）
 //! ```
 
 use alloc::format;
@@ -233,6 +238,7 @@ pub struct Config {
     pub accel: AccelConfig,
     pub render: RenderConfig,
     pub play: PlayConfig,
+    pub wallpaper: WallpaperConfig,
 }
 
 impl Default for Config {
@@ -242,6 +248,42 @@ impl Default for Config {
             accel: AccelConfig::default(),
             render: RenderConfig::default(),
             play: PlayConfig::default(),
+            wallpaper: WallpaperConfig::default(),
+        }
+    }
+}
+
+const fn default_wallpaper_fps() -> u32 {
+    15
+}
+
+const fn default_wallpaper_preload() -> u32 {
+    8
+}
+
+/// `[wallpaper]`：动态壁纸开关（P4）。序列位图 `wallpaper/frameNNNN.raw`
+///（BGRA 直存，首版定死 1920x1080），缺键老配置按默认（关）处理。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WallpaperConfig {
+    pub enable: bool,
+    #[serde(default = "default_wallpaper_fps")]
+    pub fps: u32,
+    /// B 过渡封顶帧数（0 = 全播预载集）。
+    #[serde(default)]
+    pub frames: u32,
+    /// 预载帧数上限（内存兜底；单帧 1920x1080x4 ≈ 8MB）。
+    #[serde(default = "default_wallpaper_preload")]
+    pub preload: u32,
+}
+
+impl Default for WallpaperConfig {
+    fn default() -> Self {
+        Self {
+            enable: false,
+            fps: default_wallpaper_fps(),
+            frames: 0,
+            preload: default_wallpaper_preload(),
         }
     }
 }
@@ -330,6 +372,10 @@ static MEASURED_RENDER: AtomicU8 = AtomicU8::new(0);
 static MEASURED_WORKERS: AtomicU8 = AtomicU8::new(0);
 static MEASURED_VSYNC: AtomicU8 = AtomicU8::new(0);
 static MEASURED_CORES: AtomicU32 = AtomicU32::new(0);
+static WALLPAPER_ENABLE: AtomicU8 = AtomicU8::new(0);
+static WALLPAPER_FPS: AtomicU32 = AtomicU32::new(default_wallpaper_fps());
+static WALLPAPER_FRAMES: AtomicU32 = AtomicU32::new(0);
+static WALLPAPER_PRELOAD: AtomicU32 = AtomicU32::new(default_wallpaper_preload());
 static TUNE_FRAMES: AtomicU32 = AtomicU32::new(default_frames());
 /// 0 = auto，1 = capped，2 = max（`play.fps` 的解析结果）。
 static PLAY_MODE: AtomicU8 = AtomicU8::new(0);
@@ -365,6 +411,10 @@ pub fn load() -> Option<String> {
         FpsPolicy::Max => PLAY_MODE.store(2, Ordering::Relaxed),
     }
     PLAY_MEASURED.store(cfg.play.measured_max_fps, Ordering::Relaxed);
+    WALLPAPER_ENABLE.store(cfg.wallpaper.enable as u8, Ordering::Relaxed);
+    WALLPAPER_FPS.store(cfg.wallpaper.fps.clamp(1, 60).max(1), Ordering::Relaxed);
+    WALLPAPER_FRAMES.store(cfg.wallpaper.frames, Ordering::Relaxed);
+    WALLPAPER_PRELOAD.store(cfg.wallpaper.preload.clamp(1, 32).max(1), Ordering::Relaxed);
     log::info!(
         "cfg: version={} accel.level={:?} render.mode={:?} workers={:?} vsync={:?} blt_op={:?} tune.frames={} measured(render={:?} workers={:?} vsync={:?} cores={}) play.fps={} measured_max_fps={}",
         cfg.version,
@@ -469,6 +519,23 @@ pub fn measured_vsync() -> VsyncMode {
 /// 校准时机型 AP+BSP 总数（0 = 未测）。
 pub fn measured_cores() -> u32 {
     MEASURED_CORES.load(Ordering::Relaxed)
+}
+
+/// 壁纸总开关（P4-A 菜单背景 + P4-B 引导过渡共用）。
+pub fn wallpaper_enabled() -> bool {
+    WALLPAPER_ENABLE.load(Ordering::Relaxed) != 0
+}
+/// 壁纸循环帧率（1-60，已钳制）。
+pub fn wallpaper_fps() -> u32 {
+    WALLPAPER_FPS.load(Ordering::Relaxed).max(1)
+}
+/// B 过渡封顶帧数（0 = 全播预载集）。
+pub fn wallpaper_frames() -> u32 {
+    WALLPAPER_FRAMES.load(Ordering::Relaxed)
+}
+/// 预载帧数上限（1-32，已钳制；单帧约 8MB，内存兜底）。
+pub fn wallpaper_preload() -> u32 {
+    WALLPAPER_PRELOAD.load(Ordering::Relaxed).max(1)
 }
 
 /// 是否有 auto 维度尚未校准（任一 auto 无记忆即 true，首启必 true）。

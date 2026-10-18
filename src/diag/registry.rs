@@ -7,6 +7,7 @@
 //!   菜单会在运行前 `drop(Screen)` 释放独占，跑完重建。目前只有
 //!   embedded-graphics 中文演示是这种形态。
 
+use crate::boot;
 use crate::diag::{
     avx_checker, fw_collect, get_cpu_info, get_multi_monitor, get_smbios, mp_service,
     multi_core_draw, use_embedded_graphics_gop,
@@ -105,6 +106,13 @@ pub const ITEMS: &[Item] = &[
         name: "FW collect",
         desc: "SMBIOS+PCI+disks, save USB",
         run: Entry::Shared(fw_collect::run),
+        fatal_on_error: false,
+    },
+    Item {
+        key: 'b',
+        name: "Boot entries",
+        desc: "BLS enumerate + chainload",
+        run: Entry::Exclusive(boot::run),
         fatal_on_error: false,
     },
 ];

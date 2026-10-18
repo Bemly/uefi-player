@@ -279,6 +279,45 @@ impl Screen {
         })?)
     }
 
+    /// 行区上屏（壁纸菜单背景）：只画 rows `y0..height`，菜单文字区不动。
+    /// Blt 走 `SubRectangle` 取源行区；direct 逐行拷（stride 感知）。
+    pub fn upload_frame_region(
+        &mut self,
+        width: usize,
+        height: usize,
+        y0: usize,
+        pixels: &[BltPixel],
+    ) -> Result {
+        let y0 = y0.min(height);
+        match config::effective_render() {
+            RenderMode::Blt => Ok(self.gop.blt(BltOp::BufferToVideo {
+                buffer: pixels,
+                src: BltRegion::SubRectangle {
+                    coords: (0, y0),
+                    px_stride: width,
+                },
+                dest: (0, y0),
+                dims: (width, height - y0),
+            })?),
+            _ => {
+                let stride = self.gop.current_mode_info().stride();
+                let mut fb = self.gop.frame_buffer();
+                let dst = fb.as_mut_ptr();
+                let src = pixels.as_ptr() as *const u8;
+                unsafe {
+                    for y in y0..height {
+                        core::ptr::copy_nonoverlapping(
+                            src.add(y * width * 4),
+                            dst.add(y * stride * 4),
+                            width * 4,
+                        );
+                    }
+                }
+                Ok(())
+            }
+        }
+    }
+
     /// CPU 直写 framebuffer（stride 感知）。
     fn upload_direct(&mut self, width: usize, height: usize, pixels: &[BltPixel]) -> Result {
         let stride = self.gop.current_mode_info().stride();
@@ -593,7 +632,7 @@ impl Screen {
 
 /// 时间戳计数。非 x86_64 返回 0（auto 会退回 direct）。
 #[inline(always)]
-fn tsc() -> u64 {
+pub(crate) fn tsc() -> u64 {
     #[cfg(target_arch = "x86_64")]
     unsafe {
         core::arch::x86_64::_rdtsc()
@@ -605,7 +644,7 @@ fn tsc() -> u64 {
 }
 
 /// TSC 频率校准（100ms × 2，和 `hw_bench` 同方法）。vsync 60fps 预算用。
-fn calibrate_tps() -> u64 {
+pub(crate) fn calibrate_tps() -> u64 {
     uefi::boot::stall(Duration::from_millis(100));
     let s = tsc();
     uefi::boot::stall(Duration::from_millis(100));
