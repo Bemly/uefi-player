@@ -5,3 +5,6 @@
 NvVars
 Cargo.lock
 .DS_Store
+
+# host GUI 独立包构建产物（tools/config-gui 有自己的 target）
+tools/**/target/
