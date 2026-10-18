@@ -10,8 +10,12 @@
 //!   `t!` + `set_locale`）最轻；`fluent` 要 unic-langid + ftl 文件，杀鸡用牛刀，
 //!   故用前者。文案全在 `locales/`，中英切换只是 `set_locale`。
 //! - 搜过 CJK 字体：egui 默认字体无中文字形，系统字体各平台 ttc 路径不一且
-//!   ab_glyph 对 ttc 支持存疑，故用 Noto Sans SC 按 `zh-CN.yml` 实际用字子集化
-//!   （`assets/cjk.ttf` 53KB，`include_bytes!` 编进二进制），不带 17MB 全量。
+//!   egui 只取合集第 0 个字重；`egui-chinese-font` 是调系统字体的 std 轮，
+//!   免打包但吃整套系统字库。最终用缝合像素 fusion-pixel 10px proportional
+//!   简中 TTF（真 `glyf` 轮廓，skrifa 可吃；`ms.bitmap/otb/pcf` 纯位图的不行）：
+//!   按实际用字子集化（`assets/fusion10.ttf` 72KB，`include_bytes!` 编进二进制，
+//!   OFL-1.1 见 `assets/OFL.txt`），放字体链首位，全 UI 像素风，西文 fallback
+//!   到默认字体。8x8 中文 Rust 轮子无现货（font8x8 无中文），不找了。
 //! - 驱动：`eframe` 的 `wgpu` 特性即 wgpu 驱动；`egui_glass` 不支持 glow，
 //!   故 `NativeOptions.renderer` 强制 `Wgpu`。
 //!
@@ -315,17 +319,17 @@ struct App {
 
 impl App {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        // CJK 子集字体优先（西文缺字形会 fallback 到默认字体）。
+        // 缝合像素 10px 简中子集优先（西文缺字形会 fallback 到默认字体）。
         let mut fonts = egui::FontDefinitions::default();
         fonts.font_data.insert(
-            "cjk".to_owned(),
-            egui::FontData::from_static(include_bytes!("../assets/cjk.ttf")).into(),
+            "fusion".to_owned(),
+            egui::FontData::from_static(include_bytes!("../assets/fusion10.ttf")).into(),
         );
         if let Some(fam) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
-            fam.insert(0, "cjk".to_owned());
+            fam.insert(0, "fusion".to_owned());
         }
         if let Some(fam) = fonts.families.get_mut(&egui::FontFamily::Monospace) {
-            fam.insert(0, "cjk".to_owned());
+            fam.insert(0, "fusion".to_owned());
         }
         // 双胞胎上下文用同一套字体（含 cjk），离屏排版才和可见一致。
         let live_fonts = fonts.clone();
