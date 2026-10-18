@@ -1,4 +1,3 @@
-use alloc::format;
 use alloc::vec;
 use alloc::vec::Vec;
 use uefi::proto::console::gop::BltPixel;

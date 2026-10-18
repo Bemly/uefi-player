@@ -106,6 +106,8 @@ pub fn load() -> Result<Option<WallpaperSet>> {
         frames.push(bytes_as_pixels(bytes));
     }
     if frames.is_empty() {
+        // 全跳过也记一笔（曾静默，QEMU 实测靠它定位到测试帧尺寸写错）。
+        log::warn!("wallpaper: no valid frames ({} skipped)", skipped);
         return Ok(None);
     }
     if skipped > 0 {

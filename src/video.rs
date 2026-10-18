@@ -93,12 +93,17 @@ pub fn video_run(screen: &mut Screen) -> Result {
     //   direct + bsp   → BSP 单核直写（MP 关闭或校准判单核更快）
     //   direct + all   → 原来的多核直写
     match crate::config::effective_render() {
-        crate::config::RenderMode::Blt => blt_loop(screen, file, VIDEO_W, VIDEO_H, target, tps),
+        crate::config::RenderMode::Blt => {
+            log::info!("play: path=blt_loop");
+            blt_loop(screen, file, VIDEO_W, VIDEO_H, target, tps)
+        }
         _ => match crate::config::effective_workers() {
             crate::config::WorkersMode::BspOnly => {
+                log::info!("play: path=direct_loop");
                 direct_loop(screen, file, VIDEO_W, VIDEO_H, target, tps)
             }
             _ => {
+                log::info!("play: path=mp_draw");
                 let mut file = file;
                 mp_draw(screen, &mut file, VIDEO_W, VIDEO_H, target, tps)
             }
@@ -578,6 +583,10 @@ extern "efiapi" fn play_task(arg: *mut c_void) {
         // fi 已含本轮 skip，下一起点顺延（全核同公式，永不发散）。
         local_frame_idx = (fi + 1) % ctx.total_frames.max(1);
         iter += 1;
+        // 里程碑：BSP 每 256 轮报一次（串口-only；卡死时最后行号即定位）。
+        if my_id == 0 && (iter & 255) == 0 {
+            log::warn!("play: alive round={} drops={}", iter, drops_total);
+        }
     }
 }
 
@@ -743,7 +752,10 @@ pub fn mp_draw(
     if n_cores > 1 {
         // 使用你彩色代码中成功的 startup_all_aps
         // 注意：如果你需要它不阻塞持续播放，这里要设置为 false (非阻塞启动)
-        let _ = mp.startup_all_aps(false, play_task, arg_ptr, Some(event), None);
+        // 启动失败不静默：BSP 会永远卡在首轮栅栏（QEMU 实测定位过一次）。
+        if let Err(e) = mp.startup_all_aps(false, play_task, arg_ptr, Some(event), None) {
+            log::warn!("play: startup_all_aps failed: {:?}, BSP-only fallback", e.status());
+        }
     }
 
     // --- BSP 亲自执行 ---
