@@ -25,7 +25,9 @@ measured_vsync   = "auto"  # "on" | "off"
 measured_cores   = 0       # 校准时机型 AP+BSP 总数
 
 [render.tune]
-frames = 30             # 每次矩阵/微基准的帧数（>=1）
+frames    = 30          # 每次矩阵/微基准的帧数（>=1，GUI 1-120）
+tile_rows = 64          # tile 高（行），MP 自调度切块粒度（8-512）
+vsync_fps = 60          # vsync 预算帧率：on 的封顶 + auto 探测达标线（15-240）
 
 [play]
 fps = "auto"            # auto | max | 1..240
@@ -47,5 +49,6 @@ preload = 8             # 预载帧数上限（1-32；1080p BGRA 单帧约 8MB�
 - `dist=auto`：全核路静态分区 vs tile 自调度取快（tile 按 64 行切块，
   BSP+AP 从共享游标领活；异构大小核/负载不均时赢；OSD 行划出 tile，
   AP 不再盖 OSD 字）。单核/Blt 下无意义，不记。
-- `vsync=auto`：冠军路径 60fps 零超期则开，否则关；开 = 播放叠 60fps 帽。
+- `vsync=auto`：冠军路径按 `tune.vsync_fps` 零超期则开，否则关；
+  开 = 播放叠 `tune.vsync_fps` 帽（默认 60fps）。
 - `accel.level=auto`：探最高可用位宽；显式档位只管上限语义，实际搬运走位宽。

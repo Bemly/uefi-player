@@ -216,6 +216,14 @@ fn default_wallpaper_preload() -> u32 {
     8
 }
 
+fn default_tile_rows() -> u32 {
+    64
+}
+
+fn default_vsync_fps() -> u32 {
+    60
+}
+
 /// 播放帧率开关（与固件 `parse_fps` 同逻辑：非法值回落 auto）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FpsPolicy {
@@ -249,17 +257,24 @@ impl Default for AccelConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+/// `[render.tune]`：矩阵全部数字旋钮（无 auto 维度，改完存盘即生效）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 struct RenderTune {
     #[serde(default = "default_frames")]
     frames: u32,
+    #[serde(default = "default_tile_rows")]
+    tile_rows: u32,
+    #[serde(default = "default_vsync_fps")]
+    vsync_fps: u32,
 }
 
 impl Default for RenderTune {
     fn default() -> Self {
         Self {
             frames: default_frames(),
+            tile_rows: default_tile_rows(),
+            vsync_fps: default_vsync_fps(),
         }
     }
 }
@@ -459,6 +474,13 @@ struct App {
     wp_fps_f: f32,
     wp_frames_f: f32,
     wp_preload_f: f32,
+    /// 微调滑杆镜像：frames 1-120，tile_rows 8-512（步进 8），vsync_fps 15-240。
+    tune_frames_f: f32,
+    tune_tile_f: f32,
+    tune_vsync_fps_f: f32,
+    /// 存盘时对比：tune 变了就清空全部实测记忆（bench 条件变了，旧结论作废，
+    /// 下次启动重测；否则改 tune 永不生效——记忆命中直接跳过矩阵）。
+    tune_at_load: RenderTune,
     glass: bool,
     /// 深色模式：egui visuals + 纯黑 backdrop + 深色玻璃预设三处联动。
     dark: bool,
@@ -514,6 +536,10 @@ impl App {
             wp_fps_f: default_wallpaper_fps() as f32,
             wp_frames_f: 0.0,
             wp_preload_f: default_wallpaper_preload() as f32,
+            tune_frames_f: default_frames() as f32,
+            tune_tile_f: default_tile_rows() as f32,
+            tune_vsync_fps_f: default_vsync_fps() as f32,
+            tune_at_load: RenderTune::default(),
             glass,
             dark: false,
             zh: false,
@@ -537,6 +563,9 @@ impl App {
         self.wp_fps_f = self.cfg.wallpaper.fps.clamp(1, 30) as f32;
         self.wp_frames_f = self.cfg.wallpaper.frames.min(120) as f32;
         self.wp_preload_f = self.cfg.wallpaper.preload.clamp(1, 16) as f32;
+        self.tune_frames_f = self.cfg.render.tune.frames.clamp(1, 120) as f32;
+        self.tune_tile_f = self.cfg.render.tune.tile_rows.clamp(8, 512) as f32;
+        self.tune_vsync_fps_f = self.cfg.render.tune.vsync_fps.clamp(15, 240) as f32;
     }
 
     /// 滑杆/摘要共用的档位文本。
@@ -597,6 +626,7 @@ impl App {
                     .into_owned();
                     self.cfg = cfg;
                     self.sync_widgets();
+                    self.tune_at_load = self.cfg.render.tune;
                     self.status = msg;
                     self.path = path;
                 }
@@ -613,7 +643,21 @@ impl App {
     }
 
     fn save_to(&mut self, path: &str) {
+        // 落盘前钳住 tune（滑杆已钳，这里防手改文件后的脏值回写）。
         self.cfg.render.tune.frames = self.cfg.render.tune.frames.max(1);
+        self.cfg.render.tune.tile_rows = self.cfg.render.tune.tile_rows.clamp(8, 512);
+        self.cfg.render.tune.vsync_fps = self.cfg.render.tune.vsync_fps.clamp(15, 240);
+        // tune 变了 = bench 条件变了：旧记忆作废，下次启动重测。
+        // 不做这个，改 tune 会被“有记忆快启”吞掉，永远不生效。
+        if self.cfg.render.tune != self.tune_at_load {
+            self.cfg.render.measured_render = RenderMode::Auto;
+            self.cfg.render.measured_workers = WorkersMode::Auto;
+            self.cfg.render.measured_dist = DistMode::Auto;
+            self.cfg.render.measured_vsync = VsyncMode::Auto;
+            self.cfg.render.measured_cores = 0;
+            self.cfg.play.measured_max_fps = 0;
+        }
+        self.tune_at_load = self.cfg.render.tune;
         match toml::to_string(&self.cfg) {
             Ok(text) => match std::fs::write(path, text) {
                 Ok(()) => {
@@ -686,6 +730,7 @@ impl App {
             Action::Reset => {
                 self.cfg = FileConfig::default();
                 self.sync_widgets();
+                self.tune_at_load = self.cfg.render.tune;
                 self.status = t!("status.reset").into_owned();
             }
             Action::ToggleTheme => {
@@ -954,6 +999,48 @@ impl App {
                     }
                 });
                 ui.small(vsync_desc(self.cfg.render.vsync));
+                ui.add_space(10.0);
+                ui.label(t!("tune.heading"));
+                ui.small(t!("tune.hint"));
+                ui.label(t!("tune.frames"));
+                let frames_label = format!("{} frames", self.cfg.render.tune.frames);
+                egui_glass::GlassSlider::new(&mut self.tune_frames_f, 1.0..=120.0)
+                    .text(frames_label)
+                    .step_by(1.0)
+                    .style(if self.dark {
+                        egui_glass::GlassStyle::dark()
+                    } else {
+                        egui_glass::GlassStyle::regular()
+                    })
+                    .show(ui);
+                self.cfg.render.tune.frames = self.tune_frames_f.round().clamp(1.0, 120.0) as u32;
+                ui.label(t!("tune.tile_rows"));
+                let tile_label = format!("{} rows", self.cfg.render.tune.tile_rows);
+                egui_glass::GlassSlider::new(&mut self.tune_tile_f, 8.0..=512.0)
+                    .text(tile_label)
+                    .step_by(8.0)
+                    .style(if self.dark {
+                        egui_glass::GlassStyle::dark()
+                    } else {
+                        egui_glass::GlassStyle::regular()
+                    })
+                    .show(ui);
+                self.cfg.render.tune.tile_rows = self.tune_tile_f.round().clamp(8.0, 512.0) as u32;
+                ui.label(t!("tune.vsync_fps"));
+                let vsync_fps_label = format!("{} fps", self.cfg.render.tune.vsync_fps);
+                egui_glass::GlassSlider::new(&mut self.tune_vsync_fps_f, 15.0..=240.0)
+                    .text(vsync_fps_label)
+                    .step_by(1.0)
+                    .style(if self.dark {
+                        egui_glass::GlassStyle::dark()
+                    } else {
+                        egui_glass::GlassStyle::regular()
+                    })
+                    .show(ui);
+                self.cfg.render.tune.vsync_fps =
+                    self.tune_vsync_fps_f.round().clamp(15.0, 240.0) as u32;
+                ui.small(t!("tune.note"));
+                ui.add_space(10.0);
                 ui.horizontal(|ui| {
                     ui.label(self.render_measured_line());
                     if egui_glass::GlassButton::new(t!("render.rebench"))
@@ -1254,6 +1341,29 @@ mod schema_tests {
         assert_eq!(cfg.wallpaper.preload, default_wallpaper_preload());
         assert_eq!(cfg.render.dist, DistMode::Auto);
         assert_eq!(cfg.render.measured_dist, DistMode::Auto);
+    }
+
+    #[test]
+    fn tune_fields_roundtrip() {
+        let mut cfg = FileConfig::default();
+        cfg.render.tune.frames = 45;
+        cfg.render.tune.tile_rows = 32;
+        cfg.render.tune.vsync_fps = 90;
+        let text = toml::to_string(&cfg).unwrap();
+        let back: FileConfig = toml::from_str(&text).unwrap();
+        assert_eq!(back.render.tune.frames, 45);
+        assert_eq!(back.render.tune.tile_rows, 32);
+        assert_eq!(back.render.tune.vsync_fps, 90);
+    }
+
+    #[test]
+    fn tune_missing_keys_use_defaults() {
+        // 比 wallpaper 测试更老的文件：连 [render.tune] 都没有。
+        let text = "version = 1\n[accel]\nlevel = \"auto\"\n[render]\nmode = \"auto\"\n[play]\nfps = \"auto\"\n";
+        let cfg: FileConfig = toml::from_str(text).unwrap();
+        assert_eq!(cfg.render.tune.frames, default_frames());
+        assert_eq!(cfg.render.tune.tile_rows, default_tile_rows());
+        assert_eq!(cfg.render.tune.vsync_fps, default_vsync_fps());
     }
 
     #[test]

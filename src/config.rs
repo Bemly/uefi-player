@@ -20,7 +20,9 @@
 //! measured_vsync   = "auto"  # "on" | "off"
 //! measured_cores   = 0       # 校准时机型 AP+BSP 总数
 //! [render.tune]
-//! frames = 30
+//! frames    = 30   # 每次矩阵/微基准的帧数（>=1）
+//! tile_rows = 64   # tile 高（行），MP 自调度切块粒度（8-512）
+//! vsync_fps = 60   # vsync 预算帧率：on 的封顶 + auto 探测达标线（15-240）
 //! [play]
 //! fps = "auto"            # "auto" | "max" | "1".."240"
 //! measured_max_fps = 0    # 固件实测后回写，GUI 只读展示
@@ -251,16 +253,35 @@ const fn default_frames() -> u32 {
     30
 }
 
+const fn default_tile_rows() -> u32 {
+    64
+}
+
+const fn default_vsync_fps() -> u32 {
+    60
+}
+
+/// `[render.tune]`：矩阵全部数字旋钮（GUI 逐项可拨，无 auto 维度，改完即生效）。
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RenderTune {
     #[serde(default = "default_frames")]
     pub frames: u32,
+    /// tile 高（行）：MP 自调度切块粒度，BSP+AP 共用。
+    #[serde(default = "default_tile_rows")]
+    pub tile_rows: u32,
+    /// vsync 预算帧率：`vsync=on` 的封顶 + auto 探测的达标线。
+    #[serde(default = "default_vsync_fps")]
+    pub vsync_fps: u32,
 }
 
 impl Default for RenderTune {
     fn default() -> Self {
-        Self { frames: default_frames() }
+        Self {
+            frames: default_frames(),
+            tile_rows: default_tile_rows(),
+            vsync_fps: default_vsync_fps(),
+        }
     }
 }
 
@@ -436,6 +457,8 @@ static WALLPAPER_FPS: AtomicU32 = AtomicU32::new(default_wallpaper_fps());
 static WALLPAPER_FRAMES: AtomicU32 = AtomicU32::new(0);
 static WALLPAPER_PRELOAD: AtomicU32 = AtomicU32::new(default_wallpaper_preload());
 static TUNE_FRAMES: AtomicU32 = AtomicU32::new(default_frames());
+static TUNE_TILE_ROWS: AtomicU32 = AtomicU32::new(default_tile_rows());
+static TUNE_VSYNC_FPS: AtomicU32 = AtomicU32::new(default_vsync_fps());
 /// 0 = auto，1 = capped，2 = max（`play.fps` 的解析结果）。
 static PLAY_MODE: AtomicU8 = AtomicU8::new(0);
 static PLAY_CAP: AtomicU32 = AtomicU32::new(0);
@@ -468,6 +491,8 @@ pub fn load() -> Option<String> {
     MEASURED_CORES.store(cfg.render.measured_cores, Ordering::Relaxed);
     BLTOP.store(cfg.render.blt_op as u8, Ordering::Relaxed);
     TUNE_FRAMES.store(cfg.render.tune.frames.max(1), Ordering::Relaxed);
+    TUNE_TILE_ROWS.store(cfg.render.tune.tile_rows.clamp(8, 512), Ordering::Relaxed);
+    TUNE_VSYNC_FPS.store(cfg.render.tune.vsync_fps.clamp(15, 240), Ordering::Relaxed);
     match parse_fps(&cfg.play.fps) {
         FpsPolicy::Auto => PLAY_MODE.store(0, Ordering::Relaxed),
         FpsPolicy::Capped(n) => {
@@ -521,6 +546,16 @@ pub fn blt_op() -> BltOpKind {
 
 pub fn tune_frames() -> u32 {
     TUNE_FRAMES.load(Ordering::Relaxed)
+}
+
+/// tile 高（行），已钳制 8-512。
+pub fn tune_tile_rows() -> u32 {
+    TUNE_TILE_ROWS.load(Ordering::Relaxed).clamp(8, 512).max(1)
+}
+
+/// vsync 预算帧率（`vsync=on` 的封顶 + auto 探测达标线），已钳制 15-240。
+pub fn tune_vsync_fps() -> u32 {
+    TUNE_VSYNC_FPS.load(Ordering::Relaxed).clamp(15, 240).max(1)
 }
 
 /// 开机微基准测完把结论写进来。

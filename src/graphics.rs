@@ -453,8 +453,8 @@ impl Screen {
                     done: &cal_done,
                     mode: &cal_mode,
                     tile: &cal_tile,
-                    tile_rows: CAL_TILE_ROWS,
-                    tiles_total: h.div_ceil(CAL_TILE_ROWS),
+                    tile_rows: config::tune_tile_rows() as usize,
+                    tiles_total: h.div_ceil(config::tune_tile_rows().max(1) as usize),
                 };
                 // ctx 必须活到 AP 退场：Box 漏存，函数尾 QUIT + stall 后不再访问。
                 let arg_ptr = Box::leak(Box::new(ctx)) as *mut _ as *mut c_void;
@@ -478,10 +478,10 @@ impl Screen {
                                 expected: n_cores.saturating_sub(1),
                                 round: &cal_round,
                                 done: &cal_done,
-                                mode: &cal_mode,
-                                tile: &cal_tile,
-                                tile_rows: CAL_TILE_ROWS,
-                                tiles_total: h.div_ceil(CAL_TILE_ROWS),
+                    mode: &cal_mode,
+                    tile: &cal_tile,
+                    tile_rows: config::tune_tile_rows() as usize,
+                    tiles_total: h.div_ceil(config::tune_tile_rows().max(1) as usize),
                                 next: 0,
                                 tps,
                             });
@@ -645,7 +645,7 @@ impl Screen {
         // ---- vsync 探测：冠军路按 60fps 预算跑 `frames` 帧，零超期才开 ----
         let mut overruns = 0u64;
         let winner_vsync = if probe_vsync {
-            let budget = tps / 60;
+            let budget = tps.max(1) / config::tune_vsync_fps().max(1) as u64;
             if budget == 0 {
                 VsyncMode::Off
             } else {
@@ -767,10 +767,7 @@ pub(crate) fn calibrate_tps() -> u64 {
 /// AP 退场哨兵：BSP 写 QUIT 后 AP 跳出常驻循环（同 `gop_bench::FILL_QUIT` 做法）。
 const CAL_QUIT: usize = usize::MAX;
 
-/// tile 高度（行）：1080p 切 17 块，BSP+AP 自助领取（见 `video::play_task` 同构实现）。
-pub(crate) const CAL_TILE_ROWS: usize = 64;
-
-/// 模式：0 = 静态分区（每核固定行区），1 = tile 自调度（原子游标领活）。
+/// 模式：0=static, 1=tile（双 cell 共用一个会话，轮次间翻转）。
 const CAL_MODE_STATIC: u8 = 0;
 const CAL_MODE_TILED: u8 = 1;
 

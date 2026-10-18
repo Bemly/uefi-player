@@ -131,7 +131,8 @@ fn resolve_play_target(screen: &mut Screen, tps: u64) -> Result<Option<u32>> {
         }
     };
     if config::vsync_enabled() {
-        Ok(Some(base.map(|t| t.min(60)).unwrap_or(60)))
+        let cap = config::tune_vsync_fps().max(1);
+        Ok(Some(base.map(|t| t.min(cap)).unwrap_or(cap)))
     } else {
         Ok(base)
     }
@@ -806,8 +807,8 @@ pub fn mp_draw(
         copy: config::copy_width() as u8,
         dist: config::effective_dist() as u8,
         tile,
-        tile_rows: crate::graphics::CAL_TILE_ROWS,
-        tiles_total: scr_height.div_ceil(crate::graphics::CAL_TILE_ROWS),
+        tile_rows: config::tune_tile_rows() as usize,
+        tiles_total: scr_height.div_ceil(config::tune_tile_rows().max(1) as usize),
         drop_gen,
         drop_flag,
     }));
