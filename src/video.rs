@@ -9,6 +9,7 @@ use uefi::{boot, cstr16, CStr16, Status};
 use uefi::proto::console::gop::BltPixel;
 use uefi::proto::media::file::{File, FileInfo, RegularFile};
 use uefi::proto::pi::mp::MpServices;
+use crate::config;
 use crate::fs::Fs;
 use crate::graphics::Screen;
 use crate::video::buffer::{BltFrameBuffer, QoiFrameBuffer, RawFrameBuffer};
@@ -20,14 +21,44 @@ pub mod buffer;
 pub mod decoder;
 pub mod ascii_font;
 
+const VIDEO_W: usize = 1920;
+const VIDEO_H: usize = 1080;
+/// `.qois` 无帧率元数据，沿用 `mp_draw` 的生产假设：120Hz 视频。
+/// `auto` 的上限就按它封顶（比它快也没意义）。
+const VIDEO_NATIVE_FPS: u32 = 120;
+
+#[inline(always)]
+fn rdtsc() -> u64 {
+    unsafe { core::arch::x86_64::_rdtsc() }
+}
+
+/// TSC 频率校准（100ms × 2，和 `hw_bench` 同方法，QEMU/真机都可用）。
+fn calibrate_tps() -> u64 {
+    boot::stall(Duration::from_millis(100));
+    let s = rdtsc();
+    boot::stall(Duration::from_millis(100));
+    rdtsc().saturating_sub(s).saturating_mul(10).max(1)
+}
+
+/// 限速到目标帧率：从帧起始自旋到预算。`None` = 不限速（max 模式）。
+#[inline]
+fn pace_frame(fstart: u64, tps: u64, target: Option<u32>) {
+    if let Some(fps) = target {
+        let budget = tps.max(1) / fps.max(1) as u64;
+        while rdtsc().saturating_sub(fstart) < budget {
+            core::hint::spin_loop();
+        }
+    }
+}
+
 
 pub fn video_run(screen: &mut Screen) -> Result {
 
     // 关闭看门狗，如果不行之后写定时喂狗
     set_watchdog_timer(0, 0, None)?;
 
-    const WIDTH: usize = 1920;
-    const HEIGHT: usize = 1080;
+    let tps = calibrate_tps();
+    let target = resolve_play_target(screen, tps)?;
 
     let mut fs = Fs::new()?;
     let file = fs.open_file(cstr16!("1080p\\video.qois"))?;
@@ -36,23 +67,73 @@ pub fn video_run(screen: &mut Screen) -> Result {
     //   blt    → 单线程走 GOP Blt 引擎
     //   direct → 原来的多核直写
     match crate::config::effective_render() {
-        crate::config::RenderMode::Blt => blt_loop(screen, file, WIDTH, HEIGHT),
+        crate::config::RenderMode::Blt => blt_loop(screen, file, VIDEO_W, VIDEO_H, target, tps),
         _ => {
             let mut file = file;
-            mp_draw(screen, &mut file, WIDTH, HEIGHT)
+            mp_draw(screen, &mut file, VIDEO_W, VIDEO_H, target, tps)
         }
     }
 }
 
+/// 播放帧率决策：max 不限速；capped 直接用；auto 无实测就现测并回写，
+/// 按 `min(视频帧率, 实测*3/4)` 跑。返回 `None` = 不限速。
+fn resolve_play_target(screen: &mut Screen, tps: u64) -> Result<Option<u32>> {
+    match config::play_policy() {
+        config::FpsPolicy::Max => Ok(None),
+        config::FpsPolicy::Capped(n) => Ok(Some(n)),
+        config::FpsPolicy::Auto => {
+            let m = config::measured_max_fps();
+            let m = if m == 0 {
+                let mm = measure_max_fps(screen, tps)?;
+                config::persist_measured_max_fps(mm)?;
+                mm
+            } else {
+                m
+            };
+            Ok(Some((m as u64 * 3 / 4).min(VIDEO_NATIVE_FPS as u64).max(1) as u32))
+        }
+    }
+}
+
+/// 首启实测：全量预解码后，用生效渲染路径整轮推一遍，算最大播放帧率。
+/// 纯展示性快进（和开机 render bench 一样会刷屏），一次性的，结果回写配置。
+fn measure_max_fps(screen: &mut Screen, tps: u64) -> Result<u32> {
+    screen.draw_str("play: benching max playback fps (one fast pass)...");
+    let mut fs = Fs::new()?;
+    let file = fs.open_file(cstr16!("1080p\\video.qois"))?;
+    let mut video = VideoMemoryRaw::new(file)?;
+    let frames = video.frames.len().max(1);
+    let t0 = rdtsc();
+    for _ in 0..frames {
+        match video.next_frame() {
+            Some(f) => screen.upload_frame(VIDEO_W, VIDEO_H, f)?,
+            None => break,
+        }
+    }
+    let dt = rdtsc().saturating_sub(t0).max(1);
+    let fps = ((frames as u64 * tps) / dt).clamp(1, 10_000) as u32;
+    screen.draw_str(&format!("play: max {} fps, running at 3/4 (capped by video)", fps));
+    Ok(fps)
+}
+
 /// 单线程 Blt 播放：`VideoMemoryRaw` 预解码全部帧（含 RGBA→BGRA），
 /// 每帧经 `upload_frame` 交给 GOP Blt 引擎。牺牲多核并行，换引擎搬运。
-fn blt_loop(screen: &mut Screen, file: RegularFile, width: usize, height: usize) -> Result {
+fn blt_loop(
+    screen: &mut Screen,
+    file: RegularFile,
+    width: usize,
+    height: usize,
+    target: Option<u32>,
+    tps: u64,
+) -> Result {
     let mut video = VideoMemoryRaw::new(file)?;
     loop {
+        let fstart = rdtsc();
         match video.next_frame() {
             Some(frame) => screen.upload_frame(width, height, frame)?,
             None => video.rewind(),
         }
+        pace_frame(fstart, tps, target);
     }
 }
 
@@ -221,6 +302,8 @@ struct PlayTask<'a> {
     core_frame_ptrs: *const *const *const u8,
     total_frames: usize,
     sync_counter: &'a AtomicUsize, // 关键：原子计数器
+    target_fps: u32, // 0 = 不限速（max 模式）
+    tps: u64,
 }
 
 extern "efiapi" fn play_task(arg: *mut c_void) {
@@ -306,6 +389,7 @@ extern "efiapi" fn play_task(arg: *mut c_void) {
     let offset = start_y * stride;
     let copy_size = if end_y > start_y { (end_y - start_y) * stride } else { 0 };
     loop {
+        let fstart = rdtsc();
         // 1. 搬运 (生产)
         unsafe {
             if my_id == 0 {
@@ -337,6 +421,15 @@ extern "efiapi" fn play_task(arg: *mut c_void) {
         // 所有人都在等计数器达到本轮的 my_next_target
         while ctx.sync_counter.load(Ordering::Acquire) < my_next_target {
             core::hint::spin_loop();
+        }
+
+        // 3.5 限速：栅栏刚对齐过，各核按同一预算自旋（漂移可忽略）。
+        // BSP 不特殊处理——它慢下来 AP 也会在下轮栅栏处等齐，整管线自然限速。
+        if ctx.target_fps > 0 {
+            let budget = ctx.tps.max(1) / ctx.target_fps.max(1) as u64;
+            while rdtsc().saturating_sub(fstart) < budget {
+                core::hint::spin_loop();
+            }
         }
 
         // 4. 只有 0 号核做统计（可选，且不影响同步）
@@ -390,7 +483,14 @@ extern "efiapi" fn play_task(arg: *mut c_void) {
     }
 }
 
-pub fn mp_draw(screen: &mut Screen, file: &mut RegularFile, width: usize, height: usize) -> Result {
+pub fn mp_draw(
+    screen: &mut Screen,
+    file: &mut RegularFile,
+    width: usize,
+    height: usize,
+    target: Option<u32>,
+    tps: u64,
+) -> Result {
     // 1 解码
     let mp_handle = get_handle_for_protocol::<MpServices>()?;
     let mp = open_protocol_exclusive::<MpServices>(mp_handle)?;
@@ -512,7 +612,9 @@ pub fn mp_draw(screen: &mut Screen, file: &mut RegularFile, width: usize, height
         num_cores: n_cores,
         core_frame_ptrs,
         total_frames: core_frames[0].len(),
-        sync_counter
+        sync_counter,
+        target_fps: target.unwrap_or(0),
+        tps,
     }));
 
     let arg_ptr = ctx as *mut _ as *mut c_void;

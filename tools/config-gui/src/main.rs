@@ -137,6 +137,29 @@ fn default_frames() -> u32 {
     30
 }
 
+fn default_fps() -> String {
+    String::from("auto")
+}
+
+/// 播放帧率开关（与固件 `parse_fps` 同逻辑：非法值回落 auto）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FpsPolicy {
+    Auto,
+    Max,
+    Capped(u32),
+}
+
+fn parse_fps(s: &str) -> FpsPolicy {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "max" => FpsPolicy::Max,
+        "auto" | "" => FpsPolicy::Auto,
+        n => n
+            .parse::<u32>()
+            .map(|v| FpsPolicy::Capped(v.clamp(1, 240)))
+            .unwrap_or(FpsPolicy::Auto),
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(default)]
 struct AccelConfig {
@@ -174,12 +197,33 @@ struct RenderConfig {
     tune: RenderTune,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+/// `[play]`：`fps` 是字符串（三态没法用纯数字表达），`measured_max_fps`
+/// 只由固件实测回写（0 = 未测），这里只读展示 + 重测清零。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+struct PlayConfig {
+    #[serde(default = "default_fps")]
+    fps: String,
+    #[serde(default)]
+    measured_max_fps: u32,
+}
+
+impl Default for PlayConfig {
+    fn default() -> Self {
+        Self {
+            fps: default_fps(),
+            measured_max_fps: 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 struct FileConfig {
     version: u32,
     accel: AccelConfig,
     render: RenderConfig,
+    play: PlayConfig,
 }
 
 impl Default for FileConfig {
@@ -188,6 +232,7 @@ impl Default for FileConfig {
             version: 1,
             accel: AccelConfig::default(),
             render: RenderConfig::default(),
+            play: PlayConfig::default(),
         }
     }
 }
@@ -252,8 +297,9 @@ struct App {
     cfg: FileConfig,
     status: String,
     page: Page,
-    /// `GlassSlider` 只要 `f32`，这里做镜像，每帧写回 `cfg`。
-    frames_f: f32,
+    /// 播放帧率滑杆镜像：0 = auto，1-240 = 限速，241 = max。
+    /// `GlassSlider` 只要 `f32`，每帧写回 `cfg.play.fps`。
+    play_f: f32,
     /// 加速档位滑杆镜像：0-8 对应 `AccelLevel::ALL` 下标。
     accel_f: f32,
     glass: bool,
@@ -306,7 +352,7 @@ impl App {
             cfg: FileConfig::default(),
             status: t!("status.ready").into_owned(),
             page: Page::File,
-            frames_f: default_frames() as f32,
+            play_f: 0.0,
             accel_f: AccelLevel::Auto.index() as f32,
             glass,
             dark: false,
@@ -323,23 +369,45 @@ impl App {
     }
 
     fn sync_widgets(&mut self) {
-        self.frames_f = self.cfg.render.tune.frames.max(1) as f32;
-        self.accel_f = self.cfg.accel.level.index() as f32;
+        self.play_f = match parse_fps(&self.cfg.play.fps) {
+            FpsPolicy::Auto => 0.0,
+            FpsPolicy::Max => 241.0,
+            FpsPolicy::Capped(n) => n as f32,
+        };
+    }
+
+    /// 滑杆/摘要共用的档位文本。
+    fn play_text(&self) -> String {
+        match parse_fps(&self.cfg.play.fps) {
+            FpsPolicy::Auto => t!("play.text_auto").into_owned(),
+            FpsPolicy::Max => t!("play.text_max").into_owned(),
+            FpsPolicy::Capped(n) => format!("{} fps", n),
+        }
+    }
+
+    /// 实测行：有值报数，无值提示切 auto 下次启动测。
+    fn measured_line(&self) -> String {
+        if self.cfg.play.measured_max_fps > 0 {
+            t!("play.measured", v = self.cfg.play.measured_max_fps).into_owned()
+        } else {
+            t!("play.unmeasured").into_owned()
+        }
     }
 
     fn load_path(&mut self, path: String) {
         match std::fs::read_to_string(&path) {
             Ok(text) => match toml::from_str::<FileConfig>(&text) {
                 Ok(cfg) => {
-                    self.cfg = cfg;
-                    self.sync_widgets();
-                    self.status = t!(
+                    let msg = t!(
                         "status.loaded",
                         path = path.clone(),
                         accel = cfg.accel.level.file_str(),
                         render = cfg.render.mode.file_str()
                     )
                     .into_owned();
+                    self.cfg = cfg;
+                    self.sync_widgets();
+                    self.status = msg;
                     self.path = path;
                 }
                 Err(e) => {
@@ -559,7 +627,8 @@ impl App {
                 egui::RichText::new(t!("sum.blt", v = self.cfg.render.blt_op.file_str())).weak(),
             );
         }
-        page.label(egui::RichText::new(t!("sum.frames", v = self.cfg.render.tune.frames)).weak());
+        page.label(egui::RichText::new(t!("sum.play", v = self.play_text())).weak());
+        page.label(egui::RichText::new(self.measured_line()).weak());
     }
 
     /// 中央不透明面板里的开关（只拨开关，不暴露 TOML 原文）。
@@ -635,8 +704,12 @@ impl App {
                     ui.small(t!("accel.blt_hidden"));
                 }
                 ui.add_space(10.0);
-                egui_glass::GlassSlider::new(&mut self.frames_f, 1.0..=240.0)
-                    .text(t!("accel.frames"))
+                ui.label(t!("play.fps"));
+                // 三段滑杆：0 = auto，1-240 = 限速，241 = max。
+                // 文本先算好：滑杆拿 &mut play_f 时不能再借 self。
+                let play_label = self.play_text();
+                egui_glass::GlassSlider::new(&mut self.play_f, 0.0..=241.0)
+                    .text(play_label)
                     .step_by(1.0)
                     .style(if self.dark {
                         egui_glass::GlassStyle::dark()
@@ -644,8 +717,25 @@ impl App {
                         egui_glass::GlassStyle::regular()
                     })
                     .show(ui);
-                self.cfg.render.tune.frames = self.frames_f.round().clamp(1.0, 240.0) as u32;
-                ui.small(t!("accel.microbench"));
+                let pos = self.play_f.round().clamp(0.0, 241.0) as u32;
+                self.cfg.play.fps = match pos {
+                    0 => String::from("auto"),
+                    241 => String::from("max"),
+                    n => n.to_string(),
+                };
+                ui.small(t!("play.hint"));
+                ui.horizontal(|ui| {
+                    ui.label(self.measured_line());
+                    if egui_glass::GlassButton::new(t!("play.rebench"))
+                        .show(ui)
+                        .clicked()
+                    {
+                        // 清零并存盘：下次启动 auto 会重测。
+                        self.cfg.play.measured_max_fps = 0;
+                        let p = self.path.clone();
+                        self.save_to(&p);
+                    }
+                });
             }
             Page::Summary => {
                 ui.heading(t!("sum.heading"));
@@ -656,7 +746,8 @@ impl App {
                 if self.cfg.render.mode == RenderMode::Blt {
                     ui.label(t!("sum.blt", v = self.cfg.render.blt_op.file_str()));
                 }
-                ui.label(t!("sum.frames", v = self.cfg.render.tune.frames));
+                ui.label(t!("sum.play", v = self.play_text()));
+                ui.label(self.measured_line());
                 ui.label(t!("sum.version", v = self.cfg.version));
                 ui.label(t!("sum.file", v = self.path.clone()));
                 ui.add_space(8.0);
