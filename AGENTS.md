@@ -97,3 +97,6 @@ cargo run --manifest-path tools/config-gui/Cargo.toml --target "$(rustc -vV | se
 - 提交用 Conventional Commits（`feat/fix/docs`），不加 Agent 署名。
 - 每次改完自动提交并推送到 GitHub：`check/clippy/fmt` 全绿就 `commit + push`，
   不必等用户开口；以用户最新说明为准。
+- 本机 sudo 口令只存登录钥匙串（服务名 `uefi-player-sudo`），取用
+  `security find-generic-password -s uefi-player-sudo -w`；绝不写进仓库任何文件
+  （本仓自动推送且为 PUBLIC，落盘即公开）。
