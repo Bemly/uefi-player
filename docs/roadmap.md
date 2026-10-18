@@ -8,13 +8,13 @@
 
 - [x] `AGENTS.md`：Agent 约束（含轮子优先、双构建隔离）
 - [x] 本文档：总计划
-- [ ] `docs/arch.md`：`src/{main,menu,graphics,video,diag}` + 未来 `src/boot/` 关系，
+- [x] `docs/arch.md`：`src/{main,menu,graphics,video,diag}` + 未来 `src/boot/` 关系，
   GOP 独占模型、看门狗、MP 模型
-- [ ] `docs/bootloader.md`：sprout 扩展设计（复用 crate 清单、entry/BLS/chainload 接入点）
-- [ ] `docs/simd.md`：`accel.level` 矩阵生效表 + `hw_bench/gop_simd` 诊断沉淀
-- [ ] `docs/player.md`：`video.qois` 格式与 `VideoMemoryRaw` 管线
-- [ ] `docs/wallpaper.md`：双模式动态壁纸设计
-- [ ] `docs/config.md`：`player.toml` 完整 reference（由 `config.rs` 头注释升格）
+- [x] `docs/bootloader.md`：sprout 扩展设计（复用 crate 清单、entry/BLS/chainload 接入点）
+- [x] `docs/simd.md`：`accel.level` 矩阵生效表 + `hw_bench/gop_simd` 诊断沉淀
+- [x] `docs/player.md`：`video.qois` 格式与 `VideoMemoryRaw` 管线
+- [x] `docs/wallpaper.md`：双模式动态壁纸设计
+- [x] `docs/config.md`：`player.toml` 完整 reference（由 `config.rs` 头注释升格）
 
 ## P1 引导（基于 sprout 扩展）
 
