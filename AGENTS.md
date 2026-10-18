@@ -87,6 +87,8 @@ cargo run --manifest-path tools/config-gui/Cargo.toml --target "$(rustc -vV | se
 
 ## 代码约定
 
+- 发现疑似笔误/命名问题（拼写、术语、前后不一致）先指出再动手，不将错就错。
+
 - 沿袭周边写法：中文注释允许（存量如此），`emit!` 双写屏显+串口，
   固件输出统一走 `Screen::draw_str`。
 - GOP 是独占协议：`Shared` 借 `Screen`，`Exclusive` 先 `drop` 再重建
