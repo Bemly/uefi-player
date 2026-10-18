@@ -1,10 +1,17 @@
 //! EFI chainload（基于 `edera-sprout-eficore`，`boot` bin 不可依赖，自研组装）。
 //!
-//! 序列照抄上游 `crates/boot/src/actions/chainload.rs`（只读学习，未改上游）：
-//! resolve → `ImageLoader::load`（Secure Boot/shim 在里面处理）→
-//! `LoadedImage.set_load_options` → `start_image`。
-//! P1 范围：只起 PE（BLS `efi`/`uki`）；`linux` + `initrd` 内核直启、devicetree
-//! 都不在本阶段（`entries.rs` 把 Linux 项标出来但拒绝启动，如实报错）。
+//! 与上游 `crates/boot/src/actions/chainload.rs` 的偏离（实测结论）：
+//! 上游用 `resolve_path`（DevicePathFromText 文本往返 + `locate_device_path`）
+//! 把路径解成 `ImageSource::ResolvedPath`；QEMU 实测里该调用触发 OVMF 调试版
+//! `MemoryAllocationLib.c:821` ASSERT（分配失败）进 `CpuDeadLoop`，
+//! 串口停在 `boot: resolving`，RIP 全员 pause 自旋（见 `docs/bootloader.md`）。
+//! 故 P1 改走同卷直读 + `ImageSource::DataBuffer`（`LoadImageSource::FromBuffer`
+//! 的 `file_path` 明确可选，不影响加载）：
+//! 打开**自身镜像所在卷**的 SimpleFileSystem（`LoadedImage::device`），
+//! BLS `efi` 路径当卷内相对路径读整文件交 `ImageLoader::load`
+//! （Secure Boot/shim 判定在里面，和上游一致）。
+//! 代价：跨盘启动项不支持（entries 本来就只枚举本卷，如遇含设备前缀的路径
+//! 明确报错，不断整单）。`options` 透传与 `UnloadGuard` 照抄上游。
 
 use alloc::boxed::Box;
 use alloc::format;
@@ -34,17 +41,28 @@ pub fn chainload_efi(efi_path: &str, options: Option<&str>) -> Result {
     use eficore::loader::source::ImageSource;
     use eficore::loader::{ImageLoadRequest, ImageLoader};
 
+    // 含设备前缀（如 `PciRoot(...)/...`）= 跨盘，P1 明确不支持。
+    if efi_path.contains('(') {
+        return Err(NyaStatus::_Debug(format!(
+            "boot: cross-device entry unsupported in P1: {}",
+            efi_path
+        )));
+    }
+
     let me = uefi::boot::image_handle();
 
-    // 以自身镜像设备路径为默认根解析：`\EFI\foo.efi` 这类相对路径落到同盘。
-    let loaded = uefi::boot::open_protocol_exclusive::<uefi::proto::loaded_image::LoadedImage>(me)?;
-    let our_path = loaded
-        .file_path()
-        .ok_or_else(|| NyaStatus::_Debug(String::from("boot: no self image path")))?;
-    let resolved = eficore::path::resolve_path(Some(our_path), efi_path).map_err(anyhow_err)?;
-    drop(loaded);
+    // 里程碑日志（串口-only）：handoff 路径卡死时靠最后行号定位。
+    log::warn!("boot: reading {}", efi_path);
+    let data = read_from_own_volume(me, efi_path)?;
 
-    let request = ImageLoadRequest::new(me, ImageSource::ResolvedPath(&resolved));
+    let request = ImageLoadRequest::new(
+        me,
+        ImageSource::DataBuffer {
+            path: None,
+            buffer: &data,
+        },
+    );
+    log::warn!("boot: loading image ({} bytes)", data.len());
     let image = ImageLoader::load(request).map_err(anyhow_err)?;
     let mut guard = UnloadGuard(Some(*image.handle()));
 
@@ -66,7 +84,25 @@ pub fn chainload_efi(efi_path: &str, options: Option<&str>) -> Result {
     }
 
     // 即将交权：镜像不再归我们 unload（固件在它退出时处理）。
+    log::warn!("boot: starting image");
     guard.0 = None;
     uefi::boot::start_image(*image.handle())?;
     Ok(())
+}
+
+/// 从**自身镜像所在卷**读文件（`LoadedImage::device` → SimpleFileSystem）。
+/// 复用 `uefi::fs`（和 `Fs::new` 同路数），不经过 device-path 文本解析。
+fn read_from_own_volume(me: uefi::Handle, path: &str) -> Result<alloc::vec::Vec<u8>> {
+    let loaded = uefi::boot::open_protocol_exclusive::<uefi::proto::loaded_image::LoadedImage>(me)?;
+    let dev = loaded
+        .device()
+        .ok_or_else(|| NyaStatus::_Debug(String::from("boot: no self image device")))?;
+    drop(loaded);
+
+    let sfs = uefi::boot::open_protocol_exclusive::<uefi::proto::media::fs::SimpleFileSystem>(dev)?;
+    let mut fs = uefi::fs::FileSystem::new(sfs);
+    let cstr =
+        uefi::data_types::CString16::try_from(path).map_err(|_| NyaStatus::FromStrWithBufError)?;
+    fs.read(uefi::fs::Path::new(&cstr))
+        .map_err(|e| NyaStatus::_Debug(format!("boot: read {} failed: {:?}", path, e)))
 }

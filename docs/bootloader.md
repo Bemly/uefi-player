@@ -19,10 +19,20 @@
   目录枚举 `Fs::list_dir` 自研（`uefi-rs` 无 walker）；默认匹配自研单 `*` 通配。
   无 tries 项跳过并 warning；有 `efi`/`uki` 进 chainload 队列，
   只有 `linux` 的列出但拒绝启动（内核直启超出 P1，见下）。
-- `chainload.rs`：照抄上游 `crates/boot/src/actions/chainload.rs` 序列——
-  `resolve_path`（以自身镜像设备路径为默认根）→ `ImageLoader::load`
-  （Secure Boot/shim 在里面）→ `LoadedImage.set_load_options`（BLS `options` 透传）
-  → `start_image`。失败 `UnloadGuard` 卸镜像，不留残留。
+- `chainload.rs`：序列照抄上游，路径解析自研——
+  上游用 `resolve_path`（DevicePathFromText 文本往返 + `locate_device_path`）；
+  QEMU 实测该调用触发 OVMF 调试版 `MemoryAllocationLib.c:821` ASSERT
+  （分配失败）进 `CpuDeadLoop`（串口停在 `boot: resolving`，
+  全核 pause 自旋，栈上 ASSERT 字符串为证）。
+  故 P1 改走同卷直读 + `ImageSource::DataBuffer`
+ （`LoadImageSource::FromBuffer` 的 `file_path` 明确可选，不影响加载）：
+  以自身镜像设备（`LoadedImage::device`）开 SimpleFileSystem，
+  BLS `efi` 路径当卷内相对路径读整文件交 `ImageLoader::load`
+  （Secure Boot/shim 判定在里面，和上游一致）。
+  `LoadedImage.set_load_options`（BLS `options` 透传）→ `start_image`；
+  失败 `UnloadGuard` 卸镜像，不留残留。
+  代价：跨盘启动项不支持（含设备前缀如 `PciRoot(...)` 的明确报错；
+  entries 本来就只枚举本卷，单盘 U 盘场景全覆盖）。
 - `mod.rs`：Exclusive 子菜单（按键 `b` 进，`0-9a-z` 选，`Enter` 跑默认，`q` 回）。
   成功 chainload 不返回；被起镜像返回时重建屏显回子菜单。
 
