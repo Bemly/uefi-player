@@ -42,8 +42,8 @@ cargo run --manifest-path tools/config-gui/Cargo.toml --target "$(rustc -vV | se
 每次写新能力前必须按此顺序，结论写进 PR/文档，不许跳步：
 
 1. **先搜轮子**：`crates.io` + `docs.rs` 按确切需求搜（如 “toml 编辑”、
-   “egui 文件对话框”），看下载量、维护状态、MSRV（本仓线 1.92）、license
-   （只用 MIT/Apache-2.0）、固件侧是否 `no_std` 可用。
+   “egui 文件对话框”），看下载量、维护状态、MSRV（本仓线 1.92）、license、
+   固件侧是否 `no_std` 可用。
 2. **有就用**：`Cargo.toml` 始终不 pin 版本（禁止 `=x.y.z` 精确锁定），
    用 caret 兼容范围（如 `eframe 0.35` 即 `^0.35`）；可复现性由 `Cargo.lock`
    保证。记录当时测过的组合（如 `eframe 0.35 / egui_glass 0.1.5 / wgpu 29`，
@@ -84,10 +84,6 @@ cargo run --manifest-path tools/config-gui/Cargo.toml --target "$(rustc -vV | se
   拍板结论写进文件头注释。
 - 无 GPU 兜底分支除外（玻璃管线没注册，只能用普通控件；renderer 已强制
   Wgpu，实际走不到）。
-- 中文文案每加一个字都要重打 CJK 子集（`assets/cjk.ttf` 只含用过的字，
-  否则变方框）：从 `locales/*.yml` + `src/main.rs` 收集 CJK 字符，
-  用 `pyftsubset` 从 Noto Sans SC 切子集（含 `● ○`），并断言零缺字。
-  命令见 `tools/config-gui` 历史提交（venv 装 `fonttools` 即可）。
 
 ## 代码约定
 
