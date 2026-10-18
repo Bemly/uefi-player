@@ -1,4 +1,4 @@
-# uefi-palyer Agent 约束
+# uefi-player Agent 约束
 
 本仓是 x86 UEFI 应用（`no_std`），目标只有 `x86_64-unknown-uefi`。
 `third_party/sprout` 是只读 submodule（别人的引导器项目），只取 4 个 lib 用，
@@ -16,7 +16,7 @@ x86 引导加载器（基于 sprout 扩展）+ SIMD 加速矩阵 + UEFI 播放�
 - `third_party/sprout`：只读。pin 在当前 commit，只依赖
   `edera-sprout-config/eficore/bls/parsing`（`boot` 是 bin，不可依赖）。
   需要上游能力先看这 4 个 crate 有没有，没有才在 `src/` 自研。
-- `tools/config-gui`：host 侧独立 crate（`std`），跨平台 `palyer.toml` 编辑器。
+- `tools/config-gui`：host 侧独立 crate（`std`），跨平台 `player.toml` 编辑器。
   与 UEFI 主包零依赖关系，见下文“双构建”。
 - `docs/`：给人看的设计文档；`usb_reports/`：真机报告样本。
 

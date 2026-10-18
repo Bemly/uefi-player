@@ -1,5 +1,5 @@
 [package]
-name = "uefi-palyer"
+name = "uefi-player"
 version = "0.2.4"
 edition = "2024"
 

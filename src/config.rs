@@ -1,4 +1,4 @@
-//! `\palyer.toml` —— 加速矩阵配置（指令集档位 × 渲染路径）。
+//! `\player.toml` —— 加速矩阵配置（指令集档位 × 渲染路径）。
 //!
 //! 位置：启动卷根目录（与本程序写 `HWBENCH*.TXT` 同层）。
 //! 解析：`toml` 1.x（no_std）+ serde。缺失/非法 → 全默认 + 屏显一行，不 halt。
@@ -35,7 +35,7 @@ use crate::error::NyaStatus;
 use crate::fs::Fs;
 
 /// 配置文件名（启动卷根目录）。
-pub const CONFIG_PATH: &str = "palyer.toml";
+pub const CONFIG_PATH: &str = "player.toml";
 
 /// 指令集加速档位。`Auto` = 运行时探 CPUID/XCR0 取最高可用。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -299,7 +299,7 @@ pub fn parse() -> (Config, Option<String>) {
         Err(e) => return (Config::default(), Some(format!("cfg: open volume failed: {:?}", e))),
     };
 
-    let bytes = match fs.read_file(cstr16!("palyer.toml")) {
+    let bytes = match fs.read_file(cstr16!("player.toml")) {
         Ok(b) => b,
         // 没有配置文件是正常情况：静默用默认。
         Err(NyaStatus::Uefi(err)) if err.status() == uefi::Status::NOT_FOUND => {
@@ -513,7 +513,7 @@ pub fn apply_measured_render() {
     }
 }
 
-/// 矩阵校准完把结论回写 `\palyer.toml`（`None` 的维度不动盘上记忆）。
+/// 矩阵校准完把结论回写 `\player.toml`（`None` 的维度不动盘上记忆）。
 /// 与 `persist_measured_max_fps` 同策略：重读再改，用户手写项不丢。
 pub fn persist_render_measured(
     render: Option<RenderMode>,
@@ -537,7 +537,7 @@ pub fn persist_render_measured(
         MEASURED_CORES.store(cores, Ordering::Relaxed);
     }
     let mut fs = Fs::new()?;
-    let mut cfg = match fs.read_file(cstr16!("palyer.toml")) {
+    let mut cfg = match fs.read_file(cstr16!("player.toml")) {
         Ok(bytes) => toml::from_str::<Config>(&String::from_utf8_lossy(&bytes)).unwrap_or_default(),
         Err(_) => Config::default(),
     };
@@ -555,7 +555,7 @@ pub fn persist_render_measured(
     }
     let text = toml::to_string(&cfg)
         .map_err(|_| NyaStatus::_Debug(String::from("cfg: serialize failed")))?;
-    fs.write_file(cstr16!("palyer.toml"), text.as_bytes())?;
+    fs.write_file(cstr16!("player.toml"), text.as_bytes())?;
     Ok(())
 }
 
@@ -573,19 +573,19 @@ pub fn measured_max_fps() -> u32 {
     PLAY_MEASURED.load(Ordering::Relaxed)
 }
 
-/// 实测完把最大帧率写回 `\palyer.toml`（GUI 下次打开即见）。
+/// 实测完把最大帧率写回 `\player.toml`（GUI 下次打开即见）。
 /// 先重读现文件再改，保证用户手写的 accel/render 设置不丢；
 /// 文件不存在就按默认新建。序列化先在内存完成再动盘，写坏不丢原文件。
 pub fn persist_measured_max_fps(m: u32) -> crate::error::Result {
     PLAY_MEASURED.store(m, Ordering::Relaxed);
     let mut fs = Fs::new()?;
-    let mut cfg = match fs.read_file(cstr16!("palyer.toml")) {
+    let mut cfg = match fs.read_file(cstr16!("player.toml")) {
         Ok(bytes) => toml::from_str::<Config>(&String::from_utf8_lossy(&bytes)).unwrap_or_default(),
         Err(_) => Config::default(),
     };
     cfg.play.measured_max_fps = m;
     let text = toml::to_string(&cfg)
         .map_err(|_| NyaStatus::_Debug(String::from("cfg: serialize failed")))?;
-    fs.write_file(cstr16!("palyer.toml"), text.as_bytes())?;
+    fs.write_file(cstr16!("player.toml"), text.as_bytes())?;
     Ok(())
 }

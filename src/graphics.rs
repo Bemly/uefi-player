@@ -261,7 +261,7 @@ impl Screen {
 
     // ---------- 渲染路径矩阵（配置文件驱动） ----------
 
-    /// 统一上屏入口：按 `\palyer.toml` 的 `render.mode` 走 CPU 直写或 GOP Blt。
+    /// 统一上屏入口：按 `\player.toml` 的 `render.mode` 走 CPU 直写或 GOP Blt。
     pub fn upload_frame(&mut self, width: usize, height: usize, pixels: &[BltPixel]) -> Result {
         match config::effective_render() {
             RenderMode::Blt => self.upload_blt(width, height, pixels),
@@ -301,7 +301,7 @@ impl Screen {
         Ok(())
     }
 
-    /// `render.mode/workers/vsync = "auto"` 的开机矩阵校准（`\palyer.toml` 驱动）。
+    /// `render.mode/workers/vsync = "auto"` 的开机矩阵校准（`\player.toml` 驱动）。
     ///
     /// - 首启（任一 auto 无记忆，见 `config::needs_render_bench`）必跑全矩阵：
     ///   直写 vs Blt 取快；直写路再比 BSP 单核 vs 全核并行；冠军路按 60fps

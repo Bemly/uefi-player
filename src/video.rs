@@ -63,7 +63,7 @@ pub fn video_run(screen: &mut Screen) -> Result {
     let mut fs = Fs::new()?;
     let file = fs.open_file(cstr16!("1080p\\video.qois"))?;
 
-    // 渲染路径矩阵（\palyer.toml，见 `Screen::ensure_render_calibrated`）：
+    // 渲染路径矩阵（\player.toml，见 `Screen::ensure_render_calibrated`）：
     //   blt            → 单线程走 GOP Blt 引擎（workers 无意义）
     //   direct + bsp   → BSP 单核直写（MP 关闭或校准判单核更快）
     //   direct + all   → 原来的多核直写

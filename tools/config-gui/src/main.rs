@@ -1,4 +1,4 @@
-//! `palyer.toml` 跨平台可视化编辑器（host 工具，非 UEFI）。
+//! `player.toml` 跨平台可视化编辑器（host 工具，非 UEFI）。
 //!
 //! 轮子选择（结论，见根 `AGENTS.md`「轮子优先」）：
 //! - 搜过 `crates.io`：“egui glass blur”只有 `egui_glass`（Apple Liquid Glass，
@@ -423,7 +423,7 @@ impl App {
             rs = Some(r.clone());
         }
         let mut app = Self {
-            path: "palyer.toml".to_owned(),
+            path: "player.toml".to_owned(),
             cfg: FileConfig::default(),
             status: t!("status.ready").into_owned(),
             page: Page::File,
@@ -435,7 +435,7 @@ impl App {
             rs,
             live,
         };
-        // 启动时若工作目录下已有 palyer.toml，直接载入。
+        // 启动时若工作目录下已有 player.toml，直接载入。
         if std::path::Path::new(&app.path).exists() {
             let p = app.path.clone();
             app.load_path(p);
@@ -585,7 +585,7 @@ impl App {
             Action::SaveAs => {
                 if let Some(f) = rfd::FileDialog::new()
                     .add_filter("TOML", &["toml"])
-                    .set_file_name("palyer.toml")
+                    .set_file_name("player.toml")
                     .save_file()
                 {
                     let p = f.display().to_string();
@@ -1062,7 +1062,7 @@ fn main() -> eframe::Result<()> {
         ..Default::default()
     };
     eframe::run_native(
-        "palyer.toml editor",
+        "player.toml editor",
         opts,
         Box::new(|cc| Ok(Box::new(App::new(cc)))),
     )

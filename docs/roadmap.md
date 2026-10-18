@@ -1,4 +1,4 @@
-# uefi-palyer 路线图
+# uefi-player 路线图
 
 > 口径：x86 引导加载器（基于 sprout 扩展）+ SIMD 正式矩阵 +
 > UEFI 播放器 + 引导动态壁纸 + 跨平台配置 GUI。
@@ -14,7 +14,7 @@
 - [ ] `docs/simd.md`：`accel.level` 矩阵生效表 + `hw_bench/gop_simd` 诊断沉淀
 - [ ] `docs/player.md`：`video.qois` 格式与 `VideoMemoryRaw` 管线
 - [ ] `docs/wallpaper.md`：双模式动态壁纸设计
-- [ ] `docs/config.md`：`palyer.toml` 完整 reference（由 `config.rs` 头注释升格）
+- [ ] `docs/config.md`：`player.toml` 完整 reference（由 `config.rs` 头注释升格）
 
 ## P1 引导（基于 sprout 扩展）
 
@@ -28,7 +28,7 @@
 - `config::accel_level()` 从“只记录”变为真分发：
   `graphics::upload_frame` / `video::{blt_loop, mp_draw}` / `gop_simd` 变体按档位选路。
 - bench 只出数（`HWBENCH`），矩阵做选择；`auto` = CPUID/XCR0 探最高可用。
-- 验收：`palyer.toml` 切档位，播放帧率/报告可复现对应变化。
+- 验收：`player.toml` 切档位，播放帧率/报告可复现对应变化。
 
 ## P3 播放器
 
@@ -40,14 +40,14 @@
 
 - A 菜单背景：`run_menu` 底层低 fps 循环播，按键即停，可配置开关。
 - B 引导过渡：选 entry 后、chainload 前播 N 帧/固定时长。
-- 默认关（老机器显存带宽兜底），`palyer.toml` 开。
+- 默认关（老机器显存带宽兜底），`player.toml` 开。
 - 验收：开关两档在 QEMU + 真机各测一遍。
 
 ## P5 跨平台配置 GUI（host）
 
 - [x] `tools/config-gui`：eframe 0.35 + wgpu 驱动 + egui_glass 液态玻璃，
-  可视化编辑 `palyer.toml`（accel/render/blt_op/tune），与固件 `config.rs` 同 schema。
-- U 盘根目录的 `palyer.toml` 拖进去改完存回，不用手写 TOML。
+  可视化编辑 `player.toml`（accel/render/blt_op/tune），与固件 `config.rs` 同 schema。
+- U 盘根目录的 `player.toml` 拖进去改完存回，不用手写 TOML。
 - 验收：`cargo run --manifest-path tools/config-gui/Cargo.toml --target "$(rustc -vV | sed -n 's/^host: //p')"`，
   改完的文件被固件正常解析（`cfg:` 无警告）。
 

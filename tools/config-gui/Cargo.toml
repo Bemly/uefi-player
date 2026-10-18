@@ -1,8 +1,8 @@
 [package]
-name = "palyer-config-gui"
+name = "player-config-gui"
 version = "0.1.0"
 edition = "2021"
-description = "palyer.toml 跨平台可视化编辑器（host 工具，与 UEFI 固件包独立）"
+description = "player.toml 跨平台可视化编辑器（host 工具，与 UEFI 固件包独立）"
 
 # 轮子选择（见根 AGENTS.md「轮子优先」）：
 # - eframe 0.35 + egui 0.35 + wgpu 29：egui_glass 官方测过的组合，eframe 的 `wgpu`

@@ -32,7 +32,7 @@ fn main() -> Status {
     // 否则报告会被工具自己的 enable 污染。
     diag::common::capture_firmware_osxsave();
 
-    // 读加速矩阵配置（\palyer.toml）；缺失/非法 → 默认 + 一行警告。
+    // 读加速矩阵配置（\player.toml）；缺失/非法 → 默认 + 一行警告。
     let cfg_warn = config::load();
 
     let mut screen = Screen::new().expect("Failed to create screen");
@@ -42,7 +42,7 @@ fn main() -> Status {
     }
 
     // render auto 矩阵：首启必校准（direct/blt × BSP/全核 × vsync 探测），
-    // 有记忆直接复用快启，结论回写 `\palyer.toml` 的 `measured_*`。
+    // 有记忆直接复用快启，结论回写 `\player.toml` 的 `measured_*`。
     screen.ensure_render_calibrated();
 
     // 默认停留等待：由菜单分发播放视频或各诊断项，不再直进 video_run。
