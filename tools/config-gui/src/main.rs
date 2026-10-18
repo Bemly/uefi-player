@@ -692,14 +692,15 @@ impl App {
                 ui.small(mode_desc(self.cfg.render.mode));
                 if self.cfg.render.mode == RenderMode::Blt {
                     ui.label(t!("accel.blt_op"));
-                    for v in BltOpKind::ALL {
-                        ui.horizontal(|ui| {
+                    // 一行四个（窄窗自动换行保底，不断尾）。
+                    ui.horizontal_wrapped(|ui| {
+                        for v in BltOpKind::ALL {
                             if self.option_button(ui, self.cfg.render.blt_op == v, v.file_str()) {
                                 self.cfg.render.blt_op = v;
                             }
-                            ui.small(blt_desc(v));
-                        });
-                    }
+                        }
+                    });
+                    ui.small(blt_desc(self.cfg.render.blt_op));
                 } else {
                     ui.small(t!("accel.blt_hidden"));
                 }
