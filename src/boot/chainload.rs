@@ -6,11 +6,16 @@
 //! `MemoryAllocationLib.c:821` ASSERT（分配失败）进 `CpuDeadLoop`，
 //! 串口停在 `boot: resolving`，全核 pause 自旋，栈上 ASSERT 字符串为证。
 //! 故 P1 全程只用二进制 DevicePath 操作（零文本解析）：
-//! 截自身镜像路径的设备节点 + 新 `FilePath` 节点拼出目标路径，
-//! 文件经本卷 SimpleFileSystem 直读，以 `ImageSource::DataBuffer` 交
+//! 取自身设备句柄的 DevicePath（不能从自身 `LoadedImage::file_path` 截根——
+//! fallback 启动时它可能就是裸 `\EFI\...`，无设备前缀，QEMU 实测锤过）+
+//! 新 `FilePath` 节点拼出 `ResolvedPath`（`filesystem_handle` 直接用自身设备句柄，
+//! 免 `locate_device_path` 一次调用）。
+//! 文件经本卷直读，以 `ImageSource::DataBuffer{Some(resolved), bytes}` 交
 //! `ImageLoader::load`（`into_owned_data_buffer` 对 DataBuffer 不重读文件，
-//! 直接用给定的 buffer；`file_path` 照给，子镜像设备上下文完整）。
-//! 代价：跨盘启动项不支持（entries 本来就只枚举本卷，含设备前缀的明确报错）。
+//! 直接用给定 buffer；`file_path` 照给，子镜像设备上下文完整）。
+//! 自检：`locate_device_path` 验证拼出的路径能定位回本卷（串口 `locate ok`），
+//! 否则 file_path 给了也白给（曾因此子实例无卷）。
+//! 代价：跨盘启动项不支持（entries 本来就只枚举本卷，单盘 U 盘场景全覆盖）。
 //! `LoadedImage.set_load_options`（BLS `options` 透传）与 `UnloadGuard` 照抄上游。
 
 use alloc::format;
@@ -57,20 +62,40 @@ pub fn chainload_efi(efi_path: &str, options: Option<&str>) -> Result {
     let dev = loaded
         .device()
         .ok_or_else(|| NyaStatus::_Debug(String::from("boot: no self image device")))?;
+    drop(loaded);
     let efi_cstr = uefi::data_types::CString16::try_from(efi_path)
         .map_err(|_| NyaStatus::FromStrWithBufError)?;
-    // 二进制拼目标路径（自身设备节点 + 新 FilePath 节点，无文本往返）。
-    let resolved = build_resolved_path(
-        loaded
-            .file_path()
-            .ok_or_else(|| NyaStatus::_Debug(String::from("boot: no self image path")))?,
-        &efi_cstr,
-        dev,
-    )?;
-    drop(loaded);
+    // 二进制拼目标路径（自身设备句柄的 DevicePath + 新 FilePath 节点，无文本往返）。
+    // 注意不能从自身 LoadedImage::file_path 截根：fallback 启动时它可能就是
+    // 裸 `\EFI\...`（无设备前缀，QEMU 实测锤过），截出来是空根，locate 必败。
+    let resolved = build_resolved_path(dev, &efi_cstr)?;
 
     // 本卷直读（复用 `Fs`，entries 也只枚举本卷，语义一致）。
     let data = crate::fs::Fs::new()?.read_file(&efi_cstr)?;
+
+    // 自检：拼出来的路径必须能 locate 到本卷，否则 file_path 给了也白给。
+    // （QEMU 实测定位用，串口看 `locate ok/failed` + hex 对比原路径。）
+    {
+        fn hexline(tag: &str, b: &[u8]) {
+            let mut s = alloc::string::String::from(tag);
+            for (i, byte) in b.iter().enumerate() {
+                if i >= 160 {
+                    s.push_str("...");
+                    break;
+                }
+                s.push_str(&alloc::format!("{:02x}", byte));
+            }
+            log::warn!("{}", s);
+        }
+        hexline("boot: rebuilt = ", resolved.full_path.as_bytes());
+        let mut probe: &uefi::proto::device_path::DevicePath = &resolved.full_path;
+        match uefi::boot::locate_device_path::<uefi::proto::media::fs::SimpleFileSystem>(&mut probe)
+        {
+            Ok(h) if h == dev => log::warn!("boot: locate ok (own volume)"),
+            Ok(_) => log::warn!("boot: locate ok (OTHER volume?)"),
+            Err(e) => log::warn!("boot: locate failed: {:?}", e.status()),
+        }
+    }
 
     let request = ImageLoadRequest::new(
         me,
@@ -108,14 +133,12 @@ pub fn chainload_efi(efi_path: &str, options: Option<&str>) -> Result {
     Ok(())
 }
 
-/// 二进制拼 `ResolvedPath`：自身完整路径的前导非文件节点（= 设备根）+
-/// 新 `FilePath` 节点。`filesystem_handle` 直接用自身设备句柄
-/// （根就是从它截的，免 `locate_device_path` 一次调用）。
+/// 二进制拼 `ResolvedPath`：自身设备句柄的 DevicePath（= 设备根）+
+/// 新 `FilePath` 节点。`filesystem_handle` 直接用自身设备句柄。
 /// 全程无 DevicePath 文本解析（EDK2 调试版 ASSERT 的触发面，见文件头）。
 fn build_resolved_path(
-    our_full: &uefi::proto::device_path::DevicePath,
-    efi_cstr: &uefi::data_types::CString16,
     dev: uefi::Handle,
+    efi_cstr: &uefi::data_types::CString16,
 ) -> Result<eficore::path::ResolvedPath> {
     use uefi::proto::device_path::build::{DevicePathBuilder, media::FilePath as BuildFilePath};
     use uefi::proto::device_path::{DevicePath, DeviceSubType, DeviceType};
@@ -127,11 +150,14 @@ fn build_resolved_path(
         NyaStatus::_Debug(String::from("boot: device path build failed"))
     }
 
-    // 根：前导非文件节点。
+    // 自身设备句柄的 DevicePath（协议借用只活到 to_boxed 拷贝完）。
+    let dev_path = uefi::boot::open_protocol_exclusive::<uefi::proto::device_path::DevicePath>(dev)
+        .map_err(|e| NyaStatus::_Debug(format!("boot: no device path: {:?}", e)))?;
+    // 根：前导非文件节点（设备句柄路径本就不该含文件节点，防御性过滤）。
     let mut root_v = Vec::new();
     let root_box = {
         let mut b = DevicePathBuilder::with_vec(&mut root_v);
-        for node in our_full.node_iter() {
+        for node in dev_path.node_iter() {
             if is_file_node(node) {
                 break;
             }
@@ -140,6 +166,7 @@ fn build_resolved_path(
         let root: &DevicePath = b.finalize().map_err(|_| build_err())?;
         root.to_boxed()
     };
+    drop(dev_path);
     // 子：纯 FilePath 节点。
     let sub_box = {
         let mut sub_v = Vec::new();
@@ -156,7 +183,7 @@ fn build_resolved_path(
     let full_box = {
         let mut full_v = Vec::new();
         let mut b = DevicePathBuilder::with_vec(&mut full_v);
-        for node in our_full.node_iter() {
+        for node in root_box.node_iter() {
             if is_file_node(node) {
                 break;
             }

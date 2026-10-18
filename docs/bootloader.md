@@ -25,7 +25,9 @@
   （分配失败）进 `CpuDeadLoop`（串口停在 `boot: resolving`，
   全核 pause 自旋，栈上 ASSERT 字符串为证）。
   故 P1 全程只用二进制 DevicePath 操作（零文本解析）：
-  截自身完整路径的设备节点 + 新 `FilePath` 节点拼出 `ResolvedPath`
+  取自身设备句柄的 DevicePath（不能从自身 `LoadedImage::file_path` 截根——
+  fallback 启动时它可能就是裸 `\EFI\...`，QEMU 实测锤过）+
+  新 `FilePath` 节点拼出 `ResolvedPath`
   （`filesystem_handle` 直接用自身设备句柄，免 `locate_device_path`），
   文件经本卷直读，以 `ImageSource::DataBuffer{Some(resolved), bytes}` 交
   `ImageLoader::load`（`into_owned_data_buffer` 对 DataBuffer 不重读文件，
