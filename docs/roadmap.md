@@ -38,10 +38,19 @@
 
 ## P4 动态壁纸（菜单背景 + 引导过渡都要）
 
-- A 菜单背景：`run_menu` 底层低 fps 循环播，按键即停，可配置开关。
-- B 引导过渡：选 entry 后、chainload 前播 N 帧/固定时长。
-- 默认关（老机器显存带宽兜底），`player.toml` 开。
-- 验收：开关两档在 QEMU + 真机各测一遍。
+> 暂不用 QOI：直接序列位图。不碰 QOI 编解码，省 CPU 和首帧抖动；
+> 播放器（P3）的 `.qois` 管线不动，两者格式互不干扰。
+
+- 格式：U盘 `wallpaper/` 下 `frameNNNN.raw`，每帧 `宽×高×4` 字节 BGRA 直存
+  （首版定死 1920x1080，和视频同分辨率，免缩放分支；转制用 ffmpeg 一行：
+  `ffmpeg -i in.mp4 -s 1920x1080 -pix_fmt bgra -f rawvideo frame%04d.raw`）。
+- 配置（`player.toml` 新增 `[wallpaper]`，GUI 同步加开关页）：
+  `enable = false`（默认关，老机器显存带宽兜底）、`fps = 15`（菜单背景低帧即可）、
+  `frames = 0`（0 = 全播，B 过渡用 N 帧封顶）。
+- A 菜单背景：`run_menu` idle 时底层按 `fps` 循环播序列位图（走 render 矩阵的
+  生效路径：direct 单/多核或 Blt，不另起管线），任意按键即停并重画菜单。
+- B 引导过渡：选 entry 后、chainload 前播 N 帧/固定时长（依赖 P1 `src/boot/` 先有入口）。
+- 验收：开关两档在 QEMU + 真机各测一遍；开档下按键响应无可感知延迟。
 
 ## P5 跨平台配置 GUI（host）
 
