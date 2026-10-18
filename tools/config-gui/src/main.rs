@@ -187,6 +187,14 @@ fn default_fps() -> String {
     String::from("auto")
 }
 
+fn default_wallpaper_fps() -> u32 {
+    15
+}
+
+fn default_wallpaper_preload() -> u32 {
+    8
+}
+
 /// 播放帧率开关（与固件 `parse_fps` 同逻辑：非法值回落 auto）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FpsPolicy {
@@ -265,6 +273,30 @@ struct PlayConfig {
     measured_max_fps: u32,
 }
 
+/// `[wallpaper]`：与固件 `WallpaperConfig` 同构。无校准记忆，纯开关。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(default)]
+struct WallpaperConfig {
+    enable: bool,
+    #[serde(default = "default_wallpaper_fps")]
+    fps: u32,
+    #[serde(default)]
+    frames: u32,
+    #[serde(default = "default_wallpaper_preload")]
+    preload: u32,
+}
+
+impl Default for WallpaperConfig {
+    fn default() -> Self {
+        Self {
+            enable: false,
+            fps: default_wallpaper_fps(),
+            frames: 0,
+            preload: default_wallpaper_preload(),
+        }
+    }
+}
+
 impl Default for PlayConfig {
     fn default() -> Self {
         Self {
@@ -281,6 +313,7 @@ struct FileConfig {
     accel: AccelConfig,
     render: RenderConfig,
     play: PlayConfig,
+    wallpaper: WallpaperConfig,
 }
 
 impl Default for FileConfig {
@@ -290,6 +323,7 @@ impl Default for FileConfig {
             accel: AccelConfig::default(),
             render: RenderConfig::default(),
             play: PlayConfig::default(),
+            wallpaper: WallpaperConfig::default(),
         }
     }
 }
@@ -300,6 +334,7 @@ impl Default for FileConfig {
 enum Page {
     File,
     Accel,
+    Wallpaper,
     Summary,
 }
 
@@ -324,6 +359,15 @@ fn mode_desc(v: RenderMode) -> String {
         RenderMode::Auto => t!("accel.desc_mode_auto"),
         RenderMode::Direct => t!("accel.desc_mode_direct"),
         RenderMode::Blt => t!("accel.desc_mode_blt"),
+    }
+    .into_owned()
+}
+
+fn wp_enable_desc(on: bool) -> String {
+    if on {
+        t!("wallpaper.desc_on")
+    } else {
+        t!("wallpaper.desc_off")
     }
     .into_owned()
 }
@@ -377,6 +421,11 @@ struct App {
     play_f: f32,
     /// 加速档位滑杆镜像：0-8 对应 `AccelLevel::ALL` 下标。
     accel_f: f32,
+    /// 壁纸滑杆镜像：fps 1-30，frames 0-120（0 = 全播），preload 1-16。
+    /// 库内滑杆只吃 `f32`，整数档用 round 镜像（见 Accel 页 `*_f` 字段）。
+    wp_fps_f: f32,
+    wp_frames_f: f32,
+    wp_preload_f: f32,
     glass: bool,
     /// 深色模式：egui visuals + 纯黑 backdrop + 深色玻璃预设三处联动。
     dark: bool,
@@ -429,6 +478,9 @@ impl App {
             page: Page::File,
             play_f: 0.0,
             accel_f: AccelLevel::Auto.index() as f32,
+            wp_fps_f: default_wallpaper_fps() as f32,
+            wp_frames_f: 0.0,
+            wp_preload_f: default_wallpaper_preload() as f32,
             glass,
             dark: false,
             zh: false,
@@ -449,6 +501,9 @@ impl App {
             FpsPolicy::Max => 241.0,
             FpsPolicy::Capped(n) => n as f32,
         };
+        self.wp_fps_f = self.cfg.wallpaper.fps.clamp(1, 30) as f32;
+        self.wp_frames_f = self.cfg.wallpaper.frames.min(120) as f32;
+        self.wp_preload_f = self.cfg.wallpaper.preload.clamp(1, 16) as f32;
     }
 
     /// 滑杆/摘要共用的档位文本。
@@ -733,6 +788,17 @@ impl App {
         page.label(
             egui::RichText::new(t!("sum.vsync", v = self.cfg.render.vsync.file_str())).weak(),
         );
+        page.label(
+            egui::RichText::new(t!(
+                "sum.wallpaper",
+                v = if self.cfg.wallpaper.enable {
+                    "on"
+                } else {
+                    "off"
+                }
+            ))
+            .weak(),
+        );
         page.label(egui::RichText::new(t!("sum.play", v = self.play_text())).weak());
         page.label(egui::RichText::new(self.measured_line()).weak());
     }
@@ -884,6 +950,66 @@ impl App {
                     }
                 });
             }
+            Page::Wallpaper => {
+                ui.heading(t!("wallpaper.heading"));
+                ui.small(t!("wallpaper.hint"));
+                ui.add_space(4.0);
+                ui.label(t!("wallpaper.enable"));
+                ui.horizontal(|ui| {
+                    if self.option_button(ui, self.cfg.wallpaper.enable, &t!("wallpaper.on")) {
+                        self.cfg.wallpaper.enable = true;
+                    }
+                    if self.option_button(ui, !self.cfg.wallpaper.enable, &t!("wallpaper.off")) {
+                        self.cfg.wallpaper.enable = false;
+                    }
+                });
+                ui.small(wp_enable_desc(self.cfg.wallpaper.enable));
+                ui.add_space(10.0);
+                ui.label(t!("wallpaper.fps"));
+                let fps_label = format!("{} fps", self.cfg.wallpaper.fps);
+                egui_glass::GlassSlider::new(&mut self.wp_fps_f, 1.0..=30.0)
+                    .text(fps_label)
+                    .step_by(1.0)
+                    .style(if self.dark {
+                        egui_glass::GlassStyle::dark()
+                    } else {
+                        egui_glass::GlassStyle::regular()
+                    })
+                    .show(ui);
+                self.cfg.wallpaper.fps = self.wp_fps_f.round().clamp(1.0, 30.0) as u32;
+                ui.add_space(10.0);
+                ui.label(t!("wallpaper.frames"));
+                let frames_label = if self.cfg.wallpaper.frames == 0 {
+                    t!("wallpaper.frames_all").into_owned()
+                } else {
+                    format!("{} frames", self.cfg.wallpaper.frames)
+                };
+                egui_glass::GlassSlider::new(&mut self.wp_frames_f, 0.0..=120.0)
+                    .text(frames_label)
+                    .step_by(1.0)
+                    .style(if self.dark {
+                        egui_glass::GlassStyle::dark()
+                    } else {
+                        egui_glass::GlassStyle::regular()
+                    })
+                    .show(ui);
+                self.cfg.wallpaper.frames = self.wp_frames_f.round().clamp(0.0, 120.0) as u32;
+                ui.small(t!("wallpaper.frames_hint"));
+                ui.add_space(10.0);
+                ui.label(t!("wallpaper.preload"));
+                let preload_label = format!("{} frames", self.cfg.wallpaper.preload);
+                egui_glass::GlassSlider::new(&mut self.wp_preload_f, 1.0..=16.0)
+                    .text(preload_label)
+                    .step_by(1.0)
+                    .style(if self.dark {
+                        egui_glass::GlassStyle::dark()
+                    } else {
+                        egui_glass::GlassStyle::regular()
+                    })
+                    .show(ui);
+                self.cfg.wallpaper.preload = self.wp_preload_f.round().clamp(1.0, 16.0) as u32;
+                ui.small(t!("wallpaper.preload_hint"));
+            }
             Page::Summary => {
                 ui.heading(t!("sum.heading"));
                 ui.small(t!("sum.hint"));
@@ -896,6 +1022,19 @@ impl App {
                 ui.label(t!("sum.workers", v = self.cfg.render.workers.file_str()));
                 ui.label(t!("sum.vsync", v = self.cfg.render.vsync.file_str()));
                 ui.label(self.render_measured_line());
+                ui.label(t!(
+                    "sum.wallpaper",
+                    v = if self.cfg.wallpaper.enable {
+                        format!(
+                            "on {}fps/{}f/pre{}",
+                            self.cfg.wallpaper.fps,
+                            self.cfg.wallpaper.frames,
+                            self.cfg.wallpaper.preload
+                        )
+                    } else {
+                        String::from("off")
+                    }
+                ));
                 ui.label(t!("sum.play", v = self.play_text()));
                 ui.label(self.measured_line());
                 ui.label(t!("sum.version", v = self.cfg.version));
@@ -923,6 +1062,7 @@ impl eframe::App for App {
                 ui.horizontal(|ui| {
                     ui.selectable_value(&mut self.page, Page::File, t!("nav.file"));
                     ui.selectable_value(&mut self.page, Page::Accel, t!("nav.accel"));
+                    ui.selectable_value(&mut self.page, Page::Wallpaper, t!("nav.wallpaper"));
                     ui.selectable_value(&mut self.page, Page::Summary, t!("nav.summary"));
                     if ui.button(t!("toolbar.open")).clicked() {
                         act = Action::Open;
@@ -997,6 +1137,7 @@ impl eframe::App for App {
                     ui.heading(t!("nav.sections"));
                     self.nav_button(ui, Page::File, t!("nav.file").into_owned());
                     self.nav_button(ui, Page::Accel, t!("nav.accel").into_owned());
+                    self.nav_button(ui, Page::Wallpaper, t!("nav.wallpaper").into_owned());
                     self.nav_button(ui, Page::Summary, t!("nav.summary").into_owned());
                     ui.add_space(8.0);
                     ui.small(t!("sum.accel", v = self.cfg.accel.level.file_str()));
@@ -1040,6 +1181,34 @@ impl eframe::App for App {
             });
 
         self.do_action(ui.ctx(), act);
+    }
+}
+
+/// 文件 schema 回归：旧文件（无 `[wallpaper]` 表）必须照读，新字段回写不丢。
+#[cfg(test)]
+mod schema_tests {
+    use super::*;
+
+    #[test]
+    fn old_file_without_wallpaper_parses() {
+        let text = "version = 1\n[accel]\nlevel = \"auto\"\n[render]\nmode = \"auto\"\n[play]\nfps = \"auto\"\n";
+        let cfg: FileConfig = toml::from_str(text).unwrap();
+        assert!(!cfg.wallpaper.enable);
+        assert_eq!(cfg.wallpaper.fps, default_wallpaper_fps());
+        assert_eq!(cfg.wallpaper.preload, default_wallpaper_preload());
+    }
+
+    #[test]
+    fn wallpaper_roundtrip() {
+        let mut cfg = FileConfig::default();
+        cfg.wallpaper.enable = true;
+        cfg.wallpaper.fps = 20;
+        cfg.wallpaper.frames = 30;
+        let text = toml::to_string(&cfg).unwrap();
+        let back: FileConfig = toml::from_str(&text).unwrap();
+        assert!(back.wallpaper.enable);
+        assert_eq!(back.wallpaper.fps, 20);
+        assert_eq!(back.wallpaper.frames, 30);
     }
 }
 
