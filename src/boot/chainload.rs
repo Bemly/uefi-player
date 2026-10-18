@@ -1,21 +1,21 @@
 //! EFI chainload（基于 `edera-sprout-eficore`，`boot` bin 不可依赖，自研组装）。
 //!
-//! 与上游 `crates/boot/src/actions/chainload.rs` 的偏离（实测结论）：
+//! 与上游 `crates/boot/src/actions/chainload.rs` 的偏离（QEMU 实测结论）：
 //! 上游用 `resolve_path`（DevicePathFromText 文本往返 + `locate_device_path`）
-//! 把路径解成 `ImageSource::ResolvedPath`；QEMU 实测里该调用触发 OVMF 调试版
+//! 把路径解成 `ResolvedPath`；QEMU 实测该调用触发 OVMF 调试版
 //! `MemoryAllocationLib.c:821` ASSERT（分配失败）进 `CpuDeadLoop`，
-//! 串口停在 `boot: resolving`，RIP 全员 pause 自旋（见 `docs/bootloader.md`）。
-//! 故 P1 改走同卷直读 + `ImageSource::DataBuffer`（`LoadImageSource::FromBuffer`
-//! 的 `file_path` 明确可选，不影响加载）：
-//! 打开**自身镜像所在卷**的 SimpleFileSystem（`LoadedImage::device`），
-//! BLS `efi` 路径当卷内相对路径读整文件交 `ImageLoader::load`
-//! （Secure Boot/shim 判定在里面，和上游一致）。
-//! 代价：跨盘启动项不支持（entries 本来就只枚举本卷，如遇含设备前缀的路径
-//! 明确报错，不断整单）。`options` 透传与 `UnloadGuard` 照抄上游。
+//! 串口停在 `boot: resolving`，全核 pause 自旋，栈上 ASSERT 字符串为证。
+//! 故 P1 全程只用二进制 DevicePath 操作（零文本解析）：
+//! 截自身镜像路径的设备节点 + 新 `FilePath` 节点拼出目标路径，
+//! 文件经本卷 SimpleFileSystem 直读，以 `ImageSource::DataBuffer` 交
+//! `ImageLoader::load`（`into_owned_data_buffer` 对 DataBuffer 不重读文件，
+//! 直接用给定的 buffer；`file_path` 照给，子镜像设备上下文完整）。
+//! 代价：跨盘启动项不支持（entries 本来就只枚举本卷，含设备前缀的明确报错）。
+//! `LoadedImage.set_load_options`（BLS `options` 透传）与 `UnloadGuard` 照抄上游。
 
-use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::String;
+use alloc::vec::Vec;
 
 use crate::error::{NyaStatus, Result};
 
@@ -53,12 +53,29 @@ pub fn chainload_efi(efi_path: &str, options: Option<&str>) -> Result {
 
     // 里程碑日志（串口-only）：handoff 路径卡死时靠最后行号定位。
     log::warn!("boot: reading {}", efi_path);
-    let data = read_from_own_volume(me, efi_path)?;
+    let loaded = uefi::boot::open_protocol_exclusive::<uefi::proto::loaded_image::LoadedImage>(me)?;
+    let dev = loaded
+        .device()
+        .ok_or_else(|| NyaStatus::_Debug(String::from("boot: no self image device")))?;
+    let efi_cstr = uefi::data_types::CString16::try_from(efi_path)
+        .map_err(|_| NyaStatus::FromStrWithBufError)?;
+    // 二进制拼目标路径（自身设备节点 + 新 FilePath 节点，无文本往返）。
+    let resolved = build_resolved_path(
+        loaded
+            .file_path()
+            .ok_or_else(|| NyaStatus::_Debug(String::from("boot: no self image path")))?,
+        &efi_cstr,
+        dev,
+    )?;
+    drop(loaded);
+
+    // 本卷直读（复用 `Fs`，entries 也只枚举本卷，语义一致）。
+    let data = crate::fs::Fs::new()?.read_file(&efi_cstr)?;
 
     let request = ImageLoadRequest::new(
         me,
         ImageSource::DataBuffer {
-            path: None,
+            path: Some(&resolved),
             buffer: &data,
         },
     );
@@ -68,8 +85,9 @@ pub fn chainload_efi(efi_path: &str, options: Option<&str>) -> Result {
 
     // BLS `options` 行透传（空串按无处理）；pin 住等 start 完成再释放。
     if let Some(opts) = edera_sprout_parsing::empty_is_none(options) {
-        let opts =
-            Box::pin(uefi::CString16::try_from(opts).map_err(|_| NyaStatus::FromStrWithBufError)?);
+        let opts = alloc::boxed::Box::pin(
+            uefi::CString16::try_from(opts).map_err(|_| NyaStatus::FromStrWithBufError)?,
+        );
         if opts.num_bytes() > u32::MAX as usize {
             return Err(NyaStatus::_Debug(String::from("boot: options too large")));
         }
@@ -90,19 +108,74 @@ pub fn chainload_efi(efi_path: &str, options: Option<&str>) -> Result {
     Ok(())
 }
 
-/// 从**自身镜像所在卷**读文件（`LoadedImage::device` → SimpleFileSystem）。
-/// 复用 `uefi::fs`（和 `Fs::new` 同路数），不经过 device-path 文本解析。
-fn read_from_own_volume(me: uefi::Handle, path: &str) -> Result<alloc::vec::Vec<u8>> {
-    let loaded = uefi::boot::open_protocol_exclusive::<uefi::proto::loaded_image::LoadedImage>(me)?;
-    let dev = loaded
-        .device()
-        .ok_or_else(|| NyaStatus::_Debug(String::from("boot: no self image device")))?;
-    drop(loaded);
+/// 二进制拼 `ResolvedPath`：自身完整路径的前导非文件节点（= 设备根）+
+/// 新 `FilePath` 节点。`filesystem_handle` 直接用自身设备句柄
+/// （根就是从它截的，免 `locate_device_path` 一次调用）。
+/// 全程无 DevicePath 文本解析（EDK2 调试版 ASSERT 的触发面，见文件头）。
+fn build_resolved_path(
+    our_full: &uefi::proto::device_path::DevicePath,
+    efi_cstr: &uefi::data_types::CString16,
+    dev: uefi::Handle,
+) -> Result<eficore::path::ResolvedPath> {
+    use uefi::proto::device_path::build::{DevicePathBuilder, media::FilePath as BuildFilePath};
+    use uefi::proto::device_path::{DevicePath, DeviceSubType, DeviceType};
 
-    let sfs = uefi::boot::open_protocol_exclusive::<uefi::proto::media::fs::SimpleFileSystem>(dev)?;
-    let mut fs = uefi::fs::FileSystem::new(sfs);
-    let cstr =
-        uefi::data_types::CString16::try_from(path).map_err(|_| NyaStatus::FromStrWithBufError)?;
-    fs.read(uefi::fs::Path::new(&cstr))
-        .map_err(|e| NyaStatus::_Debug(format!("boot: read {} failed: {:?}", path, e)))
+    fn is_file_node(node: &uefi::proto::device_path::DevicePathNode) -> bool {
+        node.device_type() == DeviceType::MEDIA && node.sub_type() == DeviceSubType::MEDIA_FILE_PATH
+    }
+    fn build_err() -> NyaStatus {
+        NyaStatus::_Debug(String::from("boot: device path build failed"))
+    }
+
+    // 根：前导非文件节点。
+    let mut root_v = Vec::new();
+    let root_box = {
+        let mut b = DevicePathBuilder::with_vec(&mut root_v);
+        for node in our_full.node_iter() {
+            if is_file_node(node) {
+                break;
+            }
+            b = b.push(&node).map_err(|_| build_err())?;
+        }
+        let root: &DevicePath = b.finalize().map_err(|_| build_err())?;
+        root.to_boxed()
+    };
+    // 子：纯 FilePath 节点。
+    let sub_box = {
+        let mut sub_v = Vec::new();
+        let sub: &DevicePath = DevicePathBuilder::with_vec(&mut sub_v)
+            .push(&BuildFilePath {
+                path_name: efi_cstr.as_ref(),
+            })
+            .map_err(|_| build_err())?
+            .finalize()
+            .map_err(|_| build_err())?;
+        sub.to_boxed()
+    };
+    // 全：根节点 + FilePath 节点。
+    let full_box = {
+        let mut full_v = Vec::new();
+        let mut b = DevicePathBuilder::with_vec(&mut full_v);
+        for node in our_full.node_iter() {
+            if is_file_node(node) {
+                break;
+            }
+            b = b.push(&node).map_err(|_| build_err())?;
+        }
+        let full: &DevicePath = b
+            .push(&BuildFilePath {
+                path_name: efi_cstr.as_ref(),
+            })
+            .map_err(|_| build_err())?
+            .finalize()
+            .map_err(|_| build_err())?;
+        full.to_boxed()
+    };
+
+    Ok(eficore::path::ResolvedPath {
+        root_path: root_box,
+        sub_path: sub_box,
+        full_path: full_box,
+        filesystem_handle: dev,
+    })
 }

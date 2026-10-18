@@ -24,15 +24,17 @@
   QEMU 实测该调用触发 OVMF 调试版 `MemoryAllocationLib.c:821` ASSERT
   （分配失败）进 `CpuDeadLoop`（串口停在 `boot: resolving`，
   全核 pause 自旋，栈上 ASSERT 字符串为证）。
-  故 P1 改走同卷直读 + `ImageSource::DataBuffer`
- （`LoadImageSource::FromBuffer` 的 `file_path` 明确可选，不影响加载）：
-  以自身镜像设备（`LoadedImage::device`）开 SimpleFileSystem，
-  BLS `efi` 路径当卷内相对路径读整文件交 `ImageLoader::load`
-  （Secure Boot/shim 判定在里面，和上游一致）。
+  故 P1 全程只用二进制 DevicePath 操作（零文本解析）：
+  截自身完整路径的设备节点 + 新 `FilePath` 节点拼出 `ResolvedPath`
+  （`filesystem_handle` 直接用自身设备句柄，免 `locate_device_path`），
+  文件经本卷直读，以 `ImageSource::DataBuffer{Some(resolved), bytes}` 交
+  `ImageLoader::load`（`into_owned_data_buffer` 对 DataBuffer 不重读文件，
+  直接用给定 buffer；`file_path` 照给，子镜像设备上下文完整）。
   `LoadedImage.set_load_options`（BLS `options` 透传）→ `start_image`；
   失败 `UnloadGuard` 卸镜像，不留残留。
-  代价：跨盘启动项不支持（含设备前缀如 `PciRoot(...)` 的明确报错；
-  entries 本来就只枚举本卷，单盘 U 盘场景全覆盖）。
+  代价：跨盘启动项不支持（entries 本来就只枚举本卷，单盘 U 盘场景全覆盖）。
+  另：QEMU 须用 x64 OVMF（`edk2-x86_64-code.fd`），IA32 固件起 x64 镜像报
+  `Unsupported`（Image type X64 can't be started on IA32 UEFI system）。
 - `mod.rs`：Exclusive 子菜单（按键 `b` 进，`0-9a-z` 选，`Enter` 跑默认，`q` 回）。
   成功 chainload 不返回；被起镜像返回时重建屏显回子菜单。
 
