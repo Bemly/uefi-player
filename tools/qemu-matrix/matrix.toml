@@ -6,8 +6,9 @@
 #（`/usr/local/share/qemu/edk2-x86_64-code.fd`，带 ASSERT，抓固件 bug 用）。
 # 单 case 可钉 `ovmf = "release"` 切自带 nightly RELEASE
 #（`assets/ovmf-release-x86_64-code.fd`，osdev0/edk2-ovmf-nightly 20261019，
-# `build -b RELEASE`，无 ASSERT、更快，适合比性能）。
-# 命令行 `--ovmf debug|release|PATH` 强制全矩阵用一种；
+# `build -b RELEASE`，无 ASSERT、更快，适合比性能），可钉 `cpu = "host"`
+# 透传宿主特性（缺省 qemu64/SSE2 基线，门禁口径）。
+# 命令行 `--ovmf debug|release|PATH` / `--cpu MODEL` 强制全矩阵用一种；
 # `--ovmf-set both` 每个 case 跑两遍（第二遍 `-release` 后缀，双轨全绿才算过）。
 #
 # 分轨口径：`boot-*` 全钉 `ovmf = "release"——引导 lane 用上游实测过的环境

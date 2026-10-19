@@ -31,6 +31,9 @@ struct Global {
     smp: Option<u32>,
     mem_mb: Option<u32>,
     ovmf: Option<String>,
+    /// 默认 CPU 模型：缺省不用 `-cpu`（QEMU 默认 qemu64，SSE2 基线，门禁口径）；
+    /// "host" = 宿主透传（本机 i5-10400 即 AVX2），其它按 QEMU 模型名原样传。
+    cpu: Option<String>,
     timeout_sec: Option<u64>,
     settle_sec: Option<u64>,
     #[serde(default)]
@@ -66,6 +69,9 @@ struct Case {
     ///（`assets/ovmf-release-x86_64-code.fd`，无 ASSERT、更快，适合比性能），
     /// 其它值按路径原样用。命令行 `--ovmf/--ovmf-set` 优先于此。
     ovmf: Option<String>,
+    /// 本 case 的 CPU 模型：缺省跟全局/命令行；"host" 透传宿主特性，其它按名原样传。
+    /// 命令行 `--cpu` 优先于此。
+    cpu: Option<String>,
     /// 附加卷（第二盘及以后）：多卷自动发现的测试夹具，按顺序挂 hd2、hd3…。
     #[serde(default)]
     extra_volumes: Vec<ExtraVolume>,
@@ -150,6 +156,9 @@ struct Args {
     keep: bool,
     no_build: bool,
     ovmf: Option<String>,
+    /// 强制本轮全用指定 CPU（模型名或 "host"）；单 case `cpu` 与全局 `cpu` 照认，
+    /// 优先级：命令行 > 单 case > 全局 > 缺省（不用 -cpu，即 qemu64 基线）。
+    cpu: Option<String>,
     /// 全局固件档：debug（默认，沿用全局/单 case 设置）、release（全用 RELEASE 跑一遍）、
     /// both（每个 case 跑两遍，第二遍挂 `-release` 后缀；与 `--ovmf` 同给时以它为准）。
     ovmf_set: Option<String>,
@@ -166,6 +175,7 @@ fn parse_args() -> Args {
             "--no-build" => a.no_build = true,
             "--case" => a.case = it.next(),
             "--ovmf" => a.ovmf = it.next(),
+            "--cpu" => a.cpu = it.next(),
             "--ovmf-set" => a.ovmf_set = it.next(),
             other => {
                 eprintln!("unknown arg: {other}");
@@ -496,6 +506,7 @@ fn run_case(
     efi: &str,
     keep: bool,
     ovmf: &str,
+    cpu: &str,
     suffix: &str,
 ) -> (bool, String) {
     let tag = format!("{}{}", case.name, suffix);
@@ -591,15 +602,24 @@ fn run_case(
         }),
         "-M".into(),
         "q35".into(),
-        "-device".into(),
-        "virtio-vga,xres=1920,yres=1080".into(),
-        "-drive".into(),
-        format!("if=pflash,format=raw,unit=0,file={ovmf},readonly=on"),
-        "-drive".into(),
-        format!("file={image},format=raw,if=none,id=hd"),
-        "-device".into(),
-        "virtio-blk-pci,drive=hd".into(),
     ];
+    // 缺省不用 -cpu（qemu64/SSE2 基线，门禁口径）；"host" 透传宿主特性测 AVX2。
+    if !cpu.is_empty() {
+        cmd.push("-cpu".into());
+        cmd.push(cpu.into());
+    }
+    cmd.extend(
+        [
+            "-device".into(),
+            "virtio-vga,xres=1920,yres=1080".into(),
+            "-drive".into(),
+            format!("if=pflash,format=raw,unit=0,file={ovmf},readonly=on"),
+            "-drive".into(),
+            format!("file={image},format=raw,if=none,id=hd"),
+            "-device".into(),
+            "virtio-blk-pci,drive=hd".into(),
+        ],
+    );
     // 附加卷挂 hd2、hd3…（多卷发现的测试夹具）。
     for (i, vimg) in extra_images.iter().enumerate() {
         let id = format!("hd{}", i + 2);
@@ -793,7 +813,13 @@ fn main() {
             )],
         };
         for (ovmf, suffix) in &passes {
-            let (ok, detail) = run_case(c, &matrix.global, &efi, args.keep, ovmf, suffix);
+            let cpu = args
+                .cpu
+                .as_deref()
+                .or(c.cpu.as_deref())
+                .or(matrix.global.cpu.as_deref())
+                .unwrap_or("");
+            let (ok, detail) = run_case(c, &matrix.global, &efi, args.keep, ovmf, cpu, suffix);
             results.push((format!("{}{}", c.name, suffix), ok, detail));
         }
     }

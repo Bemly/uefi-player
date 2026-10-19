@@ -29,6 +29,8 @@ cargo run --manifest-path tools/qemu-matrix/Cargo.toml --target "$(rustc -vV | s
 # --ovmf-set release 全切 RELEASE（`assets/ovmf-release-x86_64-code.fd`），
 # --ovmf-set both 双轨全跑（`-release` 后缀，比视频性能用它）。
 # 单 case 也可在 matrix.toml 里钉 `ovmf = "release"`。
+# CPU 默认 qemu64（SSE2 基线，门禁口径）；`--cpu host` 透传宿主特性
+#（本机 i5-10400 即 AVX2），单 case 可钉 `cpu = "host"`，全局可加 `cpu`。
 cargo run --manifest-path tools/qemu-matrix/Cargo.toml --target "$(rustc -vV | sed -n 's/^host: //p')" -- --ovmf-set both --case video-mp
 ```
 
