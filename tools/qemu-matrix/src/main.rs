@@ -579,8 +579,7 @@ fn run_case(case: &Case, glob: &Global, efi: &str, keep: bool, ovmf_default: &st
             format!("file:{serial}"),
             "-monitor".into(),
             format!("telnet:127.0.0.1:{port},server,nowait"),
-        ]
-        .into_iter(),
+        ],
     );
     cmd.extend(pick_accel());
     println!("  {}", cmd.join(" "));

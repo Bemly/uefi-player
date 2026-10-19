@@ -18,7 +18,7 @@
 
 use alloc::collections::BTreeSet;
 use alloc::format;
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use uefi::Handle;
 use uefi::proto::loaded_image::LoadedImage;
@@ -82,13 +82,79 @@ fn dir_files(fs: &mut Fs, dir: &str) -> Vec<String> {
     }
 }
 
+/// UKI 项命名：`Skip(msg)` 跳过（非 PE/错架构，坏项不上菜单）；
+/// `Title(t)` 直接用（无 `.uname` 区时 t 即文件名，照样能起）。
+enum UkiName {
+    Skip(String),
+    Title(String),
+}
+
+fn uki_name(fs: &mut Fs, path: &str, stem: &str) -> UkiName {
+    match read_uki_inner(fs, path) {
+        Ok(Some(t)) => UkiName::Title(t),
+        Ok(None) => UkiName::Title(String::from(stem)),
+        Err(e) => UkiName::Skip(format!("{:#}", e)),
+    }
+}
+
+/// 读 `.uname` 区 + 机器字长。`Ok(None)` = 有效 PE 但无名（回退文件名）；
+/// `Err` = 坏项（非 PE/错架构/读失败），调用方跳过。
+fn read_uki_inner(fs: &mut Fs, path: &str) -> anyhow::Result<Option<String>> {
+    use edera_sprout_bls::{PE_MACHINE_X86_64, read_pe};
+
+    struct Reader {
+        file: uefi::proto::media::file::RegularFile,
+    }
+    impl edera_sprout_bls::ReadAt for Reader {
+        fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> anyhow::Result<()> {
+            self.file
+                .set_position(offset)
+                .map_err(|e| anyhow::anyhow!("unable to seek: {:?}", e))?;
+            let mut done = 0;
+            while done < buf.len() {
+                let n = self
+                    .file
+                    .read(&mut buf[done..])
+                    .map_err(|e| anyhow::anyhow!("unable to read: {:?}", e))?;
+                if n == 0 {
+                    anyhow::bail!("unexpected end of file");
+                }
+                done += n;
+            }
+            Ok(())
+        }
+    }
+
+    let cstr =
+        uefi::data_types::CString16::try_from(path).map_err(|_| anyhow::anyhow!("bad path"))?;
+    let file = fs
+        .open_file(&cstr)
+        .map_err(|e| anyhow::anyhow!("unable to open: {:?}", e))?;
+    let mut reader = Reader { file };
+    let pe = read_pe(&mut reader, &[".uname"])?;
+    if pe.machine != PE_MACHINE_X86_64 {
+        anyhow::bail!("wrong architecture: {:#x}", pe.machine);
+    }
+    Ok(pe
+        .sections
+        .into_iter()
+        .find(|s| s.name == ".uname")
+        .and_then(|s| s.data)
+        .and_then(|d| String::from_utf8(d).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty()))
+}
+
 /// 单卷扫描（`volume=None` 即本卷；BLS 在本卷上跳过——`entries::enumerate`
 /// 已经列过本卷 BLS，默认项匹配只看本卷，去重靠调用方标题后缀）。
+/// `strict_bls`：严格模式下本卷是否允许出 BLS（只认本卷 + XBOOTLDR 卷）。
 /// 返回（条目，警告）。失败只记 warning，不断其它卷。
 fn scan_volume(
     fs: &mut Fs,
     volume: Option<Handle>,
     is_own: bool,
+    strict: bool,
+    strict_bls: bool,
     cfg_windows: bool,
     cfg_linux: bool,
     cfg_shell: bool,
@@ -100,16 +166,20 @@ fn scan_volume(
     let mut warnings = Vec::new();
     let mut w = |s: String| warnings.push(format!("{}: {}", vol_tag, s));
 
-    // BLS（本卷跳过，见上）。
-    if !is_own {
+    // BLS（本卷跳过，见上；strict 模式下其它卷也只认 XBOOTLDR 卷）。
+    let n_before = entries.len();
+    if !is_own && (!strict || strict_bls) {
         let (mut es, mut ws) = scan_bls(fs, volume);
         entries.append(&mut es);
         for x in ws.drain(..) {
             w(x);
         }
     }
+    let bls_here = entries.len() > n_before;
 
-    // UKI：EFI/Linux/*.efi 全是可直接起的 PE（标题取文件名，不读 .uname 区）。
+    // UKI：EFI/Linux/*.efi 全是可直接起的 PE。标题读 `.uname` 区，
+    // 读不到回退文件名；坏项（非 PE/错架构）跳过并 warning。
+    let mut uki_found = false;
     if cfg_uki {
         for name in dir_files(fs, UKI_DIR) {
             if !name.to_ascii_lowercase().ends_with(".efi") {
@@ -119,21 +189,29 @@ fn scan_volume(
                 .strip_suffix(".efi")
                 .or_else(|| name.strip_suffix(".EFI"))
                 .unwrap_or(&name);
-            entries.push(BootEntry {
-                title: String::from(stem),
-                file_name: String::from(name.as_str()),
-                kind: BootKind::Efi {
-                    path: format!("{}\\{}", UKI_DIR, name),
-                    options: None,
-                    volume,
-                },
-                tries_left: None,
-            });
+            let full = format!("{}\\{}", UKI_DIR, name);
+            match uki_name(fs, &full, stem) {
+                UkiName::Skip(why) => w(format!("{}: skipped ({})", name, why)),
+                UkiName::Title(title) => {
+                    uki_found = true;
+                    entries.push(BootEntry {
+                        title,
+                        file_name: String::from(name.as_str()),
+                        kind: BootKind::Efi {
+                            path: full,
+                            options: None,
+                            volume,
+                        },
+                        tries_left: None,
+                    });
+                }
+            }
         }
     }
 
     // Linux 内核对：\boot + \ 扫前缀，initramfs 按后缀配对（上游同规则）。
-    if cfg_linux {
+    // 该卷已有 BLS/UKI 时跳过（上游同款去重：一个内核只留一种入口）。
+    if cfg_linux && !bls_here && !uki_found {
         use edera_sprout_parsing::{
             LINUX_INITRAMFS_PREFIXES, LINUX_KERNEL_PREFIXES, initramfs_candidates,
             match_kernel_prefix,
@@ -228,10 +306,18 @@ fn scan_volume(
 /// 多卷自动发现：本卷 BLS 由 `entries::enumerate` 负责，这里只做
 /// “其它卷 BLS + 全卷 UKI/Linux/Windows/Shell”，调用方拼到列表尾部。
 /// 任一卷失败只记 warning，不挡其它卷（U盘热插拔/损坏卷是常态）。
+/// `strict`（`[boot] strict`）：BLS 只认本卷 + XBOOTLDR 卷（systemd 严格模式）；
+/// 其它类别不受影响（上游同款：strict 只约束 BLS 来源）。
 pub fn detect() -> (Vec<BootEntry>, Vec<String>) {
     let mut entries = Vec::new();
     let mut warnings = Vec::new();
     let own = own_device();
+    let strict = crate::config::boot_strict();
+    // XBOOTLDR 卷（strict 才找；找不到当没有，不挡流程）。
+    let xbootldr = if strict { find_xbootldr_handle() } else { None };
+    if strict && xbootldr.is_none() {
+        warnings.push(String::from("strict: no xbootldr partition found"));
+    }
     let handles = match uefi::boot::find_handles::<uefi::proto::media::fs::SimpleFileSystem>() {
         Ok(h) => h,
         Err(e) => {
@@ -269,6 +355,8 @@ pub fn detect() -> (Vec<BootEntry>, Vec<String>) {
             &mut fs,
             Some(*h),
             is_own,
+            strict,
+            Some(*h) == xbootldr,
             crate::config::boot_windows(),
             crate::config::boot_linux(),
             crate::config::boot_shell(),
@@ -279,6 +367,21 @@ pub fn detect() -> (Vec<BootEntry>, Vec<String>) {
         warnings.append(&mut ws);
     }
     (entries, warnings)
+}
+
+/// XBOOTLDR 卷句柄（strict 模式的第二个 BLS 来源）。任一步失败返回 None
+///（无 GPT/无该分区/固件读不到，都按“没有”处理，不挡流程）。
+fn find_xbootldr_handle() -> Option<Handle> {
+    use uefi::proto::device_path::DevicePath;
+    let me = uefi::boot::image_handle();
+    let img =
+        uefi::boot::open_protocol_exclusive::<uefi::proto::loaded_image::LoadedImage>(me).ok()?;
+    // 路径拷出来再放协议（借用活不过 drop）。
+    let img_path: alloc::boxed::Box<DevicePath> = img.file_path()?.to_boxed();
+    drop(img);
+    let xboot = eficore::xbootldr::find_xbootldr(&img_path).ok().flatten()?;
+    let mut probe: &DevicePath = &xboot;
+    uefi::boot::locate_device_path::<uefi::proto::media::fs::SimpleFileSystem>(&mut probe).ok()
 }
 
 /// 拼到主列表：标题撞车挂 ` (2)` 后缀（本卷 BLS 先占原名，外卷/自动项让路）。
