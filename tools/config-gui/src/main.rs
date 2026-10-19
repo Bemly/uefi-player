@@ -629,6 +629,34 @@ impl App {
         }
     }
 
+    /// 开机矩阵还有没有待测维度（与固件 `config::needs_render_bench` 同逻辑：
+    /// Blt 下 workers/dist 不参测，单核下 dist 不参测）。
+    /// `tune.frames` 只给开机矩阵用，无待测维度时隐藏。
+    fn render_bench_pending(&self) -> bool {
+        let m = &self.cfg.render;
+        if m.mode == RenderMode::Auto && m.measured_render == RenderMode::Auto {
+            return true;
+        }
+        let render_is_blt = match m.mode {
+            RenderMode::Blt => true,
+            RenderMode::Direct => false,
+            RenderMode::Auto => m.measured_render == RenderMode::Blt,
+        };
+        if !render_is_blt
+            && m.workers == WorkersMode::Auto
+            && m.measured_workers == WorkersMode::Auto
+        {
+            return true;
+        }
+        let dist_in_play = !render_is_blt
+            && m.workers != WorkersMode::BspOnly
+            && !(m.workers == WorkersMode::Auto && m.measured_workers == WorkersMode::BspOnly);
+        if dist_in_play && m.dist == DistMode::Auto && m.measured_dist == DistMode::Auto {
+            return true;
+        }
+        m.vsync == VsyncMode::Auto && m.measured_vsync == VsyncMode::Auto
+    }
+
     fn load_path(&mut self, path: String) {
         match std::fs::read_to_string(&path) {
             Ok(text) => match toml::from_str::<FileConfig>(&text) {
@@ -930,6 +958,7 @@ impl App {
                     }
                 });
                 ui.small(mode_desc(self.cfg.render.mode));
+                ui.add_space(10.0);
                 if self.cfg.render.mode == RenderMode::Blt {
                     ui.label(t!("accel.blt_op"));
                     // 一行四个（窄窗自动换行保底，不断尾）。
@@ -941,15 +970,11 @@ impl App {
                         }
                     });
                     ui.small(blt_desc(self.cfg.render.blt_op));
-                } else {
-                    ui.small(t!("accel.blt_hidden"));
+                    ui.add_space(10.0);
                 }
-                ui.add_space(10.0);
-                ui.label(t!("accel.workers"));
-                // Blt 恒单线程，workers 无意义：只给提示，不摆开关。
-                if self.cfg.render.mode == RenderMode::Blt {
-                    ui.small(t!("accel.workers_hidden"));
-                } else {
+                // Blt 恒单线程：workers 整组不可选，直接隐藏（不摆开关也不留提示）。
+                if self.cfg.render.mode != RenderMode::Blt {
+                    ui.label(t!("accel.workers"));
                     ui.horizontal(|ui| {
                         for v in WorkersMode::ALL {
                             if self.option_button(ui, self.cfg.render.workers == v, v.file_str()) {
@@ -958,26 +983,22 @@ impl App {
                         }
                     });
                     ui.small(workers_desc(self.cfg.render.workers));
-                }
-                ui.add_space(10.0);
-                ui.label(t!("accel.dist"));
-                // dist 只在直写 + 全核时有意义：Blt 下无 workers 也就无 dist。
-                if self.cfg.render.mode == RenderMode::Blt
-                    || self.cfg.render.workers == WorkersMode::BspOnly
-                {
-                    ui.small(t!("accel.dist_hidden"));
-                } else {
-                    // 一行四个（窄窗自动换行保底，不断尾；与 blt 行同式）。
-                    ui.horizontal_wrapped(|ui| {
-                        for v in DistMode::ALL {
-                            if self.option_button(ui, self.cfg.render.dist == v, v.file_str()) {
-                                self.cfg.render.dist = v;
+                    ui.add_space(10.0);
+                    // dist 只在直写 + 全核时有意义：单核下整组隐藏。
+                    if self.cfg.render.workers != WorkersMode::BspOnly {
+                        ui.label(t!("accel.dist"));
+                        // 一行四个（窄窗自动换行保底，不断尾；与 blt 行同式）。
+                        ui.horizontal_wrapped(|ui| {
+                            for v in DistMode::ALL {
+                                if self.option_button(ui, self.cfg.render.dist == v, v.file_str()) {
+                                    self.cfg.render.dist = v;
+                                }
                             }
-                        }
-                    });
-                    ui.small(dist_desc(self.cfg.render.dist));
+                        });
+                        ui.small(dist_desc(self.cfg.render.dist));
+                        ui.add_space(10.0);
+                    }
                 }
-                ui.add_space(10.0);
                 ui.label(t!("accel.vsync"));
                 ui.horizontal(|ui| {
                     for v in VsyncMode::ALL {
@@ -988,47 +1009,68 @@ impl App {
                 });
                 ui.small(vsync_desc(self.cfg.render.vsync));
                 ui.add_space(10.0);
-                ui.label(t!("tune.heading"));
-                ui.small(t!("tune.hint"));
-                ui.label(t!("tune.frames"));
-                let frames_label = format!("{} frames", self.cfg.render.tune.frames);
-                egui_glass::GlassSlider::new(&mut self.tune_frames_f, 1.0..=120.0)
-                    .text(frames_label)
-                    .step_by(1.0)
-                    .style(if self.dark {
-                        egui_glass::GlassStyle::dark()
-                    } else {
-                        egui_glass::GlassStyle::regular()
-                    })
-                    .show(ui);
-                self.cfg.render.tune.frames = self.tune_frames_f.round().clamp(1.0, 120.0) as u32;
-                ui.label(t!("tune.tile_rows"));
-                let tile_label = format!("{} rows", self.cfg.render.tune.tile_rows);
-                egui_glass::GlassSlider::new(&mut self.tune_tile_f, 8.0..=512.0)
-                    .text(tile_label)
-                    .step_by(8.0)
-                    .style(if self.dark {
-                        egui_glass::GlassStyle::dark()
-                    } else {
-                        egui_glass::GlassStyle::regular()
-                    })
-                    .show(ui);
-                self.cfg.render.tune.tile_rows = self.tune_tile_f.round().clamp(8.0, 512.0) as u32;
-                ui.label(t!("tune.vsync_fps"));
-                let vsync_fps_label = format!("{} fps", self.cfg.render.tune.vsync_fps);
-                egui_glass::GlassSlider::new(&mut self.tune_vsync_fps_f, 15.0..=240.0)
-                    .text(vsync_fps_label)
-                    .step_by(1.0)
-                    .style(if self.dark {
-                        egui_glass::GlassStyle::dark()
-                    } else {
-                        egui_glass::GlassStyle::regular()
-                    })
-                    .show(ui);
-                self.cfg.render.tune.vsync_fps =
-                    self.tune_vsync_fps_f.round().clamp(15.0, 240.0) as u32;
-                ui.small(t!("tune.note"));
-                ui.add_space(10.0);
+                // 微调只摆本模式用得上的，整组无关直接隐藏：
+                // frames = 开机矩阵帧数（无待测 bench 则藏）；
+                // tile_rows 只跟 tile 切块有关（auto 保留待测，static/dynamic 藏）；
+                // vsync_fps 只在 vsync 非 off 时用（on 封顶 / auto 达标线，off 藏）。
+                let dist_in_play = self.cfg.render.mode != RenderMode::Blt
+                    && self.cfg.render.workers != WorkersMode::BspOnly;
+                let show_tile = dist_in_play
+                    && (self.cfg.render.dist == DistMode::Auto
+                        || self.cfg.render.dist == DistMode::Tile);
+                let show_vfps = self.cfg.render.vsync != VsyncMode::Off;
+                let show_frames = self.render_bench_pending();
+                if show_frames || show_tile || show_vfps {
+                    ui.label(t!("tune.heading"));
+                    ui.small(t!("tune.hint"));
+                    if show_frames {
+                        ui.label(t!("tune.frames"));
+                        let frames_label = format!("{} frames", self.cfg.render.tune.frames);
+                        egui_glass::GlassSlider::new(&mut self.tune_frames_f, 1.0..=120.0)
+                            .text(frames_label)
+                            .step_by(1.0)
+                            .style(if self.dark {
+                                egui_glass::GlassStyle::dark()
+                            } else {
+                                egui_glass::GlassStyle::regular()
+                            })
+                            .show(ui);
+                        self.cfg.render.tune.frames =
+                            self.tune_frames_f.round().clamp(1.0, 120.0) as u32;
+                    }
+                    if show_tile {
+                        ui.label(t!("tune.tile_rows"));
+                        let tile_label = format!("{} rows", self.cfg.render.tune.tile_rows);
+                        egui_glass::GlassSlider::new(&mut self.tune_tile_f, 8.0..=512.0)
+                            .text(tile_label)
+                            .step_by(8.0)
+                            .style(if self.dark {
+                                egui_glass::GlassStyle::dark()
+                            } else {
+                                egui_glass::GlassStyle::regular()
+                            })
+                            .show(ui);
+                        self.cfg.render.tune.tile_rows =
+                            self.tune_tile_f.round().clamp(8.0, 512.0) as u32;
+                    }
+                    if show_vfps {
+                        ui.label(t!("tune.vsync_fps"));
+                        let vsync_fps_label = format!("{} fps", self.cfg.render.tune.vsync_fps);
+                        egui_glass::GlassSlider::new(&mut self.tune_vsync_fps_f, 15.0..=240.0)
+                            .text(vsync_fps_label)
+                            .step_by(1.0)
+                            .style(if self.dark {
+                                egui_glass::GlassStyle::dark()
+                            } else {
+                                egui_glass::GlassStyle::regular()
+                            })
+                            .show(ui);
+                        self.cfg.render.tune.vsync_fps =
+                            self.tune_vsync_fps_f.round().clamp(15.0, 240.0) as u32;
+                    }
+                    ui.small(t!("tune.note"));
+                    ui.add_space(10.0);
+                }
                 ui.horizontal(|ui| {
                     ui.label(self.render_measured_line());
                     if egui_glass::GlassButton::new(t!("render.rebench"))
@@ -1093,21 +1135,23 @@ impl App {
                     }
                 });
                 ui.small(wp_enable_desc(self.cfg.wallpaper.enable));
-                ui.add_space(10.0);
-                ui.label(t!("wallpaper.fps"));
-                let fps_label = format!("{} fps", self.cfg.wallpaper.fps);
-                egui_glass::GlassSlider::new(&mut self.wp_fps_f, 1.0..=30.0)
-                    .text(fps_label)
-                    .step_by(1.0)
-                    .style(if self.dark {
-                        egui_glass::GlassStyle::dark()
-                    } else {
-                        egui_glass::GlassStyle::regular()
-                    })
-                    .show(ui);
-                self.cfg.wallpaper.fps = self.wp_fps_f.round().clamp(1.0, 30.0) as u32;
-                ui.add_space(10.0);
-                ui.label(t!("wallpaper.frames"));
+                // 关壁纸时帧率/帧数/预载全不可选，整组隐藏。
+                if self.cfg.wallpaper.enable {
+                    ui.add_space(10.0);
+                    ui.label(t!("wallpaper.fps"));
+                    let fps_label = format!("{} fps", self.cfg.wallpaper.fps);
+                    egui_glass::GlassSlider::new(&mut self.wp_fps_f, 1.0..=30.0)
+                        .text(fps_label)
+                        .step_by(1.0)
+                        .style(if self.dark {
+                            egui_glass::GlassStyle::dark()
+                        } else {
+                            egui_glass::GlassStyle::regular()
+                        })
+                        .show(ui);
+                    self.cfg.wallpaper.fps = self.wp_fps_f.round().clamp(1.0, 30.0) as u32;
+                    ui.add_space(10.0);
+                    ui.label(t!("wallpaper.frames"));
                 let frames_label = if self.cfg.wallpaper.frames == 0 {
                     t!("wallpaper.frames_all").into_owned()
                 } else {
@@ -1138,6 +1182,7 @@ impl App {
                     .show(ui);
                 self.cfg.wallpaper.preload = self.wp_preload_f.round().clamp(1.0, 16.0) as u32;
                 ui.small(t!("wallpaper.preload_hint"));
+                }
             }
             Page::Summary => {
                 ui.heading(t!("sum.heading"));
