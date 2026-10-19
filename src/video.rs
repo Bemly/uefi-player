@@ -143,6 +143,7 @@ fn resolve_play_target(screen: &mut Screen, tps: u64) -> Result<Option<u32>> {
 /// 纯展示性快进（和开机 render bench 一样会刷屏），一次性的，结果回写配置。
 /// 注意这里是单线程 `upload_frame` 推送：workers=all 的真实多核路只会更快，
 /// 测出来是保守下限，auto 取 3/4 本来就有余量。
+/// `tune.buffers > 0` 时走影子缓冲（与播放同路径，half 取半更准）；测完即扔。
 fn measure_max_fps(screen: &mut Screen, tps: u64) -> Result<u32> {
     screen.draw_str("play: benching max playback fps (one fast pass)...");
     let mut fs = Fs::new()?;
@@ -156,6 +157,8 @@ fn measure_max_fps(screen: &mut Screen, tps: u64) -> Result<u32> {
             None => break,
         }
     }
+    // 影子用完即扔：`mp_draw` 另起自己的环，峰值只留 N 份。
+    screen.release_shadows();
     let dt = rdtsc().saturating_sub(t0).max(1);
     let fps = ((frames as u64 * tps) / dt).clamp(1, 10_000) as u32;
     screen.draw_str(&format!("play: max {} fps, running at 3/4 (capped by video)", fps));
@@ -393,6 +396,15 @@ struct PlayTask<'a> {
     bgen: *const AtomicUsize,
     /// P4-dynamic 计时：每核本轮搬运行耗时（BSP 读来算下轮权重，EWMA 平滑）。
     btimes: *const AtomicUsize,
+    /// 后缓冲影子槽（`tune.buffers > 0` 时）：`sh_n` 个槽指针（每槽
+    /// `sh_h` 行 × `sh_row` 字节，屏几何 stride 对齐），AP/ BSP 画影子，
+    /// BSP 栅栏后整推前台。0 = 直写前台（现状）；Blt 路不用（已是单 push）。
+    sh_slots: *const *mut u8,
+    sh_n: usize,
+    sh_row: usize,
+    sh_h: usize,
+    /// 影子整推发布世代（BSP 推完 bump；AP 下轮开工前等它，N==1 也无竞态）。
+    push_gen: *const AtomicUsize,
     /// P3 掉帧指令（BSP 独写、AP 只读；`drop_gen` 是世代号，见循环注释）。
     drop_gen: &'a AtomicUsize,
     drop_flag: &'a AtomicUsize,
@@ -435,12 +447,11 @@ extern "efiapi" fn play_task(arg: *mut c_void) {
     // dynamic 下解码根本不切分片，`core_frame_ptrs` 为空，解引用会踩空指针）。
     let rows_per_core = ctx.height / ctx.num_cores;
     let y_start = my_id * rows_per_core;
-    let (my_fb_ptr, my_frames_list, my_block_size) = if dynamic {
-        (core::ptr::null_mut(), core::ptr::null(), 0)
+    let (my_frames_list, my_block_size): (*const *const u8, usize) = if dynamic {
+        (core::ptr::null(), 0)
     } else {
         unsafe {
             (
-                ctx.fb_base.add(y_start * ctx.stride_bytes),
                 *ctx.core_frame_ptrs.add(my_id),
                 if my_id == ctx.num_cores - 1 {
                     (ctx.height - y_start) * ctx.stride_bytes
@@ -458,6 +469,8 @@ extern "efiapi" fn play_task(arg: *mut c_void) {
     // P4-dynamic 本核状态：已见发布世代 + 当前行区（首轮全 MAX/等分，见下）。
     // BSP 另有一张 EWMA 均值表（`avg`），每轮按各核耗时重算权重。
     let mut local_bgen = usize::MAX;
+    // 影子整推发布世代（首轮无 push 可等，0 即就绪）。
+    let mut local_push = 0usize;
     let (mut dy0, mut dy1) = (OSD_ROWS, ctx.height);
     let mut avg: Vec<u64> = if dynamic && my_id == 0 {
         vec![0u64; n_cores.max(1)]
@@ -525,7 +538,6 @@ extern "efiapi" fn play_task(arg: *mut c_void) {
     let ui_height = OSD_ROWS;
     let start_y = ui_height;
     let end_y = (ctx.height / 4) as usize;
-    let dst_ptr = ctx.fb_base as *mut u32;
 
     // 计算偏移量和拷贝大小（也是固定的）
     let offset = start_y * stride;
@@ -545,6 +557,18 @@ extern "efiapi" fn play_task(arg: *mut c_void) {
         }
         let fi = (local_frame_idx + skip) % ctx.total_frames.max(1);
         let fstart = rdtsc();
+        // 后缓冲出屏基址：有影子时全核画本轮槽（slot 按轮次取模，人人同值），
+        // BSP 栅栏后整推前台；无影子直写前台（现状，零改动）。
+        let sh_slot: *mut u8 = if ctx.sh_n > 0 {
+            unsafe { *ctx.sh_slots.add(iter % ctx.sh_n) }
+        } else {
+            core::ptr::null_mut()
+        };
+        let out_base = if sh_slot.is_null() {
+            ctx.fb_base
+        } else {
+            sh_slot
+        };
         // 1. 搬运 (生产)：static 按核分区；tile 从共享游标领活
         //    （`tile` 单调递增，`base = iter*N`，永不回绕；OSD 行跳过）；
         //    dynamic 按发布的加权边界分行（BSP 每轮按各核耗时重算，快核多拿，
@@ -554,7 +578,11 @@ extern "efiapi" fn play_task(arg: *mut c_void) {
             let g = unsafe { (*ctx.bgen).load(Ordering::Acquire) };
             if g != local_bgen {
                 local_bgen = g;
-                dy0 = unsafe { (*ctx.bounds.add(my_id)).load(Ordering::Acquire).min(ctx.height) };
+                dy0 = unsafe {
+                    (*ctx.bounds.add(my_id))
+                        .load(Ordering::Acquire)
+                        .min(ctx.height)
+                };
                 dy1 = unsafe {
                     (*ctx.bounds.add(my_id + 1))
                         .load(Ordering::Acquire)
@@ -567,14 +595,15 @@ extern "efiapi" fn play_task(arg: *mut c_void) {
             let mut y = dy0;
             while y < dy1 {
                 unsafe {
-                    let d = ctx.fb_base.add(y * ctx.stride_bytes);
+                    let d = out_base.add(y * ctx.stride_bytes);
                     let s = src_frame.add(y * ctx.stride_bytes);
                     copy_block(d, s, ctx.stride_bytes, copy_w);
                 }
                 y += 1;
             }
             unsafe {
-                (*ctx.btimes.add(my_id)).store(rdtsc().saturating_sub(t0) as usize, Ordering::Relaxed)
+                (*ctx.btimes.add(my_id))
+                    .store(rdtsc().saturating_sub(t0) as usize, Ordering::Relaxed)
             };
         } else if tiled {
             let base = (iter as u64).saturating_mul(ctx.tiles_total as u64);
@@ -595,7 +624,7 @@ extern "efiapi" fn play_task(arg: *mut c_void) {
                 }
                 unsafe {
                     copy_tile_rows(
-                        ctx.fb_base,
+                        out_base,
                         ctx.stride_bytes,
                         src_frame_base,
                         frame_row_bytes,
@@ -611,10 +640,11 @@ extern "efiapi" fn play_task(arg: *mut c_void) {
                     // 1. 获取当前帧的源地址（这个不能移出去，因为每帧 index 不同）
                     let src_frame_base = unsafe { *my_frames_list.add(fi) as *const u32 };
 
-                    // 2. 镂空搬运（P2 位宽选路，OSD 行区留白由 copy_size 保证）
+                    // 2. 镂空搬运（P2 位宽选路，OSD 行区留白由 copy_size 保证；
+                    //    有影子时画槽，BSP 栅栏后整推，见下）
                     if copy_size > 0 {
                         copy_block(
-                            unsafe { dst_ptr.add(offset) as *mut u8 },
+                            unsafe { (out_base as *mut u32).add(offset) as *mut u8 },
                             unsafe { src_frame_base.add(offset) as *const u8 },
                             copy_size,
                             copy_w,
@@ -622,7 +652,8 @@ extern "efiapi" fn play_task(arg: *mut c_void) {
                     }
                 }else {
                     let src_ptr = *my_frames_list.add(fi);
-                    copy_block(my_fb_ptr, src_ptr, my_block_size, copy_w);
+                    let my_dst = out_base.add(y_start * ctx.stride_bytes);
+                    copy_block(my_dst, src_ptr, my_block_size, copy_w);
                 }
             }
         }
@@ -665,30 +696,9 @@ extern "efiapi" fn play_task(arg: *mut c_void) {
             };
         }
 
-        // 3.5 限速 + 下轮掉帧指令发布：栅栏刚对齐过，各核按同一预算自旋。
-        // BSP 判迟（本轮耗时超 2 倍预算 → 下轮丢 1 帧追赶），独写发布；
-        // AP 只等 gen 可见。BSP 不等（自己刚发布），AP 等（发布必达，无死锁：
-        // BSP 发布前不依赖 AP，AP 等待前已过本轮栅栏）。
-        if ctx.target_fps > 0 {
-            let budget = ctx.tps.max(1) / ctx.target_fps.max(1) as u64;
-            while rdtsc().saturating_sub(fstart) < budget {
-                core::hint::spin_loop();
-            }
-            if my_id == 0 {
-                let late = rdtsc().saturating_sub(fstart) > budget.saturating_mul(2);
-                if late {
-                    drops_total += 1;
-                }
-                ctx.drop_flag.store(late as usize, Ordering::SeqCst);
-                ctx.drop_gen.store(iter + 1, Ordering::SeqCst);
-            } else {
-                while ctx.drop_gen.load(Ordering::Acquire) < iter + 1 {
-                    core::hint::spin_loop();
-                }
-            }
-        }
-
-        // 4. 只有 0 号核做统计（可选，且不影响同步）
+        // 3.3 OSD/统计（BSP）：画进出屏基址——有影子时画槽，随整推上屏
+        // （若直画前台，下帧整推会盖掉字；tile/dynamic 下 AP 不盖 OSD 行，
+        // static 盖字是已知瑕疵，见 player.md）。
         if my_id == 0 {
             let end_ticks = unsafe { core::arch::x86_64::_rdtsc() };
             let delta_ticks = (end_ticks - start_ticks) as u128;
@@ -711,7 +721,7 @@ extern "efiapi" fn play_task(arg: *mut c_void) {
 
                 last_sample_ticks = end_ticks;
 
-                let fb = ctx.fb_base as *mut u32;
+                let fb = out_base as *mut u32;
                 // 注意：stride 必须是像素跨度，确保你在 loop 外已经算好了 stride = stride_bytes / 4
 
                 // --- 绘制逻辑 ---
@@ -728,6 +738,42 @@ extern "efiapi" fn play_task(arg: *mut c_void) {
             }
 
             start_ticks = end_ticks;
+        }
+
+        // 3.4 影子整推（BSP 独推）：栅栏后全核画完，BSP 把本轮槽整推前台并
+        // 发布世代；AP 下轮开工前等它（N==1 也无竞态）。直写路（sh_n==0）跳过。
+        if ctx.sh_n > 0 {
+            if my_id == 0 {
+                unsafe { copy_block(ctx.fb_base, sh_slot, ctx.sh_h * ctx.sh_row, copy_w) };
+                local_push = local_push.wrapping_add(1);
+                unsafe { (*ctx.push_gen).store(local_push, Ordering::SeqCst) };
+            }
+            while unsafe { (*ctx.push_gen).load(Ordering::Acquire) } < iter + 1 {
+                core::hint::spin_loop();
+            }
+        }
+
+        // 3.5 限速 + 下轮掉帧指令发布：栅栏刚对齐过，各核按同一预算自旋。
+        // BSP 判迟（本轮耗时超 2 倍预算 → 下轮丢 1 帧追赶），独写发布；
+        // AP 只等 gen 可见。BSP 不等（自己刚发布），AP 等（发布必达，无死锁：
+        // BSP 发布前不依赖 AP，AP 等待前已过本轮栅栏）。
+        if ctx.target_fps > 0 {
+            let budget = ctx.tps.max(1) / ctx.target_fps.max(1) as u64;
+            while rdtsc().saturating_sub(fstart) < budget {
+                core::hint::spin_loop();
+            }
+            if my_id == 0 {
+                let late = rdtsc().saturating_sub(fstart) > budget.saturating_mul(2);
+                if late {
+                    drops_total += 1;
+                }
+                ctx.drop_flag.store(late as usize, Ordering::SeqCst);
+                ctx.drop_gen.store(iter + 1, Ordering::SeqCst);
+            } else {
+                while ctx.drop_gen.load(Ordering::Acquire) < iter + 1 {
+                    core::hint::spin_loop();
+                }
+            }
         }
 
         // 5. 为下一轮做准备 (全是加法)
@@ -959,6 +1005,46 @@ pub fn mp_draw(
     // P2 tile 游标：单调递增，`base = iter * tiles_total`，永不回绕。
     let tile = Box::leak(Box::new(AtomicUsize::new(0)));
 
+    // --- 后缓冲影子环（`tune.buffers > 0` 时；屏几何 stride 对齐槽） ---
+    // 分配失败（try_reserve）退回直写，只记 warning，不断播。
+    // Blt 路不用影子（已是单引擎 push），`video_run` 只在 direct+all 时进这里。
+    let mut sh_n = config::tune_buffers().min(16) as usize;
+    let (sh_slots_ptr, sh_row, sh_h): (*const *mut u8, usize, usize) = if sh_n == 0 {
+        (core::ptr::null(), 0, 0)
+    } else {
+        let slot_len = scr_height.saturating_mul(stride_bytes);
+        let mut ring: Vec<Vec<u8>> = Vec::new();
+        let mut ok = ring.try_reserve_exact(sh_n).is_ok() && slot_len > 0;
+        if ok {
+            for _ in 0..sh_n {
+                let mut s: Vec<u8> = Vec::new();
+                // 容量已预留，extend 不再分配，不会 panic。
+                if s.try_reserve_exact(slot_len).is_err() {
+                    ok = false;
+                    break;
+                }
+                s.extend(core::iter::repeat(0u8).take(slot_len));
+                ring.push(s);
+            }
+            ok = ok && ring.len() == sh_n;
+        }
+        if !ok {
+            log::warn!("video: shadow ring alloc failed ({} bufs), fallback direct", sh_n);
+            sh_n = 0;
+            (core::ptr::null(), 0, 0)
+        } else {
+            let leaked: &'static mut [Vec<u8>] = Box::leak(ring.into_boxed_slice());
+            let mut ptrs: Vec<*mut u8> = Vec::new();
+            for s in leaked.iter_mut() {
+                ptrs.push(s.as_mut_ptr());
+            }
+            let p = Box::leak(ptrs.into_boxed_slice()).as_ptr();
+            (p, stride_bytes, scr_height)
+        }
+    };
+    // 影子整推发布世代：预置 0（首轮无 push 可等，即就绪）。
+    let push_gen = Box::leak(Box::new(AtomicUsize::new(0)));
+
     // --- 构造统一 Context ---
     let ctx = Box::leak(Box::new(PlayTask {
         mp: &mp,
@@ -983,6 +1069,11 @@ pub fn mp_draw(
         bounds,
         bgen,
         btimes,
+        sh_slots: sh_slots_ptr,
+        sh_n,
+        sh_row,
+        sh_h,
+        push_gen,
     }));
 
     let arg_ptr = ctx as *mut _ as *mut c_void;

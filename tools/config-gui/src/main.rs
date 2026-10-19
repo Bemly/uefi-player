@@ -237,6 +237,10 @@ fn default_vsync_fps() -> u32 {
     60
 }
 
+fn default_buffers() -> u32 {
+    0
+}
+
 /// 播放帧率开关（与固件 `parse_fps` 同逻辑：非法值回落 auto）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FpsPolicy {
@@ -271,6 +275,8 @@ impl Default for AccelConfig {
 }
 
 /// `[render.tune]`：矩阵全部数字旋钮（无 auto 维度，改完存盘即生效）。
+/// `buffers` 是显式后缓冲开关（0 = 直写，1-16 = 影子环 + 整推），不进矩阵 bench，
+/// 但改它照样清记忆重测（出屏路径变了，旧结论作废）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 struct RenderTune {
@@ -280,6 +286,8 @@ struct RenderTune {
     tile_rows: u32,
     #[serde(default = "default_vsync_fps")]
     vsync_fps: u32,
+    #[serde(default = "default_buffers")]
+    buffers: u32,
 }
 
 impl Default for RenderTune {
@@ -288,6 +296,7 @@ impl Default for RenderTune {
             frames: default_frames(),
             tile_rows: default_tile_rows(),
             vsync_fps: default_vsync_fps(),
+            buffers: default_buffers(),
         }
     }
 }
@@ -492,10 +501,12 @@ struct App {
     wp_fps_f: f32,
     wp_frames_f: f32,
     wp_preload_f: f32,
-    /// 微调滑杆镜像：frames 1-120，tile_rows 8-512（步进 8），vsync_fps 15-240。
+    /// 微调滑杆镜像：frames 1-120，tile_rows 8-512（步进 8），vsync_fps 15-240，
+    /// buffers 0-16（0 = 直写，步进 1）。
     tune_frames_f: f32,
     tune_tile_f: f32,
     tune_vsync_fps_f: f32,
+    tune_buffers_f: f32,
     /// 存盘时对比：tune 变了就清空全部实测记忆（bench 条件变了，旧结论作废，
     /// 下次启动重测；否则改 tune 永不生效——记忆命中直接跳过矩阵）。
     tune_at_load: RenderTune,
@@ -563,6 +574,7 @@ impl App {
             tune_frames_f: default_frames() as f32,
             tune_tile_f: default_tile_rows() as f32,
             tune_vsync_fps_f: default_vsync_fps() as f32,
+            tune_buffers_f: default_buffers() as f32,
             tune_at_load: RenderTune::default(),
             glass,
             dark: false,
@@ -590,6 +602,7 @@ impl App {
         self.tune_frames_f = self.cfg.render.tune.frames.clamp(1, 120) as f32;
         self.tune_tile_f = self.cfg.render.tune.tile_rows.clamp(8, 512) as f32;
         self.tune_vsync_fps_f = self.cfg.render.tune.vsync_fps.clamp(15, 240) as f32;
+        self.tune_buffers_f = self.cfg.render.tune.buffers.min(16) as f32;
     }
 
     /// 滑杆/摘要共用的档位文本。
@@ -712,6 +725,7 @@ impl App {
         self.cfg.render.tune.frames = self.cfg.render.tune.frames.max(1);
         self.cfg.render.tune.tile_rows = self.cfg.render.tune.tile_rows.clamp(8, 512);
         self.cfg.render.tune.vsync_fps = self.cfg.render.tune.vsync_fps.clamp(15, 240);
+        self.cfg.render.tune.buffers = self.cfg.render.tune.buffers.min(16);
         // tune 变了 = bench 条件变了：旧记忆作废，下次启动重测。
         // 不做这个，改 tune 会被“有记忆快启”吞掉，永远不生效。
         if self.cfg.render.tune != self.tune_at_load {
@@ -1051,6 +1065,7 @@ impl App {
                 // frames = 开机矩阵帧数（无待测 bench 则藏）；
                 // tile_rows 只跟 tile 切块有关（auto 保留待测，static/dynamic 藏）；
                 // vsync_fps 只在 static 封顶 / auto 达标线时用（half 自带预算、off 不用，都藏）。
+                // buffers 后缓冲旋钮常显（Blt 下整组无意义，随 Blt 隐藏）。
                 let dist_in_play = self.cfg.render.mode != RenderMode::Blt
                     && self.cfg.render.workers != WorkersMode::BspOnly;
                 let show_tile = dist_in_play
@@ -1059,7 +1074,9 @@ impl App {
                 let show_vfps = self.cfg.render.vsync == VsyncMode::Auto
                     || self.cfg.render.vsync == VsyncMode::Static;
                 let show_frames = self.render_bench_pending();
-                if show_frames || show_tile || show_vfps {
+                // 后缓冲是显式旋钮（即时生效，不进矩阵 bench）：Blt 路无意义隐藏。
+                let show_buf = self.cfg.render.mode != RenderMode::Blt;
+                if show_frames || show_tile || show_vfps || show_buf {
                     ui.label(t!("tune.heading"));
                     ui.small(t!("tune.hint"));
                     if show_frames {
@@ -1106,6 +1123,25 @@ impl App {
                             .show(ui);
                         self.cfg.render.tune.vsync_fps =
                             self.tune_vsync_fps_f.round().clamp(15.0, 240.0) as u32;
+                    }
+                    if show_buf {
+                        ui.label(t!("tune.buffers"));
+                        let buffers_label = if self.cfg.render.tune.buffers == 0 {
+                            t!("tune.buffers_off").into_owned()
+                        } else {
+                            format!("{} buffers", self.cfg.render.tune.buffers)
+                        };
+                        egui_glass::GlassSlider::new(&mut self.tune_buffers_f, 0.0..=16.0)
+                            .text(buffers_label)
+                            .step_by(1.0)
+                            .style(if self.dark {
+                                egui_glass::GlassStyle::dark()
+                            } else {
+                                egui_glass::GlassStyle::regular()
+                            })
+                            .show(ui);
+                        self.cfg.render.tune.buffers =
+                            self.tune_buffers_f.round().clamp(0.0, 16.0) as u32;
                     }
                     ui.small(t!("tune.note"));
                     ui.add_space(10.0);
@@ -1432,11 +1468,13 @@ mod schema_tests {
         cfg.render.tune.frames = 45;
         cfg.render.tune.tile_rows = 32;
         cfg.render.tune.vsync_fps = 90;
+        cfg.render.tune.buffers = 5;
         let text = toml::to_string(&cfg).unwrap();
         let back: FileConfig = toml::from_str(&text).unwrap();
         assert_eq!(back.render.tune.frames, 45);
         assert_eq!(back.render.tune.tile_rows, 32);
         assert_eq!(back.render.tune.vsync_fps, 90);
+        assert_eq!(back.render.tune.buffers, 5);
     }
 
     #[test]
@@ -1447,6 +1485,7 @@ mod schema_tests {
         assert_eq!(cfg.render.tune.frames, default_frames());
         assert_eq!(cfg.render.tune.tile_rows, default_tile_rows());
         assert_eq!(cfg.render.tune.vsync_fps, default_vsync_fps());
+        assert_eq!(cfg.render.tune.buffers, default_buffers());
     }
 
     #[test]

@@ -9,7 +9,7 @@
 
 全量预解码 → RGBA→BGRA → 按生效路径上屏：
 
-- `RenderMode::Blt` → `blt_loop`（单线程 GOP Blt）。
+- `RenderMode::Blt` → `blt_loop`（单线程 GOP Blt；已是单引擎 push，缓冲无意义）。
 - `direct + bsp_only` → `direct_loop`（BSP 单核直写）。
 - `direct + all` → `mp_draw`（`copy_block` 位宽选路，OSD 镂空）。
    分工由 `[render] dist` 定：`static` 按核固定行区（同构核最优）；
@@ -19,6 +19,11 @@
    `dynamic` 按实测核速加权分行（校准时 probe 定权计时；播放时全帧源 +
    BSP 每轮按各核上一轮耗时 EWMA 重算边界并发布，快核多拿，无 tile 游标开销，
    OSD 行恒划出）。
+- 后缓冲（`[render.tune] buffers`，0-16）：`>0` 时 direct 路先画影子再整推前台
+  （多核散写撕裂窗口压成一次 push；OSD 先画进影子再随推上屏）。
+  单/多核路共用同一语义（出屏基址切换 + BSP 推 + `push_gen` 同步，N==1 也无竞态）；
+  Blt 路不用（已是单 push）。显式旋钮（不进矩阵 bench，改它清记忆重测）；
+  分配失败自动退回直写（只记 warning，不断播）。
 
 ## 格式校验 + 掉帧（P3 闭环项）
 

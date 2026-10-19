@@ -17,6 +17,12 @@ use crate::video::decoder::VideoMemoryRaw;
 pub struct Screen {
     gop: ScopedProtocol<GraphicsOutput>,
     stdout: usize,
+    /// 后缓冲影子环（`tune.buffers > 0` 时用）：每槽一帧 `BltPixel`，播放/壁纸
+    /// 先画影子再整推前台。校准/菜单文本不走这里（直写，零回归风险）。
+    sh_ring: Vec<Vec<BltPixel>>,
+    sh_w: usize,
+    sh_h: usize,
+    sh_k: usize,
 }
 
 impl Screen {
@@ -33,15 +39,16 @@ impl Screen {
                 log::warn!("set 1080p GOP mode failed: {:?}", e);
             }
         }
-        Ok(Self { gop, stdout: 0 })
+        Ok(Self { gop, stdout: 0, sh_ring: Vec::new(), sh_w: 0, sh_h: 0, sh_k: 0 })
     }
 
     /// 独占 GOP 的 demo 跑完后重建：保持当前模式、不切分辨率，
     /// 保住 demo 画面（`new()` 会尝试切 1080p，不适合这里）。
+    /// 影子环不继承（按需重建，尺寸按新模式来）。
     pub fn reacquire() -> Result<Self> {
         let handle = get_handle_for_protocol::<GraphicsOutput>()?;
         let gop = open_protocol_exclusive::<GraphicsOutput>(handle)?;
-        Ok(Self { gop, stdout: 0 })
+        Ok(Self { gop, stdout: 0, sh_ring: Vec::new(), sh_w: 0, sh_h: 0, sh_k: 0 })
     }
 
     pub fn get_gop(&mut self) -> &mut ScopedProtocol<GraphicsOutput> { &mut self.gop }
@@ -264,11 +271,104 @@ impl Screen {
     // ---------- 渲染路径矩阵（配置文件驱动） ----------
 
     /// 统一上屏入口：按 `\player.toml` 的 `render.mode` 走 CPU 直写或 GOP Blt。
+    /// 直写路 + `tune.buffers > 0` 时走影子缓冲（先画影子再整推，撕裂窗口压成
+    /// 一次 push）；Blt 已是单引擎 push，本项无意义，直接走引擎。
     pub fn upload_frame(&mut self, width: usize, height: usize, pixels: &[BltPixel]) -> Result {
         match config::effective_render() {
             RenderMode::Blt => self.upload_blt(width, height, pixels),
-            _ => self.upload_direct(width, height, pixels),
+            _ => {
+                if config::tune_buffers() > 0 && self.ensure_shadow(width, height) {
+                    self.upload_direct_shadowed(width, height, pixels)
+                } else {
+                    self.upload_direct(width, height, pixels)
+                }
+            }
         }
+    }
+
+    /// 影子环整备：按当前 `tune.buffers` 配 `w×h` 槽。尺寸/数量对不上就重建；
+    /// 分配失败返回 false（调用方退回直写，只记 warning，不断流程）。
+    /// `extend` 前已 `try_reserve_exact`，中途不再分配，不会 panic。
+    fn ensure_shadow(&mut self, w: usize, h: usize) -> bool {
+        let n = config::tune_buffers().min(16) as usize;
+        if n == 0 || w == 0 || h == 0 {
+            return false;
+        }
+        if self.sh_ring.len() == n && self.sh_w == w && self.sh_h == h {
+            return true;
+        }
+        let mut ring: Vec<Vec<BltPixel>> = Vec::new();
+        if ring.try_reserve_exact(n).is_err() {
+            log::warn!("shadow: ring alloc failed, fallback direct");
+            return false;
+        }
+        for _ in 0..n {
+            let mut slot: Vec<BltPixel> = Vec::new();
+            if slot.try_reserve_exact(w.saturating_mul(h)).is_err() {
+                log::warn!("shadow: slot alloc failed, fallback direct");
+                return false;
+            }
+            slot.extend(core::iter::repeat(BltPixel::new(0, 0, 0)).take(w * h));
+            ring.push(slot);
+        }
+        self.sh_ring = ring;
+        self.sh_w = w;
+        self.sh_h = h;
+        self.sh_k = 0;
+        true
+    }
+
+    /// 用完即扔（单帧实测后）：后缓冲只在连续推送时有用，散调用完就放，
+    /// 免得 `mp_draw` 另起环时双份常驻（峰值只留 N 份）。
+    pub fn release_shadows(&mut self) {
+        self.sh_ring = Vec::new();
+        self.sh_w = 0;
+        self.sh_h = 0;
+        self.sh_k = 0;
+    }
+
+    /// 缓冲直写整帧：画进影子槽再整推前台。
+    fn upload_direct_shadowed(
+        &mut self,
+        width: usize,
+        height: usize,
+        pixels: &[BltPixel],
+    ) -> Result {
+        let n = self.sh_ring.len();
+        if n == 0 {
+            return self.upload_direct(width, height, pixels);
+        }
+        let k = self.sh_k % n;
+        self.sh_k = self.sh_k.wrapping_add(1);
+        {
+            let slot = &mut self.sh_ring[k];
+            let len = width
+                .saturating_mul(height)
+                .min(pixels.len())
+                .min(slot.len());
+            slot[..len].copy_from_slice(&pixels[..len]);
+        }
+        self.push_shadow(k, 0, height)
+    }
+
+    /// 影子槽整推前台（`y0..y1` 行区，stride 感知逐行推）。调用方保证槽尺寸匹配。
+    fn push_shadow(&mut self, k: usize, y0: usize, y1: usize) -> Result {
+        let n = self.sh_ring.len();
+        if n == 0 {
+            return Ok(());
+        }
+        let stride = self.gop.current_mode_info().stride();
+        let w = config::copy_width();
+        let (sw, sh) = (self.sh_w, self.sh_h);
+        let y0 = y0.min(sh);
+        let y1 = y1.min(sh).max(y0);
+        let mut fb = self.gop.frame_buffer();
+        let dst = fb.as_mut_ptr();
+        let src = self.sh_ring[k % n].as_ptr() as *const u8;
+        for y in y0..y1 {
+            unsafe { copy_block(dst.add(y * stride * 4), src.add(y * sw * 4), sw * 4, w) };
+        }
+        Ok(())
     }
 
     /// 走 GOP Blt 引擎（`BufferToVideo`）。注意：只有它是「内存帧 → 屏」的语义。
@@ -283,6 +383,7 @@ impl Screen {
 
     /// 行区上屏（壁纸菜单背景）：只画 rows `y0..height`，菜单文字区不动。
     /// Blt 走 `SubRectangle` 取源行区；direct 逐行拷（stride 感知）。
+    /// direct + `tune.buffers > 0` 时画影子行区再整推同区。
     pub fn upload_frame_region(
         &mut self,
         width: usize,
@@ -302,6 +403,21 @@ impl Screen {
                 dims: (width, height - y0),
             })?),
             _ => {
+                if config::tune_buffers() > 0 && self.ensure_shadow(width, height) {
+                    let n = self.sh_ring.len().max(1);
+                    let k = self.sh_k % n;
+                    self.sh_k = self.sh_k.wrapping_add(1);
+                    {
+                        let slot = &mut self.sh_ring[k];
+                        for y in y0..height {
+                            let o = y * width;
+                            if o + width <= slot.len() && o + width <= pixels.len() {
+                                slot[o..o + width].copy_from_slice(&pixels[o..o + width]);
+                            }
+                        }
+                    }
+                    return self.push_shadow(k, y0, height);
+                }
                 let stride = self.gop.current_mode_info().stride();
                 let mut fb = self.gop.frame_buffer();
                 let dst = fb.as_mut_ptr();

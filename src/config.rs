@@ -24,6 +24,7 @@
 //! frames    = 30   # 每次矩阵/微基准的帧数（>=1）
 //! tile_rows = 64   # tile 高（行），MP 自调度切块粒度（8-512）
 //! vsync_fps = 60   # vsync 预算帧率：static 的封顶 + auto 探测达标线（15-240）
+//! buffers   = 0    # 后缓冲帧数（0 = 直写前台，现状；1-16 = 影子环 + 整推，撕裂窗口压成一次 push）
 //! [play]
 //! fps = "auto"            # "auto" | "max" | "1".."240"
 //! measured_max_fps = 0    # 固件实测后回写，GUI 只读展示
@@ -269,6 +270,10 @@ const fn default_tile_rows() -> u32 {
     64
 }
 
+const fn default_buffers() -> u32 {
+    0
+}
+
 const fn default_vsync_fps() -> u32 {
     60
 }
@@ -286,6 +291,12 @@ pub struct RenderTune {
     /// `half` 不用它（实测取半自带预算），`off` 更不用。
     #[serde(default = "default_vsync_fps")]
     pub vsync_fps: u32,
+    /// 后缓冲帧数（0-16，0 = 直写前台现状）：`>0` 时播放/壁纸先画影子再整推，
+    /// 把多核散写的撕裂窗口压成一次 push。Blt 路已是单引擎 push，本项无意义。
+    /// 显式旋钮（不进矩阵 bench，改它照样清记忆重测）；内存约 N×帧大小，
+    /// 分配失败自动退回直写（只记 warning，不断播）。
+    #[serde(default = "default_buffers")]
+    pub buffers: u32,
 }
 
 impl Default for RenderTune {
@@ -294,6 +305,7 @@ impl Default for RenderTune {
             frames: default_frames(),
             tile_rows: default_tile_rows(),
             vsync_fps: default_vsync_fps(),
+            buffers: default_buffers(),
         }
     }
 }
@@ -478,6 +490,8 @@ static WALLPAPER_PRELOAD: AtomicU32 = AtomicU32::new(default_wallpaper_preload()
 static TUNE_FRAMES: AtomicU32 = AtomicU32::new(default_frames());
 static TUNE_TILE_ROWS: AtomicU32 = AtomicU32::new(default_tile_rows());
 static TUNE_VSYNC_FPS: AtomicU32 = AtomicU32::new(default_vsync_fps());
+/// 后缓冲帧数（0-16，0 = 直写）。显式旋钮，不进矩阵 bench。
+static TUNE_BUFFERS: AtomicU32 = AtomicU32::new(default_buffers());
 /// 0 = auto，1 = capped，2 = max（`play.fps` 的解析结果）。
 static PLAY_MODE: AtomicU8 = AtomicU8::new(0);
 static PLAY_CAP: AtomicU32 = AtomicU32::new(0);
@@ -515,6 +529,7 @@ pub fn load() -> Option<String> {
     TUNE_FRAMES.store(cfg.render.tune.frames.max(1), Ordering::Relaxed);
     TUNE_TILE_ROWS.store(cfg.render.tune.tile_rows.clamp(8, 512), Ordering::Relaxed);
     TUNE_VSYNC_FPS.store(cfg.render.tune.vsync_fps.clamp(15, 240), Ordering::Relaxed);
+    TUNE_BUFFERS.store(cfg.render.tune.buffers.min(16), Ordering::Relaxed);
     match parse_fps(&cfg.play.fps) {
         FpsPolicy::Auto => PLAY_MODE.store(0, Ordering::Relaxed),
         FpsPolicy::Capped(n) => {
@@ -579,6 +594,11 @@ pub fn tune_tile_rows() -> u32 {
 /// vsync 预算帧率（`static` 的封顶 + `auto` 探测的达标线），已钳制 15-240。
 pub fn tune_vsync_fps() -> u32 {
     TUNE_VSYNC_FPS.load(Ordering::Relaxed).clamp(15, 240).max(1)
+}
+
+/// 后缓冲帧数（0-16，已钳制）：0 = 直写前台（现状）；`>0` = 影子环 + 整推。
+pub fn tune_buffers() -> u32 {
+    TUNE_BUFFERS.load(Ordering::Relaxed).min(16)
 }
 
 /// 开机微基准测完把结论写进来。

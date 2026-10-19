@@ -29,6 +29,7 @@ measured_cores   = 0       # 校准时机型 AP+BSP 总数
 frames    = 30          # 每次矩阵/微基准的帧数（>=1，GUI 1-120）
 tile_rows = 64          # tile 高（行），MP 自调度切块粒度（8-512）
 vsync_fps = 60          # vsync 预算帧率：static 的封顶 + auto 探测达标线（15-240）
+buffers   = 0           # 后缓冲帧数（0-16；0 = 直写前台，>0 = 影子环 + 整推）
 
 [play]
 fps = "auto"            # auto | max | 1..240
