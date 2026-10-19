@@ -425,9 +425,9 @@ const fn default_wallpaper_preload() -> u32 {
 
 /// `[wallpaper]`：动态壁纸开关（P4）。片源双格式（`format` 矩阵，见 `MediaFormat`）：
 /// - `raw`（默认）：`wallpaper/frameNNNN.raw`，BGRA 直存，首版定死 1920x1080；
-/// - `qois`：`wallpaper/wall.qois`（`u32le len + QOI` 串接，与视频同格式），
-///   开机预解码（与播片同代价，首帧无抖动但启动慢一拍）。
-/// 缺键老配置按默认（关/raw）处理。
+/// - `qois`：`wallpaper/wall.qois`（与视频同格式），开机预解码。
+/// `popup_freeze`：选项弹窗弹出时冻结壁纸（默认 true；false 则行区继续播，
+/// 选项画在文字区，见 `idle.rs`）。缺键老配置按默认（关/raw/冻结）处理。
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WallpaperConfig {
@@ -443,6 +443,9 @@ pub struct WallpaperConfig {
     /// 片源格式（默认 raw，老文件照读）。
     #[serde(default = "default_wallpaper_format")]
     pub format: MediaFormat,
+    /// 选项弹窗时冻结壁纸（默认 true；false 则行区继续播）。
+    #[serde(default = "default_true")]
+    pub popup_freeze: bool,
 }
 
 impl Default for WallpaperConfig {
@@ -453,6 +456,7 @@ impl Default for WallpaperConfig {
             frames: 0,
             preload: default_wallpaper_preload(),
             format: MediaFormat::Raw,
+            popup_freeze: true,
         }
     }
 }
@@ -589,6 +593,7 @@ static WALLPAPER_ENABLE: AtomicU8 = AtomicU8::new(0);
 static WALLPAPER_FPS: AtomicU32 = AtomicU32::new(default_wallpaper_fps());
 static WALLPAPER_FRAMES: AtomicU32 = AtomicU32::new(0);
 static WALLPAPER_PRELOAD: AtomicU32 = AtomicU32::new(default_wallpaper_preload());
+static WALLPAPER_POPUP_FREEZE: AtomicU8 = AtomicU8::new(1);
 /// `[boot]` 自动发现开关（5 个 u8，0/1）。
 static BOOT_AUTO: AtomicU8 = AtomicU8::new(1);
 static BOOT_WINDOWS: AtomicU8 = AtomicU8::new(1);
@@ -658,6 +663,7 @@ pub fn load() -> Option<String> {
     WALLPAPER_FPS.store(cfg.wallpaper.fps.clamp(1, 60).max(1), Ordering::Relaxed);
     WALLPAPER_FRAMES.store(cfg.wallpaper.frames, Ordering::Relaxed);
     WALLPAPER_PRELOAD.store(cfg.wallpaper.preload.clamp(1, 32).max(1), Ordering::Relaxed);
+    WALLPAPER_POPUP_FREEZE.store(cfg.wallpaper.popup_freeze as u8, Ordering::Relaxed);
     BOOT_AUTO.store(cfg.boot.auto as u8, Ordering::Relaxed);
     BOOT_WINDOWS.store(cfg.boot.windows as u8, Ordering::Relaxed);
     BOOT_LINUX.store(cfg.boot.linux as u8, Ordering::Relaxed);
@@ -931,6 +937,10 @@ pub fn wallpaper_enabled() -> bool {
 /// 壁纸片源格式（默认 raw；qois 读 `wallpaper/wall.qois`）。
 pub fn wallpaper_format() -> MediaFormat {
     MediaFormat::from_u8(WALLPAPER_FORMAT.load(Ordering::Relaxed))
+}
+/// 选项弹窗时冻结壁纸（默认 true；false 则行区继续播）。
+pub fn wallpaper_popup_freeze() -> bool {
+    WALLPAPER_POPUP_FREEZE.load(Ordering::Relaxed) != 0
 }
 /// 壁纸循环帧率（1-60，已钳制）。
 pub fn wallpaper_fps() -> u32 {

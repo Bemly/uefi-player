@@ -387,6 +387,7 @@ impl Default for BootConfig {
 
 /// `[wallpaper]`：与固件 `WallpaperConfig` 同构。无校准记忆，纯开关。
 /// `format` 切片源：raw 读 `wallpaper/frameNNNN.raw`，qois 读 `wallpaper/wall.qois`。
+/// `popup_freeze`：选项弹窗时冻结壁纸（false 则行区继续播）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 struct WallpaperConfig {
@@ -399,6 +400,12 @@ struct WallpaperConfig {
     preload: u32,
     #[serde(default = "default_wallpaper_format")]
     format: MediaFormat,
+    #[serde(default = "default_true")]
+    popup_freeze: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for WallpaperConfig {
@@ -409,6 +416,7 @@ impl Default for WallpaperConfig {
             frames: 0,
             preload: default_wallpaper_preload(),
             format: MediaFormat::Raw,
+            popup_freeze: true,
         }
     }
 }
@@ -1359,6 +1367,11 @@ impl App {
                     self.cfg.wallpaper.format = self.format_row(ui, self.cfg.wallpaper.format);
                     ui.small(t!("wallpaper.format_hint"));
                     ui.add_space(10.0);
+                    ui.label(t!("wallpaper.popup_freeze"));
+                    let froze = self.switch_row(ui, self.cfg.wallpaper.popup_freeze, &t!("boot.on"), &t!("boot.off"));
+                    self.cfg.wallpaper.popup_freeze = froze;
+                    ui.small(t!("wallpaper.popup_freeze_hint"));
+                    ui.add_space(10.0);
                     ui.label(t!("wallpaper.fps"));
                     let fps_label = format!("{} fps", self.cfg.wallpaper.fps);
                     egui_glass::GlassSlider::new(&mut self.wp_fps_f, 1.0..=30.0)
@@ -1458,11 +1471,12 @@ impl App {
                     "sum.wallpaper",
                     v = if self.cfg.wallpaper.enable {
                         format!(
-                            "on {}/{}fps/{}f/pre{}",
+                            "on {}/{}fps/{}f/pre{}/fz{}",
                             self.cfg.wallpaper.format.file_str(),
                             self.cfg.wallpaper.fps,
                             self.cfg.wallpaper.frames,
-                            self.cfg.wallpaper.preload
+                            self.cfg.wallpaper.preload,
+                            self.cfg.wallpaper.popup_freeze as u8,
                         )
                     } else {
                         String::from("off")
@@ -1798,6 +1812,7 @@ mod blackbox_matrix {
                                     frames: 30,
                                     preload: 4,
                                     format: MediaFormat::Qois,
+                                    popup_freeze: true,
                                 },
                     boot: BootConfig {
                         auto: true,
@@ -1841,6 +1856,7 @@ mod blackbox_matrix {
         let cfg: FileConfig = toml::from_str(text).unwrap();
         assert!(!cfg.wallpaper.enable);
         assert_eq!(cfg.wallpaper.format, MediaFormat::Raw);
+        assert!(cfg.wallpaper.popup_freeze);
         assert_eq!(cfg.play.format, MediaFormat::Qois);
         assert_eq!(cfg.render.dist, DistMode::Auto);
         assert_eq!(cfg.render.vsync, VsyncMode::Auto);
@@ -1850,6 +1866,7 @@ mod blackbox_matrix {
     }
 
     /// 片源格式双档位回写（play/wallpaper 各 qois/raw 四组合，不丢字段）。
+    /// 弹窗冻结开关同步翻转（8 组合，见 `[wallpaper] popup_freeze`）。
     #[test]
     fn format_roundtrip_matrix() {
         for (pf, wf) in [
@@ -1858,13 +1875,22 @@ mod blackbox_matrix {
             (MediaFormat::Raw, MediaFormat::Qois),
             (MediaFormat::Raw, MediaFormat::Raw),
         ] {
-            let mut cfg = FileConfig::default();
-            cfg.play.format = pf;
-            cfg.wallpaper.format = wf;
-            let back: FileConfig = toml::from_str(&toml::to_string(&cfg).unwrap()).unwrap();
-            assert_eq!(back.play.format, pf);
-            assert_eq!(back.wallpaper.format, wf);
-            assert_eq!(back, cfg);
+            for froze in [false, true] {
+                let mut cfg = FileConfig::default();
+                cfg.play.format = pf;
+                cfg.wallpaper.format = wf;
+                cfg.wallpaper.popup_freeze = froze;
+                let back: FileConfig = toml::from_str(&toml::to_string(&cfg).unwrap()).unwrap();
+                assert_eq!(back.play.format, pf);
+                assert_eq!(back.wallpaper.format, wf);
+                assert_eq!(back.wallpaper.popup_freeze, froze);
+                assert_eq!(back, cfg);
+                // 老文件缺键：play 按 qois、wallpaper 按 raw/冻结照读。
+                let legacy: FileConfig = toml::from_str("version = 1\n").unwrap();
+                assert_eq!(legacy.play.format, MediaFormat::Qois);
+                assert_eq!(legacy.wallpaper.format, MediaFormat::Raw);
+                assert!(legacy.wallpaper.popup_freeze);
+            }
         }
     }
 

@@ -1,4 +1,5 @@
-//! 开机菜单：默认停留等待按键，按 0-7 进对应项，r 重启。
+//! 纯播放器模式菜单（诊断 + 播片）：从启动选项弹窗按 `p` 进入，
+//! 按 `q` 回壁纸待机。默认停留等待按键，按 0-9 进对应项，r 重启。
 //!
 //! 错误策略：
 //! - 播放视频（生产路径）失败 → [`handle_fatal`]，和重构前 `main` 语义完全一致；
@@ -23,7 +24,7 @@ fn draw_menu(screen: &mut Screen) {
     for item in ITEMS {
         screen.draw_str(&alloc::format!("[{}] {} - {}", item.key, item.name, item.desc));
     }
-    screen.draw_str("[r] reboot");
+    screen.draw_str("[r] reboot  [q] back to wallpaper");
     screen.draw_str("Press key to select:");
 }
 
@@ -114,12 +115,12 @@ struct WpState {
     budget: u64,
 }
 
-pub fn run_menu(mut screen: Screen) -> ! {
+pub fn run_menu(mut screen: Screen) -> Screen {
     // P4-A：菜单背景预载（关/无片源/分辨率不对 → None，纯静态菜单）。
     let mut wp = load_background(&mut screen);
     let mut wp_warned = false;
-    // 就绪标记（串口可断言）：QEMU 黑盒矩阵靠它定发送按键的时机
-    // （早发的键会被下面的 flush_keys 当陈旧输入排空）。
+    // 就绪标记（串口可断言；QEMU 黑盒矩阵靠它定发送按键的时机
+    // 早发的键会被下面的 flush_keys 当陈旧输入排空）。
     log::info!("menu: ready (press key)");
     loop {
         draw_menu(&mut screen);
@@ -131,6 +132,11 @@ pub fn run_menu(mut screen: Screen) -> ! {
         flush_keys();
         let (key, raw) = wait_key_or_animate(&mut screen, &mut wp);
 
+        if key_match('q', key, raw) {
+            // 回壁纸待机（串口可断言）。
+            log::info!("menu: back to idle");
+            return screen;
+        }
         if key_match('r', key, raw) {
             uefi::runtime::reset(uefi::runtime::ResetType::COLD, uefi::Status::SUCCESS, None);
         }

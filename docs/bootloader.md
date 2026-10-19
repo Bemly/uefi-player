@@ -58,8 +58,10 @@
   失败 `UnloadGuard` 卸镜像，不留残留。
   另：QEMU 须用 x64 OVMF（`edk2-x86_64-code.fd`），IA32 固件起 x64 镜像报
   `Unsupported`（Image type X64 can't be started on IA32 UEFI system）。
-- `mod.rs`：Exclusive 子菜单（按键 `b` 进，`0-9a-z` 选，`Enter` 跑默认，`q` 回）。
-  成功 chainload 不返回；被起镜像返回时重建屏显回子菜单。
+- `mod.rs`：枚举（本卷 BLS + 多卷自动发现）+ 交权（`boot_index`/`boot_entry`，
+  数字键直选，`Enter` 跑默认）。UI 在 `idle.rs` 启动选项弹窗（条目直列 +
+  `p` 播放器 / `f` 固件设置 / `s` 关机 / `r` 重启 / `q` 回壁纸）；
+  成功 chainload 不返回；被起镜像返回时重建屏显回待机。
   串口可断言：`boot: N entries` + `boot: [k] title <kind>`（矩阵靠它卡按键）。
 
 ## 配置（`[boot]`，GUI 有开关页）

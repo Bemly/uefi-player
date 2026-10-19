@@ -22,7 +22,10 @@ ovmf = "/usr/local/share/qemu/edk2-x86_64-code.fd"
 timeout_sec = 240
 forbid = ["panicked at", "CpuDeadLoop", "No valid frames", "startup_all_aps failed"]
 
-# 冒烟：全显式最快配置，进菜单后按 7，AVX 探针必须出数。
+# 新顶层流程（见 `src/idle.rs`）：开机壁纸待机（`idle: ready`）→ 任意键开弹窗
+#（`popup: open`）→ 数字键直选引导条目交权 / `p` 进纯播放器菜单（`menu: ready`）
+# / `f` 固件设置 / `s` 关机 / `r` 重启 / `q` 回壁纸。无按键 case 只验到待机。
+# 冒烟：全显式最快配置，进纯播放器菜单后按 7，AVX 探针必须出数。
 [[case]]
 name = "menu-smoke"
 timeout_sec = 180
@@ -40,11 +43,16 @@ fps = "max"
 [wallpaper]
 enable = false
 """
-boot_expect = ["cfg: version=1", "reuse measured", "menu: ready"]
-keys = [{ send = "7", wait_after = 5 }]
+boot_expect = ["cfg: version=1", "idle: ready"]
+keys = [
+  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
+  { send = "p", wait_after = 3 },
+  { send = "7", wait_for = ["menu: ready"], wait_after = 5 },
+]
 expect = ["AVX is "]
 
 # 矩阵冒烟：全 auto + 2 帧，矩阵行必须出现（赢家不定，不锁）。
+# 无按键：只验开机校准（待机即停，不断言菜单）。
 [[case]]
 name = "matrix-tiny"
 timeout_sec = 600
@@ -63,11 +71,12 @@ fps = "max"
 [wallpaper]
 enable = false
 """
-boot_expect = ["cfg: version=1"]
+boot_expect = ["cfg: version=1", "idle: ready"]
 expect = ["render auto:"]
 forbid = ["panicked at", "CpuDeadLoop"]
 
 # 分工 dynamic 显式：cfg 行必须原样回显（GUI 改 dynamic 落盘即生效的固件侧证明）。
+# 无按键：只验开机校准。
 [[case]]
 name = "matrix-dist-dynamic"
 timeout_sec = 180
@@ -85,10 +94,10 @@ fps = "max"
 [wallpaper]
 enable = false
 """
-boot_expect = ["cfg: version=1", "dist=Dynamic"]
+boot_expect = ["cfg: version=1", "idle: ready"]
 expect = ["reuse measured"]
 
-# half 定档：冠军计时取半，预算必须落串口。
+# half 定档：冠军计时取半，预算必须落串口。无按键：只验开机校准。
 [[case]]
 name = "matrix-vsync-half"
 timeout_sec = 300
@@ -107,11 +116,11 @@ fps = "max"
 [wallpaper]
 enable = false
 """
-boot_expect = ["cfg: version=1"]
+boot_expect = ["cfg: version=1", "idle: ready"]
 expect = ["half probe winner_ticks", "budget"]
 
 # 后缓冲影子环：buffers=2 + auto 单核矩阵（单 cell 经 upload_frame 整推），
-# 影子起用行必须出现（无上屏动作时环永不起，这是预期行为）。
+# 影子起用行必须出现（无上屏动作时环永不起，这是预期行为）。无按键。
 [[case]]
 name = "matrix-buffers"
 timeout_sec = 180
@@ -130,10 +139,11 @@ fps = "max"
 [wallpaper]
 enable = false
 """
-boot_expect = ["cfg: version=1"]
+boot_expect = ["cfg: version=1", "idle: ready"]
 expect = ["shadow: 2 bufs", "render auto:"]
 
 # Blt 引擎对照数：选中非 B2V op，单发出数行必须出现（不参选播视频）。
+# 无按键：只验开机校准。
 [[case]]
 name = "matrix-blt-op"
 timeout_sec = 300
@@ -153,10 +163,10 @@ fps = "max"
 [wallpaper]
 enable = false
 """
-boot_expect = ["cfg: version=1"]
+boot_expect = ["cfg: version=1", "idle: ready"]
 expect = ["blt_op(VideoToBltBuffer)"]
 
-# 播放多核：按 0 进 mp_draw， soak 20 秒只看红线（不断言画面）。
+# 播放多核：弹窗 → p 进纯播放器 → 按 0 进 mp_draw， soak 20 秒只看红线（不断言画面）。
 [[case]]
 name = "video-mp"
 timeout_sec = 180
@@ -175,12 +185,16 @@ fps = "max"
 [wallpaper]
 enable = false
 """
-boot_expect = ["cfg: version=1", "menu: ready"]
-keys = [{ send = "0", wait_after = 5 }]
+boot_expect = ["cfg: version=1", "idle: ready"]
+keys = [
+  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
+  { send = "p", wait_after = 3 },
+  { send = "0", wait_for = ["menu: ready"], wait_after = 5 },
+]
 expect = ["play: path=mp_draw"]
 soak_sec = 20
 
-# 播放 Blt：按 0 进 blt_loop，soak 15 秒。
+# 播放 Blt：弹窗 → p → 按 0 进 blt_loop，soak 15 秒。
 [[case]]
 name = "video-blt"
 timeout_sec = 180
@@ -199,8 +213,12 @@ fps = "max"
 [wallpaper]
 enable = false
 """
-boot_expect = ["cfg: version=1", "menu: ready"]
-keys = [{ send = "0", wait_after = 5 }]
+boot_expect = ["cfg: version=1", "idle: ready"]
+keys = [
+  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
+  { send = "p", wait_after = 3 },
+  { send = "0", wait_for = ["menu: ready"], wait_after = 5 },
+]
 expect = ["play: path=blt_loop"]
 soak_sec = 15
 
@@ -225,12 +243,16 @@ format = "raw"
 [wallpaper]
 enable = false
 """
-boot_expect = ["cfg: version=1", "menu: ready"]
-keys = [{ send = "0", wait_after = 5 }]
+boot_expect = ["cfg: version=1", "idle: ready"]
+keys = [
+  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
+  { send = "p", wait_after = 3 },
+  { send = "0", wait_for = ["menu: ready"], wait_after = 5 },
+]
 expect = ["play: path=direct_loop"]
 soak_sec = 15
 
-# 诊断键：1/4/7 各出数，x 回菜单（pause_return 吞键）。
+# 诊断键：弹窗 → p 进纯播放器 → 1/4/7 各出数，q 回壁纸（pause_return 吞键）。
 [[case]]
 name = "diag-keys"
 timeout_sec = 240
@@ -248,17 +270,19 @@ fps = "max"
 [wallpaper]
 enable = false
 """
-boot_expect = ["cfg: version=1", "menu: ready"]
+boot_expect = ["cfg: version=1", "idle: ready"]
 keys = [
-  { send = "1", wait_after = 8 },
+  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
+  { send = "p", wait_after = 3 },
+  { send = "1", wait_for = ["menu: ready"], wait_after = 8 },
   { send = "x", wait_after = 3 },
   { send = "4", wait_after = 8 },
   { send = "x", wait_after = 3 },
-  { send = "7", wait_after = 5 },
+  { send = "7", wait_for = ["menu: ready"], wait_after = 5 },
 ]
 expect = ["Total number of logic processors:", "Starting Multi-Processor", "AVX is "]
 
-# 引导子菜单：b 进 q 回，再按 7 能出数 = 没卡死在子菜单。
+# 弹窗导航：开弹窗 → q 回壁纸 → 再开（open 第二遍 = 待机循环没卡死）。
 [[case]]
 name = "boot-menu"
 ovmf = "release"
@@ -277,19 +301,15 @@ fps = "max"
 [wallpaper]
 enable = false
 """
-boot_expect = ["cfg: version=1", "menu: ready"]
-# 引导子菜单：b 进（等无项标记）q 回（等返回标记）→ 臂还有一次 pause，
-# x 消解 → 7 出数（7 发两次防 flush 吞键，AVX 可重入）。
+boot_expect = ["cfg: version=1", "idle: ready"]
 keys = [
-  { send = "b", wait_after = 2 },
-  { send = "q", wait_for = ["boot: no entries"], wait_after = 2 },
-  { send = "x", wait_for = ["menu: back from b"], wait_after = 2 },
-  { send = "7", wait_after = 5 },
-  { send = "7", wait_after = 5 },
+  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
+  { send = "q", wait_after = 2 },
+  { send = "y", wait_after = 2 },
 ]
-expect = ["AVX is "]
+expect = ["popup: back to idle", { pat = "popup: open (frozen)", count = 2 }]
 
-# 壁纸开：2 帧黑场，无缺片警告，菜单照常响应。
+# 壁纸开：2 帧黑场，无缺片警告；弹窗 → p → 7 照常响应。
 [[case]]
 name = "wallpaper-on"
 timeout_sec = 180
@@ -309,12 +329,45 @@ fps = "max"
 enable = true
 fps = 15
 """
-boot_expect = ["cfg: version=1", "menu: ready"]
-keys = [{ send = "7", wait_after = 5 }]
+boot_expect = ["cfg: version=1", "idle: ready"]
+keys = [
+  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
+  { send = "p", wait_after = 3 },
+  { send = "7", wait_for = ["menu: ready"], wait_after = 5 },
+]
 expect = ["AVX is "]
 forbid = ["panicked at", "CpuDeadLoop", "menu bg skipped"]
 
-# 壁纸 qois：wall.qois 预解码循环（复用测试视频真帧），菜单照常响应。
+# 壁纸 live：popup_freeze=false 时行区继续播（`popup: open (live)`），q 回壁纸。
+[[case]]
+name = "wallpaper-live"
+timeout_sec = 180
+needs_wallpaper = 2
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+workers = "bsp_only"
+dist = "static"
+vsync = "off"
+[play]
+fps = "max"
+[wallpaper]
+enable = true
+fps = 15
+popup_freeze = false
+"""
+boot_expect = ["cfg: version=1", "idle: ready"]
+keys = [
+  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
+  { send = "q", wait_after = 2 },
+]
+expect = ["popup: open (live)", "popup: back to idle"]
+forbid = ["panicked at", "CpuDeadLoop", "menu bg skipped"]
+
+# 壁纸 qois：wall.qois 预解码循环（复用测试视频真帧）；弹窗 → p → 7 照常响应。
 # 统一 Clip 的 qois 分支在壁纸侧的证明（与 raw 的 wallpaper-on 对称）。
 [[case]]
 name = "wallpaper-qois"
@@ -336,13 +389,17 @@ enable = true
 fps = 15
 format = "qois"
 """
-boot_expect = ["cfg: version=1", "menu: ready"]
-keys = [{ send = "7", wait_after = 5 }]
+boot_expect = ["cfg: version=1", "idle: ready"]
+keys = [
+  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
+  { send = "p", wait_after = 3 },
+  { send = "7", wait_for = ["menu: ready"], wait_after = 5 },
+]
 expect = ["AVX is "]
 forbid = ["panicked at", "CpuDeadLoop", "menu bg skipped"]
 
-# 引导 chainload：b 进子菜单（等计数标记）0 选第一项，被起镜像是同一份 efi
-# 换个路径（单盘场景）；成功 = 同一串口出现第二遍 cfg + 菜单就绪（计数断言）。
+# 引导 chainload：弹窗（等计数标记）0 选第一项，被起镜像是同一份 efi
+# 换个路径（单盘场景）；成功 = 同一串口出现第二遍 cfg + 待机就绪（计数断言）。
 [[case]]
 name = "boot-chainload"
 ovmf = "release"
@@ -362,12 +419,12 @@ fps = "max"
 [wallpaper]
 enable = false
 """
-boot_expect = ["cfg: version=1", "menu: ready"]
+boot_expect = ["cfg: version=1", "idle: ready"]
 keys = [
-  { send = "b", wait_after = 2 },
+  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
   { send = "0", wait_for = ["boot: 1 entries"], wait_after = 5 },
 ]
-expect = ["boot: starting image", { pat = "cfg: version=1", count = 2 }, { pat = "menu: ready", count = 2 }]
+expect = ["boot: starting image", { pat = "cfg: version=1", count = 2 }, { pat = "idle: ready", count = 2 }]
 
 # BLS 组内排序：同 sort-key 下版本号大的在前（10.0 > 2.0 是数值比，不是字典序）。
 # 目录顺序是反的（aaa 在前），排完 [0] 必须是 New。
@@ -389,8 +446,8 @@ fps = "max"
 [wallpaper]
 enable = false
 """
-boot_expect = ["cfg: version=1", "menu: ready"]
-keys = [{ send = "b", wait_after = 3 }]
+boot_expect = ["cfg: version=1", "idle: ready"]
+keys = [{ send = "x", wait_after = 3 }]
 expect = ["boot: 2 entries", "boot: [0] New", "boot: [1] Old"]
 
 [[case.extra_volumes]]
@@ -423,12 +480,12 @@ fps = "max"
 [wallpaper]
 enable = false
 """
-boot_expect = ["cfg: version=1", "menu: ready"]
+boot_expect = ["cfg: version=1", "idle: ready"]
 keys = [
-  { send = "b", wait_after = 2 },
+  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
   { send = "0", wait_for = ["boot: 1 entries"], wait_after = 5 },
 ]
-expect = ["boot: [0] test", "boot: starting image", { pat = "cfg: version=1", count = 2 }, { pat = "menu: ready", count = 2 }]
+expect = ["boot: [0] test", "boot: starting image", { pat = "cfg: version=1", count = 2 }, { pat = "idle: ready", count = 2 }]
 
 [[case.extra_volumes]]
   [[case.extra_volumes.files]]
@@ -455,8 +512,8 @@ fps = "max"
 [wallpaper]
 enable = false
 """
-boot_expect = ["cfg: version=1", "menu: ready"]
-keys = [{ send = "b", wait_after = 3 }]
+boot_expect = ["cfg: version=1", "idle: ready"]
+keys = [{ send = "x", wait_after = 3 }]
 expect = ["boot: 2 entries", "boot: [0] testos (Second)", "boot: [1] testos (First)"]
 
 [[case.extra_volumes]]
@@ -483,15 +540,19 @@ fps = "max"
 [wallpaper]
 enable = false
 """
-boot_expect = ["cfg: version=1", "menu: ready"]
-keys = [{ send = "8", wait_after = 10 }]
+boot_expect = ["cfg: version=1", "idle: ready"]
+keys = [
+  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
+  { send = "p", wait_after = 3 },
+  { send = "8", wait_for = ["menu: ready"], wait_after = 10 },
+]
 expect = ["-- bench done --"]
 artifact = { glob = "HWBENCH*.TXT", contains = ["ticks"] }
 
 # --- 多卷自动发现（第二盘挂 hd2，见 extra_volumes） ---
 
 # Windows 跨盘 chainload：第二盘只有 bootmgfw（就是我们的 efi 改名），
-# 按 0 直接交权，第二遍 cfg + 菜单证明跨盘 DevicePath + 跨盘读都通了。
+# 按 0 直接交权，第二遍 cfg + 待机证明跨盘 DevicePath + 跨盘读都通了。
 [[case]]
 name = "boot-windows-crossvol"
 ovmf = "release"
@@ -510,12 +571,12 @@ fps = "max"
 [wallpaper]
 enable = false
 """
-boot_expect = ["cfg: version=1", "menu: ready"]
+boot_expect = ["cfg: version=1", "idle: ready"]
 keys = [
-  { send = "b", wait_after = 2 },
+  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
   { send = "0", wait_for = ["boot: 1 entries"], wait_after = 5 },
 ]
-expect = ["boot: starting image", { pat = "cfg: version=1", count = 2 }, { pat = "menu: ready", count = 2 }]
+expect = ["boot: starting image", { pat = "cfg: version=1", count = 2 }, { pat = "idle: ready", count = 2 }]
 
 [[case.extra_volumes]]
   [[case.extra_volumes.files]]
@@ -541,12 +602,12 @@ fps = "max"
 [wallpaper]
 enable = false
 """
-boot_expect = ["cfg: version=1", "menu: ready"]
+boot_expect = ["cfg: version=1", "idle: ready"]
 keys = [
-  { send = "b", wait_after = 2 },
+  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
   { send = "0", wait_for = ["boot: 1 entries"], wait_after = 5 },
 ]
-expect = ["boot: starting image", { pat = "cfg: version=1", count = 2 }, { pat = "menu: ready", count = 2 }]
+expect = ["boot: starting image", { pat = "cfg: version=1", count = 2 }, { pat = "idle: ready", count = 2 }]
 
 [[case.extra_volumes]]
   [[case.extra_volumes.files]]
@@ -576,8 +637,8 @@ fps = "max"
 [wallpaper]
 enable = false
 """
-boot_expect = ["cfg: version=1", "menu: ready"]
-keys = [{ send = "b", wait_after = 2 }]
+boot_expect = ["cfg: version=1", "idle: ready"]
+keys = [{ send = "x", wait_after = 2 }]
 expect = ["boot: 1 entries", "vmlinuz-test", "<linux>"]
 
 [[case.extra_volumes]]
@@ -607,12 +668,12 @@ fps = "max"
 [wallpaper]
 enable = false
 """
-boot_expect = ["cfg: version=1", "menu: ready"]
+boot_expect = ["cfg: version=1", "idle: ready"]
 keys = [
-  { send = "b", wait_after = 2 },
+  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
   { send = "0", wait_for = ["boot: 1 entries"], wait_after = 5 },
 ]
-expect = ["boot: starting image", { pat = "cfg: version=1", count = 2 }, { pat = "menu: ready", count = 2 }]
+expect = ["boot: starting image", { pat = "cfg: version=1", count = 2 }, { pat = "idle: ready", count = 2 }]
 
 [[case.extra_volumes]]
   [[case.extra_volumes.files]]
@@ -620,7 +681,7 @@ expect = ["boot: starting image", { pat = "cfg: version=1", count = 2 }, { pat =
   efi = true
 
 # OpenCore 链式接力：第二盘只有 OpenCore.efi（我们的 efi 改名），
-# 按 0 直接交权，第二遍 cfg + 菜单证明跨盘 DevicePath + 跨盘读都通了。
+# 按 0 直接交权，第二遍 cfg + 待机证明跨盘 DevicePath + 跨盘读都通了。
 # 不扫通用 BOOTX64.EFI（那可能是我们自己，会自举死循环），只认固定路径。
 [[case]]
 name = "boot-macos"
@@ -640,12 +701,12 @@ fps = "max"
 [wallpaper]
 enable = false
 """
-boot_expect = ["cfg: version=1", "menu: ready"]
+boot_expect = ["cfg: version=1", "idle: ready"]
 keys = [
-  { send = "b", wait_after = 2 },
+  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
   { send = "0", wait_for = ["boot: 1 entries"], wait_after = 5 },
 ]
-expect = ["boot: [0] OpenCore <efi>", "boot: starting image", { pat = "cfg: version=1", count = 2 }, { pat = "menu: ready", count = 2 }]
+expect = ["boot: [0] OpenCore <efi>", "boot: starting image", { pat = "cfg: version=1", count = 2 }, { pat = "idle: ready", count = 2 }]
 
 [[case.extra_volumes]]
   [[case.extra_volumes.files]]
@@ -674,12 +735,12 @@ fps = "max"
 [wallpaper]
 enable = false
 """
-boot_expect = ["cfg: version=1", "menu: ready"]
+boot_expect = ["cfg: version=1", "idle: ready"]
 keys = [
-  { send = "b", wait_after = 2 },
+  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
   { send = "0", wait_for = ["boot: 1 entries"], wait_after = 5 },
 ]
-expect = ["consumed try", "boot: starting image", { pat = "cfg: version=1", count = 2 }, { pat = "menu: ready", count = 2 }]
+expect = ["consumed try", "boot: starting image", { pat = "cfg: version=1", count = 2 }, { pat = "idle: ready", count = 2 }]
 artifact = { glob = "test+1-1.conf", contains = ["Chainload Counting"], volume = 2 }
 
 [[case.extra_volumes]]
@@ -712,8 +773,8 @@ enable = false
 [boot]
 strict = true
 """
-boot_expect = ["cfg: version=1", "menu: ready"]
-keys = [{ send = "b", wait_after = 3 }]
+boot_expect = ["cfg: version=1", "idle: ready"]
+keys = [{ send = "x", wait_after = 3 }]
 expect = ["boot: 1 entries", "boot: [0] Windows Boot Manager <efi>"]
 
 [[case.extra_volumes]]

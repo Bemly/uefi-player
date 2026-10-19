@@ -42,6 +42,7 @@ measured_max_fps = 0    # 固件实测回写（0 = 未测）；GUI 只读展示
 [wallpaper]
 enable = false          # 菜单背景 + 引导过渡总开关
 format = "raw"          # 片源格式：raw（wallpaper/frameNNNN.raw，默认）| qois（wallpaper/wall.qois，开机预解码）
+popup_freeze = true     # 选项弹窗时冻结壁纸（false 则行区继续播；GUI 有开关）
 fps = 15                # 背景循环帧率（1-60，已钳制）
 frames = 0              # B 过渡封顶帧数（0 = 全播预载集）
 preload = 8             # 预载帧数上限（1-32；1080p BGRA 单帧约 8MB）

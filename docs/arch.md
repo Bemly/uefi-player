@@ -7,13 +7,15 @@
 
 ```text
 src/main.rs      入口：关看门狗 → 采固件 OSXSAVE → config::load → resolve_accel
-                 → Screen::new（首选 1080p）→ ensure_render_calibrated → run_menu（永不返回）
-src/menu.rs      开机菜单：按键分发 + P4-A idle 壁纸循环（文字区不动，只画行区）
+                 → Screen::new（首选 1080p）→ ensure_render_calibrated → idle::run（永不返回）
+src/idle.rs      顶层交互：壁纸待机（全屏循环，任意键停）+ 启动选项弹窗
+                 （条目直选交权 / p 纯播放器 / f 固件设置 / s 关机 / r 重启 / q 回待机）
+src/menu.rs      纯播放器菜单（诊断 + 播片；`q` 回壁纸待机）
 src/graphics.rs  Screen（GOP 独占封装）：draw_str/upload_frame(+region)/bench 矩阵/asm 拷贝族
 src/video.rs     播放器：video_run → blt_loop（单线程 Blt）/ direct_loop（BSP 直写）
                  / mp_draw（全核并行）+ pace_or_drop/确定性掉帧 + OSD
 src/video/{decoder,buffer}.rs  VideoMemoryRaw 预解码（校验 + 计数 + 空集报错）
-src/boot/        P1：entries（BLS 枚举）+ chainload（eficore）+ mod（Exclusive 子菜单）
+src/boot/        P1：entries（BLS 枚举）+ chainload（eficore）+ mod（枚举 + 交权；UI 在 idle 弹窗）
 src/wallpaper.rs P4：序列位图预载 + 行区/全屏上屏
 src/config.rs    player.toml schema + 原子生效值 + measured 记忆回写
 src/fs.rs        卷 IO：open/read/write（删后建防残留）+ open_dir/list_dir

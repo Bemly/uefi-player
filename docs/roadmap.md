@@ -58,8 +58,8 @@
 - 配置（`player.toml` 新增 `[wallpaper]`，GUI 同步加开关页）：
   `enable = false`（默认关，老机器显存带宽兜底）、`fps = 15`（菜单背景低帧即可）、
   `frames = 0`（0 = 全播，B 过渡用 N 帧封顶）。
-- A 菜单背景：`run_menu` idle 时底层按 `fps` 循环播序列位图（走 render 矩阵的
-  生效路径：direct 单/多核或 Blt，不另起管线），任意按键即停并重画菜单。
+- A 壁纸待机：`idle::run` 待机时全屏按 `fps` 循环播（`popup_freeze=false`
+  则弹窗时行区继续播）；任意键停并弹启动选项。
 - B 引导过渡：选 entry 后、chainload 前播 N 帧/固定时长（依赖 P1 `src/boot/` 先有入口）。
 - 验收：开关两档在 QEMU + 真机各测一遍；开档下按键响应无可感知延迟。
 

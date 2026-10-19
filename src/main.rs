@@ -9,6 +9,7 @@ mod diag;
 mod error;
 mod fs;
 mod graphics;
+mod idle;
 mod menu;
 mod video;
 mod wallpaper;
@@ -16,7 +17,6 @@ mod wallpaper;
 use uefi::prelude::*;
 
 use crate::graphics::Screen;
-use crate::menu::run_menu;
 
 #[entry]
 fn main() -> Status {
@@ -49,8 +49,10 @@ fn main() -> Status {
 
     // render auto 矩阵：首启必校准（direct/blt × BSP/全核 × vsync 探测），
     // 有记忆直接复用快启，结论回写 `\player.toml` 的 `measured_*`。
+    // 这就是“首轮默认测试”：无校准结果不开机菜单，先跑矩阵。
     screen.ensure_render_calibrated();
 
-    // 默认停留等待：由菜单分发播放视频或各诊断项，不再直进 video_run。
-    run_menu(screen);
+    // 顶层交互：壁纸待机 → 任意键弹窗（引导项/播放器/固件设置/开关机）。
+    // 纯播放器模式（旧开机菜单）只在弹窗按 `p` 才进。
+    idle::run(screen);
 }

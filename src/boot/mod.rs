@@ -1,10 +1,11 @@
-//! BLS 引导子菜单（P1，全功能对齐中）：枚举本卷 `loader/entries` +
-//! 多卷自动发现（BLS/UKI/Windows/Linux/Shell，见 `detect.rs`），选 PE 项
+//! 引导项数据 + 交权（P1，全功能对齐中）：枚举本卷 `loader/entries` +
+//! 多卷自动发现（BLS/UKI/Windows/Linux/Shell/OpenCore，见 `detect.rs`），选 PE 项
 //! chainload，选 Linux 项直启（kernel + initrd + options + devicetree）。
 //!
-//! - `Entry::Exclusive`：handoff 前必须释放 GOP 独占，否则下个镜像打不开 GOP。
-//!   这与路线图 P1 原文“Shared 形态”有偏离——Shared 借屏不释放，handover 会楔死，
-//!   故用 Exclusive（菜单负责 drop/重建），特此说明。
+//! UI 在 `idle.rs` 的启动选项弹窗（条目直接列出，数字键直选）；
+//! 本模块只做枚举 + 交权，不画菜单。
+//!
+//! - 交权前必须释放 GOP 独占（`drop(Screen)`），否则下个镜像打不开 GOP。
 //! - P4-B：选 PE 项后、chainload 前播 N 帧壁纸过渡（全屏，开时才播）。
 
 pub mod chainload;
@@ -16,17 +17,20 @@ use alloc::string::String;
 
 use self::chainload::chainload_efi;
 use self::entries::{BootKind, BootList, enumerate};
-use crate::diag::common::{flush_keys, pause_return, wait_key_ex};
+use crate::diag::common::pause_return;
 use crate::error::Result;
-use crate::graphics::{Screen, calibrate_tps, tsc};
+use crate::graphics::{Screen, tsc};
 use crate::video::decoder::Clip;
 use crate::wallpaper::{self};
 
-/// 子菜单按键：36 个（BLS 项再多也够，超了截断并 warning）。
-const KEYS: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyz";
+/// 启动选项弹窗的条目按键（`idle.rs` 复用；`p/f/s/r` 留给固定项，`q` 返回，
+/// `Enter` 跑默认——调用方先判固定键，剩下的才按此表查条目）。
+/// 32 档（0-9a-z 去掉 p/f/s/r，超了截断并 warning）。
+pub const KEYS: &[u8] = b"0123456789abcdeghijklmnoqtuvwxyz";
 
-pub fn run() -> Result {
-    let mut screen = Screen::reacquire()?;
+/// 枚举启动项（本卷 BLS + 多卷自动发现），打串口标记（矩阵靠它同步按键）。
+/// `idle.rs` 每次开弹窗调一次，保证插拔 U 盘后列表新鲜。
+pub fn list() -> Result<BootList> {
     let mut list = enumerate()?;
     // 多卷自动发现（`[boot] auto` 总开关；关 = 只列本卷 BLS，老行为）。
     if crate::config::boot_auto() {
@@ -34,88 +38,34 @@ pub fn run() -> Result {
         list.warnings.append(&mut warnings);
         detect::append_unique(&mut list, detected);
     }
-    // 条目数 + 明细标记（串口可断言）：QEMU 黑盒矩阵靠它同步按键 + 断言种类
-    //（子菜单屏显-only）。只打一次，`draw_boot_menu` 重画不再刷。
+    // 条目数 + 明细标记（串口可断言）：矩阵靠它同步按键 + 断言种类。
     log::warn!("boot: {} entries", list.entries.len());
     for (i, e) in list.entries.iter().enumerate() {
         let key = if i < KEYS.len() { KEYS[i] as char } else { '?' };
         log::warn!("boot: [{}] {} <{}>", key, e.title, e.kind.kind_str());
     }
-    // B 过渡用壁纸预载集（和 A 同格式；缺片源/关开关即 None，跳过过渡）。
-    let wp = wallpaper::load().unwrap_or(None);
-    let tps = if wp.is_some() { calibrate_tps() } else { 1 };
-
-    if list.entries.is_empty() {
-        let _ = screen.clear();
-        screen.reset_cursor();
-        screen.draw_str("== Boot entries (BLS) ==");
-        for w in &list.warnings {
-            screen.draw_str(w);
-        }
-        screen.draw_str("no bootable entries.");
-        // 串口标记（QEMU 黑盒矩阵靠它同步按键，屏显测不到）。
-        log::warn!("boot: no entries, press any key");
-        pause_return(&mut screen);
-        return Ok(());
-    }
-
-    loop {
-        draw_boot_menu(&mut screen, &list);
-        flush_keys();
-        let (key, _) = wait_key_ex();
-        if key == 'q' {
-            return Ok(());
-        }
-        if key == '\r' || key == '\n' {
-            if let Some(i) = list.default_index {
-                screen = boot_index(screen, &list, &wp, tps, i)?;
-            }
-            continue;
-        }
-        if let Some(pos) = KEYS.iter().position(|&k| k as char == key) {
-            if pos < list.entries.len() {
-                screen = boot_index(screen, &list, &wp, tps, pos)?;
-            }
-        }
-    }
+    Ok(list)
 }
 
-fn draw_boot_menu(screen: &mut Screen, list: &BootList) {
-    let _ = screen.clear();
-    screen.reset_cursor();
-    screen.draw_str("== Boot entries (BLS) ==");
-    for w in &list.warnings {
-        screen.draw_str(&format!("! {}", w));
-    }
-    for (i, e) in list.entries.iter().enumerate() {
-        let key = if i < KEYS.len() { KEYS[i] as char } else { '?' };
-        let tries = match e.tries_left {
-            Some(t) => format!(" (tries {})", t),
-            None => String::new(),
-        };
-        let def = if Some(i) == list.default_index {
-            " [default]"
-        } else {
-            ""
-        };
-        let kind = match &e.kind {
-            BootKind::Efi { .. } => "efi",
-            BootKind::Linux { .. } => "linux*",
-        };
-        screen.draw_str(&format!("[{}] {} <{}>{}{}", key, e.title, kind, tries, def));
-    }
-    if list.entries.len() > KEYS.len() {
-        screen.draw_str(&format!(
-            "! {} entries beyond key range, not selectable",
-            list.entries.len() - KEYS.len()
-        ));
-    }
-    screen.draw_str("[q] back  [Enter] default");
+/// 条目行文本（弹窗与串口同一格式；`?` = 超出按键范围，不可选）。
+pub fn entry_line(list: &BootList, i: usize) -> String {
+    let e = &list.entries[i];
+    let key = if i < KEYS.len() { KEYS[i] as char } else { '?' };
+    let tries = match e.tries_left {
+        Some(t) => format!(" (tries {})", t),
+        None => String::new(),
+    };
+    let def = if Some(i) == list.default_index {
+        " [default]"
+    } else {
+        ""
+    };
+    format!("[{}] {} <{}>{}{}", key, e.title, e.kind.kind_str(), tries, def)
 }
 
 /// 值传递拿走 Screen：`drop` 即释放 GOP 独占，chainload 才能干净交权；
-/// 出错/镜像返回时重建一个交回，子菜单继续。
-fn boot_index(
+/// 出错/镜像返回时重建一个交回，调用方（弹窗）继续。
+pub fn boot_index(
     screen: Screen,
     list: &BootList,
     wp: &Option<Clip>,
