@@ -576,6 +576,43 @@ expect = ["boot: [0] OpenCore <efi>", "boot: starting image", { pat = "cfg: vers
   path = "EFI/OC/OpenCore.efi"
   efi = true
 
+# boot counting 端到端：第二卷 test+2-0.conf 起一次，真改名成 test+1-1.conf
+#（`+left-done` 语义：decremented = left-1 + done+1，上游 BootCounter::render）。
+# 直调上游 BootCounterTarget::consume（SetInfo 原子改名）的 QEMU 证明；
+# 旧读旧写新删旧实现已删。工件在第二盘（artifact.volume = 2）。
+[[case]]
+name = "boot-counting"
+timeout_sec = 300
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+workers = "bsp_only"
+dist = "static"
+vsync = "off"
+[play]
+fps = "max"
+[wallpaper]
+enable = false
+"""
+boot_expect = ["cfg: version=1", "menu: ready"]
+keys = [
+  { send = "b", wait_after = 2 },
+  { send = "0", wait_for = ["boot: 1 entries"], wait_after = 5 },
+]
+expect = ["consumed try", "boot: starting image", { pat = "cfg: version=1", count = 2 }, { pat = "menu: ready", count = 2 }]
+artifact = { glob = "test+1-1.conf", contains = ["Chainload Counting"], volume = 2 }
+
+[[case.extra_volumes]]
+  [[case.extra_volumes.files]]
+  path = "EFI/other/app.efi"
+  efi = true
+  [[case.extra_volumes.files]]
+  path = "loader/entries/test+2-0.conf"
+  text = "title Chainload Counting Test\nefi /EFI/other/app.efi\n"
+
 # 严格模式：第二卷 BLS 被压住，只剩 Windows（索引 0 必须是它）。
 # 不加 strict 的话同一镜像会列出 2 项（other.conf 排第一），见 boot-bls-secondvol。
 [[case]]

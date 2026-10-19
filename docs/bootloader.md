@@ -1,8 +1,9 @@
 # uefi-player 引导（基于 sprout 扩展 → 全功能对齐）
 
-> `third_party/sprout` 只读 submodule，零修改。只取 4 个 lib：
+> `third_party/sprout` submodule pin 不动、不 fork，只取 5 个 lib：
 > `edera-sprout-config` / `edera-sprout-eficore` / `edera-sprout-bls` /
-> `edera-sprout-parsing`（`boot` 是 bin，不可依赖，读它只学思路，自研实现）。
+> `edera-sprout-parsing` / `edera-sprout-boot`（`boot` 上游是纯 bin，
+> 本仓用 `patches/sprout-boot-lib.patch` 叠 `[lib]` 后直调，不自研重复逻辑）。
 > 目标：引导能力与 sprout 持平（见 AGENTS「sprout 全功能对齐」），
 > UI/配置保持本仓（`player.toml` + config-gui + 我们的菜单）。
 
@@ -20,8 +21,9 @@
   `BlsEntry::from_str` / `LoaderConf::parse` / `BootCounter::parse`（sprout 现货）；
   目录枚举 `Fs::list_dir` 自研（`uefi-rs` 无 walker）；默认匹配自研单 `*` 通配。
   无 tries 项跳过并 warning；`arch` 键非 x64 跳过；`uki` 键按 PE 直接起。
-  `consume_try`：启动尝试即递减 tries（读旧写新再删旧，FAT 无 rename，
-  用既有原语拼；失败只记 warning，不挡启动）。
+  `consume_try`：启动尝试即递减 tries，直调上游
+  `BootCounterTarget::consume`（UEFI `SetInfo` 真改名，不断电留对；
+  旧读旧写新删旧实现已删）。失败只记 warning，不挡启动。
 - `detect.rs`：多卷自动发现（读 sprout `boot/autoconfigure` 学的，自研）。
   `find_handles::<SimpleFileSystem>` 逐卷扫：本卷 BLS 除外（`entries.rs` 已列，
   默认项只看本卷），其它卷 BLS 全列；全卷 UKI（`EFI/Linux/*.efi`，
@@ -77,7 +79,7 @@
 ## 验收（QEMU 黑盒矩阵，已跑过）
 
 - 单盘 chainload（`boot-chainload`）：locate ok → loading → starting image →
-  第二遍 cfg + 菜单；sprout submodule `git status` 干净。
+  第二遍 cfg + 菜单；sprout submodule 除 `patches/` 叠加外 `git status` 干净。
 - 跨盘 Windows（`boot-windows-crossvol`）：第二盘 `bootmgfw.efi`（自家 efi 改名）
   被发现并交权，第二遍 cfg + 菜单。
 - 跨盘 BLS（`boot-bls-secondvol`）：第二盘 conf + efi，`0` 选中交权。

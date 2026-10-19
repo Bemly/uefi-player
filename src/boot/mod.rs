@@ -123,19 +123,9 @@ fn boot_index(
 ) -> Result<Screen> {
     let entry = &list.entries[i];
     log::warn!("boot: starting [{}] {}", entry.file_name, entry.title);
-    // boot counting：尝试即递减 tries（失败只记 warning，不挡启动）。
-    {
-        let mut fs = match crate::fs::Fs::open(volume_of(entry)) {
-            Ok(f) => f,
-            Err(e) => {
-                // 卷打不开：记一笔，继续启动（读文件时还会再报错，不丢信息）。
-                log::warn!("boot: counter fs open failed: {:?}", e);
-                return boot_entry(screen, list, wp, tps, i);
-            }
-        };
-        if let Some(w) = crate::boot::entries::consume_try(&mut fs, entry) {
-            log::warn!("boot: {}", w);
-        }
+    // boot counting：尝试即递减 tries（上游真改名；失败只记 warning，不挡启动）。
+    if let Some(w) = crate::boot::entries::consume_try(entry) {
+        log::warn!("boot: {}", w);
     }
     boot_entry(screen, list, wp, tps, i)
 }

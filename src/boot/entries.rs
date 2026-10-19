@@ -138,6 +138,15 @@ fn parse_entry(
     }
 }
 
+/// 条目所在卷（跨盘 `Some`，本卷 `None`）；`mod.rs::volume_of` 同逻辑，
+/// 这里为直调上游计数器单独取一次（不经 `Fs`，上游自己开卷）。
+fn entry_volume(entry: &BootEntry) -> Option<Handle> {
+    match &entry.kind {
+        BootKind::Efi { volume, .. } => *volume,
+        BootKind::Linux { volume, .. } => *volume,
+    }
+}
+
 /// BLS 组内排序（上游 `sort_bls` 同规则，减 machine-id 一项）。
 /// 有 sort_key 的排前面（字典序），都没有的不动（稳定排序保发现顺序）；
 /// 都有则版本号大的在前（`compare_versions` 现货，`10.0` > `2.0` 是数值比）。
@@ -204,46 +213,62 @@ pub fn scan_volume(fs: &mut Fs, volume: Option<Handle>) -> (Vec<BootEntry>, Vec<
     (entries, warnings)
 }
 
-/// 启动尝试即递减 tries（BLS boot counting）：`name+N-M.conf` 改写成
-/// `name+(N-1)-M.conf`（FAT 无 rename：读旧写新再删旧，用既有原语拼）。
-/// 无计数器不做；失败只记 warning，不挡启动（尝试本身已发生）。
-pub fn consume_try(fs: &mut Fs, entry: &BootEntry) -> Option<String> {
+/// 启动尝试即递减 tries（BLS boot counting）：`name+N-M.conf` 真改名成
+/// `name+(N-1)-M.conf`（UEFI `SetInfo` 原子改名，断电不留一对）。
+///
+/// 轮子结论（见根 `AGENTS.md`「轮子优先」）：直接调上游
+/// `edera_sprout_boot::boot_counter::BootCounterTarget::consume`
+///（`boot` bin 经 `patches/sprout-boot-lib.patch` 叠 `[lib]` 后可依赖；
+/// 上游 `generators/bls.rs` 同款 `counting: true`）。
+/// 旧自研是读旧写新再删旧拼 FAT rename，中途断电留一对，已删。
+/// 无计数器/设备拿不到不做，失败只记 warning，不挡启动（尝试本身已发生）。
+pub fn consume_try(entry: &BootEntry) -> Option<String> {
+    use edera_sprout_boot::boot_counter::BootCounterTarget;
+    use uefi::fs::PathBuf;
+    use uefi::proto::loaded_image::LoadedImage;
+
     let left = entry.tries_left?;
-    let stem = entry
-        .file_name
-        .strip_suffix(".conf")
-        .or_else(|| entry.file_name.strip_suffix(".CONF"))
-        .unwrap_or(&entry.file_name);
-    let (id, counter) = edera_sprout_bls::BootCounter::parse(stem);
+    let (stem, extension) = match entry.file_name.rfind('.') {
+        Some(i) => (
+            String::from(&entry.file_name[..i]),
+            String::from(&entry.file_name[i..]),
+        ),
+        None => (entry.file_name.clone(), String::new()),
+    };
+    let (id, counter) = edera_sprout_bls::BootCounter::parse(&stem);
     let counter = counter?;
-    let new_stem = counter.decremented().render(id);
-    let old_path =
-        match CString16::try_from(format!("loader\\entries\\{}", entry.file_name).as_str()) {
-            Ok(c) => c,
-            Err(_) => return Some(format!("{}: bad file name", entry.file_name)),
-        };
-    let new_path = match CString16::try_from(format!("loader\\entries\\{}.conf", new_stem).as_str())
-    {
-        Ok(c) => c,
-        Err(_) => return Some(format!("{}: bad counter name", entry.file_name)),
+    // 跨盘条目用自带卷句柄，本卷条目回查自身 LoadedImage.device()。
+    let filesystem = match entry_volume(entry) {
+        Some(h) => h,
+        None => uefi::boot::open_protocol_exclusive::<LoadedImage>(uefi::boot::image_handle())
+            .ok()
+            .and_then(|img| img.device())?,
     };
-    let bytes = match fs.read_file(&old_path) {
-        Ok(b) => b,
-        Err(e) => return Some(format!("{}: reread failed: {:?}", entry.file_name, e)),
+    let mut directory = PathBuf::from(cstr16!("loader"));
+    directory.push(cstr16!("entries"));
+    let target = BootCounterTarget {
+        counter,
+        filesystem,
+        directory,
+        id: String::from(id),
+        file_name: String::from(entry.file_name.as_str()),
+        extension,
+        counting: true,
     };
-    // 先写新再删旧：中途断电至多留一对，启动项不丢（下次扫描重名去重见 mod）。
-    if fs.write_file(&new_path, &bytes).is_err() {
-        return Some(format!("{}: counter rewrite failed", entry.file_name));
+    match target.consume() {
+        Ok(_) => {
+            log::warn!(
+                "boot: consumed try for {} ({} left)",
+                entry.file_name,
+                left.saturating_sub(1)
+            );
+            None
+        }
+        Err(e) => Some(format!(
+            "{}: counter consume failed: {:#}",
+            entry.file_name, e
+        )),
     }
-    if fs.delete(&old_path).is_err() {
-        return Some(format!("{}: old counter delete failed", entry.file_name));
-    }
-    log::warn!(
-        "boot: consumed try for {} ({} left)",
-        entry.file_name,
-        left.saturating_sub(1)
-    );
-    None
 }
 
 /// 枚举启动卷 `\loader\entries\*.conf` + 默认项匹配（只看本卷 conf）。

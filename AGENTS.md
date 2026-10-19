@@ -1,7 +1,8 @@
 # uefi-player Agent 约束
 
 本仓是 x86 UEFI 应用（`no_std`），目标只有 `x86_64-unknown-uefi`。
-`third_party/sprout` 是只读 submodule（别人的引导器项目），只取 4 个 lib 用，
+`third_party/sprout` 是 submodule（pin 原 commit，不 fork 上游仓库），
+通过 `patches/` 叠加后取 5 个 lib 用，
 本仓的约束与它的 `AGENTS.md` 无关，不要混用。
 
 ## 定位
@@ -13,10 +14,12 @@ x86 引导加载器（基于 sprout 扩展）+ SIMD 加速矩阵 + UEFI 播放�
 
 目标是**引导能力**与 sprout 持平，不是搬它的 UI/配置体系：
 
-- 对齐清单（`src/boot/` 自研实现，`third_party/sprout` 只读、不 fork、不改）：
+- 对齐清单（`src/boot/` 薄适配直调上游 `boot` lib，不自研重复逻辑；
+  `third_party/sprout` pin 不动、不 fork，只用 `patches/` 叠 `[lib]`）：
   多卷自动发现（BLS/UKI/Linux 内核对/Windows/UEFI Shell）+ PE chainload +
   Linux 直启（kernel + initrd 拼接 + options + devicetree）+ 跨盘 chainload +
-  BLS 全字段透传（options/多 initrd/devicetree/arch 过滤）+ boot counting 消费。
+  BLS 全字段透传（options/多 initrd/devicetree/arch 过滤）+ boot counting 消费
+  （首个直调落地：`consume_try` 调 `BootCounterTarget::consume` 真改名）。
 - 不搬：sprout 的菜单/phase/extractor/driver/SBAT/交互配置语言。
   本仓交互层保持自己的（`player.toml` + config-gui + 我们的菜单），
   sprout 只当"上游实现参考"读（读它学思路，同 chainload 惯例），
@@ -29,10 +32,13 @@ x86 引导加载器（基于 sprout 扩展）+ SIMD 加速矩阵 + UEFI 播放�
 ## 目录
 
 - `src/`：UEFI 固件侧，`no_std`，`main/menu/graphics/video/fs/config/error` + `diag/*`。
-  未来加 `src/boot/`（sprout 扩展的引导项），不要动 `third_party/`。
-- `third_party/sprout`：只读。pin 在当前 commit，只依赖
-  `edera-sprout-config/eficore/bls/parsing`（`boot` 是 bin，不可依赖）。
-  需要上游能力先看这 4 个 crate 有没有，没有才在 `src/` 自研。
+  已有 `src/boot/`（sprout 扩展的引导项，薄适配直调）；不要动 `third_party/`
+ （除 `patches/` 叠加后 apply）。
+- `third_party/sprout`：pin 在当前 commit，只依赖
+  `edera-sprout-config/eficore/bls/parsing/boot`（`boot` 上游是纯 bin，
+  无 lib target，path 依赖会被 cargo 静默忽略；本仓用 `patches/` 叠 `[lib]`
+  后直调，新 clone 跑一次 `git -C third_party/sprout apply ../../patches/sprout-boot-lib.patch`）。
+  需要上游能力先看这 5 个 crate 有没有，没有才在 `src/` 自研。
 - `tools/config-gui`：host 侧独立 crate（`std`），跨平台 `player.toml` 编辑器。
   与 UEFI 主包零依赖关系，见下文“双构建”。
 - `docs/`：给人看的设计文档；`usb_reports/`：真机报告样本。

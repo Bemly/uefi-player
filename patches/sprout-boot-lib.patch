@@ -1,0 +1,72 @@
+diff --git a/crates/boot/Cargo.toml b/crates/boot/Cargo.toml
+index 8db728b..665e13d 100644
+--- a/crates/boot/Cargo.toml
++++ b/crates/boot/Cargo.toml
+@@ -29,3 +29,10 @@ edera-sprout-build.path = "../build"
+ name = "sprout"
+ path = "src/main.rs"
+ test = false
++
++# Embedder overlay (parent repo patches/): expose the same sources as a lib
++# so downstream crates can call autoconfigure/generators/actions directly.
++# Upstream ships bin-only; without this Cargo silently ignores the dependency.
++[lib]
++name = "edera_sprout_boot"
++path = "src/lib.rs"
+diff --git a/crates/boot/src/lib.rs b/crates/boot/src/lib.rs
+new file mode 100644
+index 0000000..9aa6f61
+--- /dev/null
++++ b/crates/boot/src/lib.rs
+@@ -0,0 +1,51 @@
++//! Library root exposing the bootloader internals for embedding.
++//!
++//! Upstream `edera-sprout-boot` ships only a `[[bin]]` target, so a plain
++//! path dependency is silently ignored by Cargo ("missing a lib target").
++//! This file (added via the parent repo's `patches/` overlay, the submodule
++//! itself stays pinned) re-exports the same modules as `main.rs` minus the
++//! UEFI entry point, letting embedders call `autoconfigure`, `generators`,
++//! `actions` and `boot_counter` directly instead of reimplementing them.
++
++#![no_std]
++
++extern crate alloc;
++
++/// actions: Code that can be configured and executed by Sprout.
++pub mod actions;
++
++/// autoconfigure: Autoconfigure Sprout based on the detected environment.
++pub mod autoconfigure;
++
++/// boot_counter: Consume the boot counter tries of BLS entries.
++pub mod boot_counter;
++
++/// config: Sprout configuration mechanism.
++pub mod config;
++
++/// context: Stored values that can be cheaply forked and cloned.
++pub mod context;
++
++/// drivers: EFI drivers to load and provide extra functionality.
++pub mod drivers;
++
++/// entries: Boot menu entries that have a title and can execute actions.
++pub mod entries;
++
++/// extractors: Runtime code that can extract values into the Sprout context.
++pub mod extractors;
++
++/// generators: Runtime code that can generate entries with specific values.
++pub mod generators;
++
++/// menu: Display a boot menu to select an entry to boot.
++pub mod menu;
++
++/// options: Parse the options of the Sprout executable.
++pub mod options;
++
++/// phases: Hooks into specific parts of the boot process.
++pub mod phases;
++
++/// sbat: Secure Boot Attestation section.
++pub mod sbat;

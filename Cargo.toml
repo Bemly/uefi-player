@@ -22,11 +22,16 @@ serde = { version = "1.0.229", default-features = false, features = ["alloc", "d
 # 信息读取类
 raw-cpuid = "11.6.0"
 dmidecode = { version = "1.0.0", default-features = false }
-# 引导/加载逻辑复用 Sprout（git submodule）。注意 edera-sprout-boot 是 bin，不可依赖。
+# 引导/加载逻辑复用 Sprout（git submodule，pin 原 commit 不 fork）。
+# 注意上游 edera-sprout-boot 是纯 bin（无 lib target），path 依赖会被 cargo
+# 静默忽略；本仓用 patches/sprout-boot-lib.patch 叠加 [lib]（只加 src/lib.rs +
+# [lib] 段，不碰上游逻辑），新 clone 后跑一次
+# `git -C third_party/sprout apply ../../patches/sprout-boot-lib.patch` 即可。
 edera-sprout-config = { path = "third_party/sprout/crates/config" }
 edera-sprout-eficore = { path = "third_party/sprout/crates/eficore" }
 edera-sprout-bls = { path = "third_party/sprout/crates/bls" }
 edera-sprout-parsing = { path = "third_party/sprout/crates/parsing" }
+edera-sprout-boot = { path = "third_party/sprout/crates/boot" }
 
 # Sprout 注释：UEFI target 上低优化会踩优化 pass 的坑，dev 也要 opt-level>=2
 [profile.dev]

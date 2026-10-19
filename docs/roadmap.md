@@ -19,10 +19,11 @@
 ## P1 引导（基于 sprout 扩展 → 全功能对齐，用户拍板）
 
 - 新增 `src/boot/`，调用 `edera-sprout-config` 解析 + `edera-sprout-bls`
-  枚举 + `edera-sprout-eficore` chainload（`boot` 是 bin，不可依赖）。
+  枚举 + `edera-sprout-eficore` chainload + `edera-sprout-boot`（经 `patches/`
+  叠 `[lib]` 后直调 `boot_counter` 等）。
 - `registry.rs` 加 boot entry，与现有 `run_menu` 合流（`Shared` 形态）。
-- 验收：QEMU 下能列 BLS entry 并 chainload，sprout submodule 零修改。
-- 全功能对齐清单（`src/boot/` 自研，UI/配置保持本仓，见 AGENTS）：
+- 验收：QEMU 下能列 BLS entry 并 chainload，sprout submodule 除 `patches/` 叠加外零修改。
+- 全功能对齐清单（`src/boot/` 薄适配直调，UI/配置保持本仓，见 AGENTS）：
   - [x] 本卷 BLS 枚举 + PE chainload（`entries.rs` + `chainload.rs`，QEMU 矩阵已验证）
   - [x] 跨盘 chainload（目标卷设备句柄拼路径 + 跨卷读；`boot-chainload`/`boot-windows-crossvol` 已验证）
   - [x] 多卷自动发现（`detect.rs`：逐卷 BLS/UKI/Linux 内核对/Windows/Shell/OpenCore）

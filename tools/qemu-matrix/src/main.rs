@@ -106,6 +106,14 @@ struct Artifact {
     glob: String,
     #[serde(default)]
     contains: Vec<String>,
+    /// 查哪个盘的落盘工件：缺省 1 = 主盘；2 = 第一附加卷，依此类推
+    ///（boot counting 夹具在第二盘，`boot-counting` case 用）。
+    #[serde(default = "default_artifact_volume")]
+    volume: usize,
+}
+
+fn default_artifact_volume() -> usize {
+    1
 }
 
 /// 附加卷（第二盘及以后）：多卷自动发现的测试夹具。
@@ -656,10 +664,21 @@ fn run_case(case: &Case, glob: &Global, efi: &str, keep: bool, ovmf_default: &st
     }
     if fail.is_none() {
         if let Some(art) = &case.artifact {
-            let (ok, detail) = read_artifact(fstype, &image, &art.glob, &art.contains);
-            println!("  artifact: {detail}");
-            if !ok {
-                fail = Some(format!("artifact: {detail}"));
+            // 1 = 主盘，2 起 = 附加卷（boot counting 夹具在第二盘）。
+            let apath: Option<&str> = if art.volume.max(1) == 1 {
+                Some(&image)
+            } else {
+                extra_images.get(art.volume - 2).map(String::as_str)
+            };
+            match apath {
+                None => fail = Some(format!("artifact: volume {} has no image", art.volume)),
+                Some(p) => {
+                    let (ok, detail) = read_artifact(fstype, p, &art.glob, &art.contains);
+                    println!("  artifact: {detail}");
+                    if !ok {
+                        fail = Some(format!("artifact: {detail}"));
+                    }
+                }
             }
         }
     }
