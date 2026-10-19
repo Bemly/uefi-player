@@ -544,6 +544,38 @@ expect = ["boot: starting image", { pat = "cfg: version=1", count = 2 }, { pat =
   path = "EFI/shellx64.efi"
   efi = true
 
+# OpenCore 链式接力：第二盘只有 OpenCore.efi（我们的 efi 改名），
+# 按 0 直接交权，第二遍 cfg + 菜单证明跨盘 DevicePath + 跨盘读都通了。
+# 不扫通用 BOOTX64.EFI（那可能是我们自己，会自举死循环），只认固定路径。
+[[case]]
+name = "boot-macos"
+timeout_sec = 300
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+workers = "bsp_only"
+dist = "static"
+vsync = "off"
+[play]
+fps = "max"
+[wallpaper]
+enable = false
+"""
+boot_expect = ["cfg: version=1", "menu: ready"]
+keys = [
+  { send = "b", wait_after = 2 },
+  { send = "0", wait_for = ["boot: 1 entries"], wait_after = 5 },
+]
+expect = ["boot: [0] OpenCore <efi>", "boot: starting image", { pat = "cfg: version=1", count = 2 }, { pat = "menu: ready", count = 2 }]
+
+[[case.extra_volumes]]
+  [[case.extra_volumes.files]]
+  path = "EFI/OC/OpenCore.efi"
+  efi = true
+
 # 严格模式：第二卷 BLS 被压住，只剩 Windows（索引 0 必须是它）。
 # 不加 strict 的话同一镜像会列出 2 项（other.conf 排第一），见 boot-bls-secondvol。
 [[case]]

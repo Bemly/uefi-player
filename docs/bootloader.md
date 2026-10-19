@@ -63,8 +63,9 @@
 ## 配置（`[boot]`，GUI 有开关页）
 
 `auto` 总开关（关 = 只列本卷 BLS，老行为）+ `windows` / `linux` / `shell` /
-`uki` 四类开关。本卷 BLS 永远列（不受开关影响）。macOS 不做
-（要 bless/APFS，超出 UEFI 范围；sprout 也没有）。
+`uki` / `macos` 五类开关。本卷 BLS 永远列（不受开关影响）。macOS 原生引导不做
+（要 bless/APFS，超出 UEFI 范围；sprout 也没有），只做 OpenCore 链式接力
+（`\EFI\OC\OpenCore.efi` 存在即链；不扫通用 `BOOTX64.EFI`，那可能是我们自己）。
 
 ## 与路线图的偏离
 

@@ -21,7 +21,9 @@ x86 引导加载器（基于 sprout 扩展）+ SIMD 加速矩阵 + UEFI 播放�
   本仓交互层保持自己的（`player.toml` + config-gui + 我们的菜单），
   sprout 只当"上游实现参考"读（读它学思路，同 chainload 惯例），
   需要上游能力先看 4 个 lib 有没有，没有才在 `src/` 自研。
-- macOS 自动发现不在 sprout 内也不做（要 bless/APFS，超出 UEFI 范围）。
+- macOS 原生引导不做（要 bless/APFS，超出 UEFI 范围；sprout 也没有），
+  只做 OpenCore 链式接力（`\EFI\OC\OpenCore.efi` 存在即链，`[boot] macos` 开关；
+  不扫通用 `BOOTX64.EFI`，那可能是我们自己）。
 - UKI 标题取文件名（不解析 `.uname` 区，省一次全读；要全名请写 BLS conf）。
 
 ## 目录

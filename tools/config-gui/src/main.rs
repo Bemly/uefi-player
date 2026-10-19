@@ -346,12 +346,13 @@ struct BootConfig {
     linux: bool,
     shell: bool,
     uki: bool,
+    macos: bool,
     strict: bool,
 }
 
 impl Default for BootConfig {
     fn default() -> Self {
-        Self { auto: true, windows: true, linux: true, shell: true, uki: true, strict: false }
+        Self { auto: true, windows: true, linux: true, shell: true, uki: true, macos: true, strict: false }
     }
 }
 
@@ -1374,6 +1375,10 @@ impl App {
                     let v = self.switch_row(ui, self.cfg.boot.uki, &t!("boot.on"), &t!("boot.off"));
                     self.cfg.boot.uki = v;
                     ui.add_space(4.0);
+                    ui.label(t!("boot.macos"));
+                    let v = self.switch_row(ui, self.cfg.boot.macos, &t!("boot.on"), &t!("boot.off"));
+                    self.cfg.boot.macos = v;
+                    ui.add_space(4.0);
                     ui.label(t!("boot.strict"));
                     let v = self.switch_row(ui, self.cfg.boot.strict, &t!("boot.on"), &t!("boot.off"));
                     self.cfg.boot.strict = v;
@@ -1411,11 +1416,12 @@ impl App {
                     "sum.boot",
                     v = if self.cfg.boot.auto {
                         format!(
-                            "auto win:{} lin:{} sh:{} uki:{} st:{}",
+                            "auto win:{} lin:{} sh:{} uki:{} mac:{} st:{}",
                             self.cfg.boot.windows as u8,
                             self.cfg.boot.linux as u8,
                             self.cfg.boot.shell as u8,
                             self.cfg.boot.uki as u8,
+                            self.cfg.boot.macos as u8,
                             self.cfg.boot.strict as u8,
                         )
                     } else {
@@ -1737,6 +1743,7 @@ mod blackbox_matrix {
                         linux: false,
                         shell: true,
                         uki: false,
+                        macos: true,
                         strict: false,
                     },
                             };
@@ -1795,26 +1802,28 @@ mod blackbox_matrix {
         assert!(cfg.boot.linux);
         assert!(cfg.boot.shell);
         assert!(cfg.boot.uki);
+        assert!(cfg.boot.macos);
         assert!(!cfg.boot.strict);
     }
 
-    /// `[boot]` 5 开关全笛卡尔回写（32 种）。
+    /// `[boot]` 6 开关全笛卡尔回写（128 种）。
     #[test]
     fn boot_roundtrip_matrix() {
         let mut n = 0;
-        for bits in 0..64u8 {
+        for bits in 0..128u8 {
             let mut cfg = FileConfig::default();
             cfg.boot.auto = bits & 1 != 0;
             cfg.boot.windows = bits & 2 != 0;
             cfg.boot.linux = bits & 4 != 0;
             cfg.boot.shell = bits & 8 != 0;
             cfg.boot.uki = bits & 16 != 0;
-            cfg.boot.strict = bits & 32 != 0;
+            cfg.boot.macos = bits & 32 != 0;
+            cfg.boot.strict = bits & 64 != 0;
             let back: FileConfig = toml::from_str(&toml::to_string(&cfg).unwrap()).unwrap();
-            assert_eq!(back, cfg, "{bits:06b}");
+            assert_eq!(back, cfg, "{bits:07b}");
             n += 1;
         }
-        assert_eq!(n, 64);
+        assert_eq!(n, 128);
     }
 
     /// 读盘钳制矩阵：只有 B2V 能留，其余三项一律钳回 B2V（播放行为不变）。

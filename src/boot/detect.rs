@@ -11,7 +11,9 @@
 //!   - 不做 strict/XBOOTLDR 分卷（systemd 严格模式），全卷平等扫——
 //!     要的就是"插上就有"，少一个漏报比多一个重复重要。
 //!   - UKI 不解析 `.uname` 区（省一次全读），标题取文件名；要全名请写 BLS conf。
-//!   - macOS 不做（要 bless/APFS，超出 UEFI 范围；sprout 也没有）。
+//!   - macOS 原生引导不做（要 bless/APFS，超出 UEFI 范围；sprout 也没有），
+//!     只做 OpenCore 链式接力（`\EFI\OC\OpenCore.efi` 存在即链，`[boot] macos`
+//!     开关；不扫通用 `BOOTX64.EFI`，那可能是我们自己，会自举死循环）。
 //!   - UEFI Shell 上游没有，是 systemd-boot 式的顺手（同 Windows 形状，零代价）。
 //!   - 排序按发现顺序（本卷 BLS → 逐卷 BLS/UKI/Linux/Windows/Shell），
 //!     不做上游的 version-sort（屏显菜单稳定可预期最重要）。
@@ -28,6 +30,11 @@ use crate::fs::Fs;
 
 /// Windows 启动管理器（上游同路径，一字不差）。
 const WINDOWS_BOOTMGR: &str = "\\EFI\\Microsoft\\Boot\\bootmgfw.efi";
+
+/// OpenCore 链式接力（Windows 同款形状：固定路径存在即链）。
+/// 轮子结论：无新轮子，复用本仓既有 `Fs::list_dir` 存在性探测（Windows/Shell 同式）；
+/// 不扫通用 `BOOTX64.EFI`——那可能是我们自己（fallback 启动），点了会自举死循环。
+const OPENCORE_PATH: &str = "\\EFI\\OC\\OpenCore.efi";
 
 /// UEFI Shell 候选（systemd-boot 式顺手，上游没有；命中即链）。
 const SHELL_CANDIDATES: &[&str] = &[
@@ -168,6 +175,7 @@ fn scan_volume(
     cfg_linux: bool,
     cfg_shell: bool,
     cfg_uki: bool,
+    cfg_macos: bool,
     vol_tag: &str,
 ) -> (Vec<BootEntry>, Vec<String>) {
     use crate::boot::entries::scan_volume as scan_bls;
@@ -305,6 +313,26 @@ fn scan_volume(
         }
     }
 
+    // OpenCore 链式接力：固定路径存在即链（Windows 同款形状；strict 不影响，
+    // strict 只约束 BLS 来源，上游同款）。
+    if cfg_macos {
+        let oc = dir_names(fs, "\\EFI\\OC");
+        if oc.contains("opencore.efi") {
+            entries.push(BootEntry {
+                title: String::from("OpenCore"),
+                file_name: String::from("OpenCore.efi"),
+                kind: BootKind::Efi {
+                    path: String::from(OPENCORE_PATH),
+                    options: None,
+                    volume,
+                },
+                tries_left: None,
+                sort_key: None,
+                version: None,
+            });
+        }
+    }
+
     (entries, warnings)
 }
 
@@ -366,6 +394,7 @@ pub fn detect() -> (Vec<BootEntry>, Vec<String>) {
             crate::config::boot_linux(),
             crate::config::boot_shell(),
             crate::config::boot_uki(),
+            crate::config::boot_macos(),
             &tag,
         );
         entries.append(&mut es);

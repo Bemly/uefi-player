@@ -36,10 +36,11 @@
 //! [boot]
 //! auto = true             # 多卷自动发现总开关（关 = 只列本卷 BLS，老行为）
 //! windows = true          # 自动发现 Windows Boot Manager
-//! linux = true            # 自动发现 Linux 内核对（kernel + initrd）
+//! linux = true            # 自动发现 Linux 内核对（kernel + initrd)
 //! shell = true            # 自动发现 UEFI Shell（shellx64.efi）
 //! uki = true              # 自动发现 EFI/Linux/*.efi（标题取 .uname 区，读不到用文件名）
-//! strict = false          # 严格模式：BLS 只认本卷 + XBOOTLDR 卷（systemd 严格模式）
+//! macos = true            # OpenCore 链式接力（EFI/OC/OpenCore.efi 存在即链）
+//! strict = false          # 严格模式：BLS 只认本卷 + XBOOTLDR 卷（systemd 严格模式)
 //! ```
 
 use alloc::format;
@@ -371,6 +372,9 @@ impl Default for Config {
 
 /// `[boot]`：多卷自动发现开关（P1 全功能对齐）。本卷 BLS 永远列（不受开关影响，
 /// 老行为）；`strict` = BLS 只认本卷 + XBOOTLDR 卷（systemd 严格模式）。
+/// `macos` = OpenCore 链式接力（`\EFI\OC\OpenCore.efi` 存在即链；不扫通用
+/// `BOOTX64.EFI`，那可能是我们自己，会自举死循环；macOS 原生引导不做，
+/// 要 bless/APFS，超出 UEFI 范围）。
 /// 缺键老配置按默认（全开、不严格）处理。
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(default)]
@@ -385,6 +389,8 @@ pub struct BootConfig {
     pub shell: bool,
     #[serde(default = "default_true")]
     pub uki: bool,
+    #[serde(default = "default_true")]
+    pub macos: bool,
     #[serde(default)]
     pub strict: bool,
 }
@@ -401,6 +407,7 @@ impl Default for BootConfig {
             linux: true,
             shell: true,
             uki: true,
+            macos: true,
             strict: false,
         }
     }
@@ -539,6 +546,7 @@ static BOOT_WINDOWS: AtomicU8 = AtomicU8::new(1);
 static BOOT_LINUX: AtomicU8 = AtomicU8::new(1);
 static BOOT_SHELL: AtomicU8 = AtomicU8::new(1);
 static BOOT_UKI: AtomicU8 = AtomicU8::new(1);
+static BOOT_MACOS: AtomicU8 = AtomicU8::new(1);
 static BOOT_STRICT: AtomicU8 = AtomicU8::new(0);
 static TUNE_FRAMES: AtomicU32 = AtomicU32::new(default_frames());
 static TUNE_TILE_ROWS: AtomicU32 = AtomicU32::new(default_tile_rows());
@@ -601,9 +609,10 @@ pub fn load() -> Option<String> {
     BOOT_LINUX.store(cfg.boot.linux as u8, Ordering::Relaxed);
     BOOT_SHELL.store(cfg.boot.shell as u8, Ordering::Relaxed);
     BOOT_UKI.store(cfg.boot.uki as u8, Ordering::Relaxed);
+    BOOT_MACOS.store(cfg.boot.macos as u8, Ordering::Relaxed);
     BOOT_STRICT.store(cfg.boot.strict as u8, Ordering::Relaxed);
     log::info!(
-        "cfg: version={} accel.level={:?} render.mode={:?} workers={:?} dist={:?} vsync={:?} blt_op={:?} tune.frames={} measured(render={:?} workers={:?} dist={:?} vsync={:?} vhalf={} cores={}) play.fps={} measured_max_fps={} boot(auto={} win={} lin={} sh={} uki={} strict={})",
+        "cfg: version={} accel.level={:?} render.mode={:?} workers={:?} dist={:?} vsync={:?} blt_op={:?} tune.frames={} measured(render={:?} workers={:?} dist={:?} vsync={:?} vhalf={} cores={}) play.fps={} measured_max_fps={} boot(auto={} win={} lin={} sh={} uki={} mac={} strict={})",
         cfg.version,
         cfg.accel.level,
         cfg.render.mode,
@@ -625,6 +634,7 @@ pub fn load() -> Option<String> {
         cfg.boot.linux,
         cfg.boot.shell,
         cfg.boot.uki,
+        cfg.boot.macos,
         cfg.boot.strict,
     );
     warn
@@ -894,6 +904,10 @@ pub fn boot_shell() -> bool {
 /// 自动发现 UKI（`EFI/Linux/*.efi`）。
 pub fn boot_uki() -> bool {
     BOOT_UKI.load(Ordering::Relaxed) != 0
+}
+/// OpenCore 链式接力（`\EFI\OC\OpenCore.efi` 存在即链）。
+pub fn boot_macos() -> bool {
+    BOOT_MACOS.load(Ordering::Relaxed) != 0
 }
 /// 严格模式：BLS 只认本卷 + XBOOTLDR 卷（systemd 严格模式）。
 pub fn boot_strict() -> bool {

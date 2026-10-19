@@ -50,6 +50,7 @@ windows = true          # 自动发现 Windows Boot Manager（bootmgfw.efi 存�
 linux = true            # 自动发现 Linux 内核对（\boot + \ 扫 vmlinuz*/image* + initramfs 配对）
 shell = true            # 自动发现 UEFI Shell（shellx64.efi 三处候选）
 uki = true              # 自动发现 EFI/Linux/*.efi（读 .uname/.profile 建条目，读不到用文件名）
+macos = true            # OpenCore 链式接力（EFI/OC/OpenCore.efi 存在即链；不扫通用 BOOTX64.EFI）
 strict = false          # 严格模式：BLS 只认本卷 + XBOOTLDR 卷（默认全卷都认）
 ```
 

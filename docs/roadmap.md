@@ -25,12 +25,12 @@
 - 全功能对齐清单（`src/boot/` 自研，UI/配置保持本仓，见 AGENTS）：
   - [x] 本卷 BLS 枚举 + PE chainload（`entries.rs` + `chainload.rs`，QEMU 矩阵已验证）
   - [x] 跨盘 chainload（目标卷设备句柄拼路径 + 跨卷读；`boot-chainload`/`boot-windows-crossvol` 已验证）
-  - [x] 多卷自动发现（`detect.rs`：逐卷 BLS/UKI/Linux 内核对/Windows/Shell）
+  - [x] 多卷自动发现（`detect.rs`：逐卷 BLS/UKI/Linux 内核对/Windows/Shell/OpenCore）
   - [x] Linux 直启（kernel + initrd 拼接 + options + devicetree，经
     `eficore::media_loader` 交接；QEMU 只验发现列出，不真起内核）
   - [x] BLS 全字段透传（options/多 initrd 拼接/`devicetree` 键/`arch` 过滤/`uki` 键）
   - [x] boot counting 消费（启动尝试即递减 tries，失败 warn 不挡）
-  - [x] `[boot]` 配置 + GUI 开关页 + QEMU 矩阵覆盖（第二卷假 Windows/BLS/Linux）
+  - [x] `[boot]` 配置 + GUI 开关页 + QEMU 矩阵覆盖（第二卷假 Windows/BLS/Linux/OpenCore）
 
 ## P2 SIMD 矩阵转正
 
