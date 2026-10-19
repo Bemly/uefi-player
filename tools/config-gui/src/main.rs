@@ -17,7 +17,11 @@
 //!   OFL-1.1 见 `assets/OFL.txt`），放字体链首位，全 UI 像素风，西文 fallback
 //!   到默认字体。8x8 中文 Rust 轮子无现货（font8x8 无中文），不找了。
 //! - 驱动：`eframe` 的 `wgpu` 特性即 wgpu 驱动；`egui_glass` 不支持 glow，
-//!   故 `NativeOptions.renderer` 强制 `Wgpu`。
+//!   故 `NativeOptions.renderer` 强制 `Wgpu`.
+//! - 图标：用户给的复古像素显示器图，按内容框裁掉下边框留白后透明垫正方形
+//!   （`assets/icon.png` 1024 主图）；`icon-256.rgba` 预烘焙进二进制做运行时窗口图标
+//!   （零新依赖，mac Dock 走 bundle 的 `icon.icns`，见 `bundle_macos.sh`），
+//!   `icon.ico` 给 Windows 用。重做图标跑 `make_icon.py <原图>` + `iconutil` 即可。
 //!
 //! UI 布局照抄 `egui_glass` 官方 README 配方：“Sidebar and opaque content”
 //! （顶栏胶囊 + 底栏状态胶囊 → 左侧玻璃导航卡 →
@@ -1390,12 +1394,25 @@ fn make_backdrop(dark: bool) -> egui::ColorImage {
     egui::ColorImage::filled([256, 256], c)
 }
 
+/// 窗口图标：`assets/icon-256.rgba` 预烘焙 256x256 RGBA，直编二进制零新依赖
+///（Windows 任务栏/Linux 可见；macOS Dock 图标走 bundle 的 `icon.icns`，
+/// 见 `bundle_macos.sh`，运行时设置在 mac 上被忽略）。
+fn app_icon() -> egui::IconData {
+    egui::IconData {
+        rgba: include_bytes!("../assets/icon-256.rgba").to_vec(),
+        width: 256,
+        height: 256,
+    }
+}
+
 fn main() -> eframe::Result<()> {
     rust_i18n::set_locale("en");
     let opts = eframe::NativeOptions {
         // egui_glass 硬性要求 wgpu 渲染器，glow 不可用。
         renderer: eframe::Renderer::Wgpu,
-        viewport: egui::ViewportBuilder::default().with_inner_size([1024.0, 680.0]),
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([1024.0, 680.0])
+            .with_icon(app_icon()),
         ..Default::default()
     };
     eframe::run_native(
