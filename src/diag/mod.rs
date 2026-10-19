@@ -9,6 +9,7 @@
 pub mod common;
 pub mod registry;
 
+pub mod async_exec;
 pub mod avx_checker;
 pub mod get_cpu_info;
 pub mod get_multi_monitor;

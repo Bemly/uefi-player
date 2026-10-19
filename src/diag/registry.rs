@@ -8,7 +8,7 @@
 //!   embedded-graphics 中文演示是这种形态。
 
 use crate::diag::{
-    avx_checker, fw_collect, get_cpu_info, get_multi_monitor, get_smbios, mp_service,
+    async_exec, avx_checker, fw_collect, get_cpu_info, get_multi_monitor, get_smbios, mp_service,
     multi_core_draw, use_embedded_graphics_gop,
 };
 #[cfg(target_arch = "x86_64")]
@@ -90,6 +90,13 @@ pub const ITEMS: &[Item] = &[
         name: "AVX check",
         desc: "CPUID + XCR0 probe",
         run: Entry::Shared(avx_checker::run),
+        fatal_on_error: false,
+    },
+    Item {
+        key: 'a',
+        name: "Async exec",
+        desc: "uefi-async nano+dynamic smoke",
+        run: Entry::Shared(async_exec::run),
         fatal_on_error: false,
     },
     #[cfg(target_arch = "x86_64")]

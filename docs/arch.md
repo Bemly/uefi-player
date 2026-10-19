@@ -21,6 +21,7 @@ src/config.rs    player.toml schema + 原子生效值 + measured 记忆回写
 src/fs.rs        卷 IO：open/read/write（删后建防残留）+ open_dir/list_dir
 src/error.rs     NyaStatus + handle_fatal（仅生产路径）
 src/diag/        真机诊断项（非 cargo test）：registry 注册 + common（emit!/按键/报告/XSAVE）
+                 + async_exec（uefi-async 自举：nano/dynamic 两线 smoke）
 ```
 
 ## GOP 独占模型
