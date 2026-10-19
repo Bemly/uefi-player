@@ -9,7 +9,7 @@ use core::time::Duration;
 use uefi::boot::{create_event, get_handle_for_protocol, open_protocol_exclusive, stall, EventType, ScopedProtocol, Tpl};
 use uefi::proto::console::gop::{BltOp, BltPixel, BltRegion, GraphicsOutput, Mode};
 use uefi::proto::pi::mp::MpServices;
-use crate::config::{self, CopyWidth, DistMode, RenderMode, VsyncMode, WorkersMode};
+use crate::config::{self, BltOpKind, CopyWidth, DistMode, RenderMode, VsyncMode, WorkersMode};
 use crate::error::Result;
 use crate::video::ascii_font::FONT_8X16;
 use crate::video::decoder::VideoMemoryRaw;
@@ -381,6 +381,36 @@ impl Screen {
         })?)
     }
 
+    /// 所选 Blt 操作单发（引擎能力对照数）：B2V=整帧上屏；V2V=屏内对拷；
+    /// Fill=纯色填充；V2B=回读到内存。只有 B2V 能上屏播视频，其余只出数不参选。
+    fn blt_op_once(
+        &mut self,
+        op: BltOpKind,
+        w: usize,
+        h: usize,
+        pixels: &mut [BltPixel],
+    ) -> Result {
+        match op {
+            BltOpKind::BufferToVideo => self.upload_blt(w, h, pixels),
+            BltOpKind::VideoToVideo => Ok(self.gop.blt(BltOp::VideoToVideo {
+                src: (0, 0),
+                dest: (0, 0),
+                dims: (w, h),
+            })?),
+            BltOpKind::VideoFill => Ok(self.gop.blt(BltOp::VideoFill {
+                color: BltPixel::new(0x11, 0x22, 0x33),
+                dest: (0, 0),
+                dims: (w, h),
+            })?),
+            BltOpKind::VideoToBltBuffer => Ok(self.gop.blt(BltOp::VideoToBltBuffer {
+                buffer: pixels,
+                src: (0, 0),
+                dest: BltRegion::Full,
+                dims: (w, h),
+            })?),
+        }
+    }
+
     /// 行区上屏（壁纸菜单背景）：只画 rows `y0..height`，菜单文字区不动。
     /// Blt 走 `SubRectangle` 取源行区；direct 逐行拷（stride 感知）。
     /// direct + `tune.buffers > 0` 时画影子行区再整推同区。
@@ -492,7 +522,7 @@ impl Screen {
 
         let (w, h) = self.gop.current_mode_info().resolution();
         let (w, h) = (w as usize, h as usize);
-        let pixels = vec![BltPixel::new(0x11, 0x22, 0x33); w * h];
+        let mut pixels = vec![BltPixel::new(0x11, 0x22, 0x33); w * h];
 
         // ---- 待定维度：显式值直接采用，只测 auto 且无记忆的 ----
         let probe_render = config::render_mode() == RenderMode::Auto
@@ -568,14 +598,37 @@ impl Screen {
                 .collect::<Vec<_>>()
                 .into_boxed_slice(),
         );
+        // 混合整推影子（`tune.buffers > 0` 且全核路在测时）：1 槽 stride 对齐，
+        // AP/BSP 画影子，BSP 每轮 Blt 整推。与 Screen 影子环同布局（h×stride 连续）。
+        // 分配失败退回直写（bench 照跑，只记 warning）。
+        let fb_stride_px = self.gop.current_mode_info().stride();
+        let want_hybrid = config::tune_buffers() > 0 && want_mp;
+        let mut cal_shadow: Vec<BltPixel> = Vec::new();
+        let need_px = h.saturating_mul(fb_stride_px);
+        if want_hybrid && need_px > 0 && cal_shadow.try_reserve_exact(need_px).is_ok() {
+            cal_shadow.extend(core::iter::repeat(BltPixel::new(0, 0, 0)).take(need_px));
+        }
+        let cal_sh: *mut u8 = if want_hybrid && cal_shadow.len() == need_px && need_px > 0 {
+            cal_shadow.as_mut_ptr() as *mut u8
+        } else {
+            if want_hybrid {
+                log::warn!("render auto: hybrid shadow alloc failed, fallback direct");
+            }
+            core::ptr::null_mut()
+        };
+        // GOP 裸指针只给 BSP 调 Blt 整推用（AP 永不碰 GOP）。Screen 活到函数尾，安全。
+        let gop_ptr = &mut *self.gop as *mut GraphicsOutput;
         let mut mp_drive: Option<MpDrive> = None;
         if want_mp {
             if let Some(mp) = mp_store.as_deref() {
                 let fb_base = self.gop.frame_buffer().as_mut_ptr();
                 let fb_stride = self.gop.current_mode_info().stride() * 4;
+                // 混合模式下 AP 画影子（`fb_base` 指向影子槽），BSP 每轮 Blt 整推；
+                // 直写时沿用真前台，行为与旧版一致。
+                let draw_base = if cal_sh.is_null() { fb_base } else { cal_sh };
                 let ctx = MpCalCtx {
                     mp,
-                    fb_base,
+                    fb_base: draw_base,
                     fb_stride,
                     src: pixels.as_ptr() as *const u8,
                     row_bytes: w * 4,
@@ -604,7 +657,7 @@ impl Screen {
                         mp_drive = Some(MpDrive {
                             n: n_cores,
                             bsp_id,
-                            fb_base,
+                            fb_base: draw_base,
                             fb_stride,
                             src: pixels.as_ptr() as *const u8,
                             row_bytes: w * 4,
@@ -620,6 +673,11 @@ impl Screen {
                     tiles_total: h.div_ceil(config::tune_tile_rows().max(1) as usize),
                             times: cal_times.as_ptr(),
                             bounds: cal_bounds.as_ptr(),
+                            sh_base: cal_sh,
+                            real_fb: fb_base,
+                            gop: gop_ptr,
+                            blt_push: !cal_sh.is_null(),
+                            push_warned: false,
                             next: 0,
                             tps,
                         });
@@ -634,8 +692,9 @@ impl Screen {
             }
         }
 
-        // 各热身一次（单核路；多核路热身在会话计时里做）。
-        let _ = self.upload_direct(w, h, &pixels);
+        // 各热身一次（单核路走生效路径，缓冲时含整推，与播放同路；
+        // 多核路热身在会话计时里做）。
+        let _ = self.upload_frame(w, h, &pixels);
         let _ = self.upload_blt(w, h, &pixels);
 
         // ---- 轮转交替计时：每轮各跑一次，累加 ticks ----
@@ -678,10 +737,31 @@ impl Screen {
                 time_dynamic = false;
             }
         }
+        // Blt 引擎对照操作：所选 op 单发计时出数（供机型对比）。
+        // 只有 BufferToVideo 能上屏播视频，其余只出数、不参选（见 player.md）；
+        // 选中 B2V 时本格与 blt present 格同一操作，不重复测。
+        let sel_op = config::blt_op();
+        let mut acc_op = 0u64;
+        let time_op = time_blt && sel_op != BltOpKind::BufferToVideo;
+        if time_op {
+            let _ = self.blt_op_once(sel_op, w, h, &mut pixels);
+            for _ in 0..frames {
+                let t = tsc();
+                let ok = self.blt_op_once(sel_op, w, h, &mut pixels).is_ok();
+                let dt = tsc().saturating_sub(t);
+                if ok {
+                    acc_op += dt;
+                } else {
+                    acc_op = 0;
+                    break;
+                }
+            }
+        }
         for _ in 0..frames {
             if time_direct {
                 let t = tsc();
-                let _ = self.upload_direct(w, h, &pixels);
+                // 单核路走生效路径（含缓冲整推，与播放同路，冠军可比）。
+                let _ = self.upload_frame(w, h, &pixels);
                 acc_direct += tsc().saturating_sub(t);
             }
             if time_static {
@@ -859,7 +939,8 @@ impl Screen {
                     } else if use_mp {
                         frame_over = !mp_drive.as_mut().expect("mp drive").run_round();
                     } else {
-                        let _ = self.upload_direct(w, h, &pixels);
+                        // 单核冠军走生效路径（含缓冲整推，与播放同路）。
+                        let _ = self.upload_frame(w, h, &pixels);
                     }
                     if !frame_over && tsc().saturating_sub(fstart) > budget {
                         frame_over = true;
@@ -930,7 +1011,7 @@ impl Screen {
             }
         };
         log::info!(
-            "render auto: direct_bsp {} ticks vs mp_static {} vs mp_tile {} vs mp_dynamic {} vs blt {} ({} frames, {} cores) -> render={:?} workers={:?} dist={:?} vsync={:?} (overruns {}/{})",
+            "render auto: direct_bsp {} ticks vs mp_static {} vs mp_tile {} vs mp_dynamic {} vs blt {} vs blt_op({:?}) {} ({} frames, {} cores, hybrid={}) -> render={:?} workers={:?} dist={:?} vsync={:?} (overruns {}/{})",
             if time_direct {
                 acc_direct.to_string()
             } else {
@@ -940,8 +1021,11 @@ impl Screen {
             cell_str(time_tile, acc_tile),
             cell_str(time_dynamic, acc_dynamic),
             cell_str(time_blt, acc_blt),
+            sel_op,
+            cell_str(time_op, acc_op),
             frames,
             n_cores,
+            !cal_sh.is_null(),
             winner_render,
             winner_workers,
             winner_dist,
@@ -1082,7 +1166,8 @@ extern "efiapi" fn ap_cal_copy(arg: *mut c_void) {
     }
 }
 
-/// BSP 侧驱动器：发轮次号 → 拷自己份（分区/领活/加权边界）→ 等 AP 打卡齐（单轮 5 秒熔断）。
+/// BSP 侧驱动器：发轮次号 → 拷自己份（分区/领活/加权边界，影子时代画影子）→
+/// 等 AP 打卡齐（单轮 5 秒熔断）→ 混合整推（见 `maybe_push`）。
 struct MpDrive<'a> {
     n: usize,
     bsp_id: usize,
@@ -1102,6 +1187,15 @@ struct MpDrive<'a> {
     tiles_total: usize,
     times: *const AtomicUsize,
     bounds: *const AtomicUsize,
+    /// 混合整推三件套（`buffers>0` 时启用）：`sh_base` 为影子槽（AP/BSP 画影子，
+    /// 此时 `fb_base` 同样指向影子）；`real_fb` 为真前台；`gop` 裸指针只给 BSP
+    /// 调 Blt 用（AP 永不碰 GOP：独占协议 + 固件 Blt 非线程安全）。
+    /// 直写时 `sh_base` 为空，行为与旧版一致。
+    sh_base: *mut u8,
+    real_fb: *mut u8,
+    gop: *mut GraphicsOutput,
+    blt_push: bool,
+    push_warned: bool,
     next: usize,
     tps: u64,
 }
@@ -1159,10 +1253,14 @@ impl MpDrive<'_> {
                 dy1,
             )
         };
-        self.wait_done(r)
+        if !self.wait_done(r) {
+            return false;
+        }
+        self.maybe_push()
     }
 
-    /// 跑一轮静态分区，返回是否全员跟上（false = 熔断，调用方作废 MP 双 cell）。
+    /// 跑一轮静态分区，返回是否全员跟上（false = 熔断，调用方作废 MP cell）。
+    /// 混合模式下拷的是影子（`fb_base` 建会话时已指向影子），随后 BSP 整推。
     fn run_round(&mut self) -> bool {
         self.next += 1;
         let r = self.next;
@@ -1178,7 +1276,10 @@ impl MpDrive<'_> {
                 self.bsp_y1,
             )
         };
-        self.wait_done(r)
+        if !self.wait_done(r) {
+            return false;
+        }
+        self.maybe_push()
     }
 
     /// 跑一轮 tile 自调度（游标按轮次编址 `[r*N, (r+1)*N)`，BSP 也领活）。
@@ -1208,7 +1309,47 @@ impl MpDrive<'_> {
                 )
             };
         }
-        self.wait_done(r)
+        if !self.wait_done(r) {
+            return false;
+        }
+        self.maybe_push()
+    }
+
+    /// 混合整推（BSP 独推）：Blt 引擎 `BufferToVideo` 影子→前台（一槽整屏）。
+    /// AP 不碰 GOP。引擎失败退回 CPU 整推（同字节，只多一次搬运），计时照收，
+    /// 只记一次 warning（bench 照跑，不断矩阵）。
+    fn maybe_push(&mut self) -> bool {
+        if !self.blt_push {
+            return true;
+        }
+        let px = self.height.saturating_mul(self.fb_stride);
+        let ok = unsafe {
+            let buf = core::slice::from_raw_parts(self.fb_base as *const BltPixel, px);
+            (*self.gop)
+                .blt(BltOp::BufferToVideo {
+                    buffer: buf,
+                    src: BltRegion::Full,
+                    dest: (0, 0),
+                    dims: (self.fb_stride, self.height),
+                })
+                .is_ok()
+        };
+        if ok {
+            return true;
+        }
+        if !self.push_warned {
+            self.push_warned = true;
+            log::warn!("render auto: hybrid Blt push failed, CPU fallback");
+        }
+        unsafe {
+            copy_block(
+                self.real_fb,
+                self.fb_base,
+                self.height.saturating_mul(self.fb_stride) * 4,
+                config::copy_width(),
+            )
+        };
+        true
     }
 
     /// 等本轮 AP 打卡齐（5 秒熔断）。

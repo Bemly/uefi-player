@@ -6,7 +6,7 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 use core::time::Duration;
 use uefi::boot::{create_event, get_handle_for_protocol, open_protocol_exclusive, set_watchdog_timer, EventType, Tpl};
 use uefi::{boot, cstr16, CStr16, Status};
-use uefi::proto::console::gop::BltPixel;
+use uefi::proto::console::gop::{BltOp, BltPixel, BltRegion, GraphicsOutput};
 use uefi::proto::media::file::{File, FileInfo, RegularFile};
 use uefi::proto::pi::mp::MpServices;
 use crate::config::{self, CopyWidth, DistMode};
@@ -405,6 +405,9 @@ struct PlayTask<'a> {
     sh_h: usize,
     /// 影子整推发布世代（BSP 推完 bump；AP 下轮开工前等它，N==1 也无竞态）。
     push_gen: *const AtomicUsize,
+    /// GOP 裸指针（只给 BSP 调 Blt 整推用；AP 永不碰 GOP）。
+    /// `mp_draw` 帧内不返回，Screen 活着，安全。
+    gop: *mut GraphicsOutput,
     /// P3 掉帧指令（BSP 独写、AP 只读；`drop_gen` 是世代号，见循环注释）。
     drop_gen: &'a AtomicUsize,
     drop_flag: &'a AtomicUsize,
@@ -471,6 +474,8 @@ extern "efiapi" fn play_task(arg: *mut c_void) {
     let mut local_bgen = usize::MAX;
     // 影子整推发布世代（首轮无 push 可等，0 即就绪）。
     let mut local_push = 0usize;
+    // 混合 Blt 整推失败只记一次 warning（随后轮次静默走 CPU 回退）。
+    let mut push_blt_warned = false;
     let (mut dy0, mut dy1) = (OSD_ROWS, ctx.height);
     let mut avg: Vec<u64> = if dynamic && my_id == 0 {
         vec![0u64; n_cores.max(1)]
@@ -739,12 +744,32 @@ extern "efiapi" fn play_task(arg: *mut c_void) {
 
             start_ticks = end_ticks;
         }
-
         // 3.4 影子整推（BSP 独推）：栅栏后全核画完，BSP 把本轮槽整推前台并
         // 发布世代；AP 下轮开工前等它（N==1 也无竞态）。直写路（sh_n==0）跳过。
+        // 混合路用 Blt 引擎整推（与矩阵 hybrid cell 同路径）；引擎失败退回
+        // CPU 整推（同字节），只记一次 warning。
         if ctx.sh_n > 0 {
             if my_id == 0 {
-                unsafe { copy_block(ctx.fb_base, sh_slot, ctx.sh_h * ctx.sh_row, copy_w) };
+                let px = ctx.sh_h.saturating_mul(ctx.sh_row) / 4;
+                let slot = unsafe { *ctx.sh_slots.add(iter % ctx.sh_n) };
+                let ok = unsafe {
+                    let buf = core::slice::from_raw_parts(slot as *const BltPixel, px);
+                    (*ctx.gop)
+                        .blt(BltOp::BufferToVideo {
+                            buffer: buf,
+                            src: BltRegion::Full,
+                            dest: (0, 0),
+                            dims: (ctx.sh_row / 4, ctx.sh_h),
+                        })
+                        .is_ok()
+                };
+                if !ok {
+                    if !push_blt_warned {
+                        push_blt_warned = true;
+                        log::warn!("play: hybrid Blt push failed, CPU fallback");
+                    }
+                    unsafe { copy_block(ctx.fb_base, slot, ctx.sh_h * ctx.sh_row, copy_w) };
+                }
                 local_push = local_push.wrapping_add(1);
                 unsafe { (*ctx.push_gen).store(local_push, Ordering::SeqCst) };
             }
@@ -752,7 +777,6 @@ extern "efiapi" fn play_task(arg: *mut c_void) {
                 core::hint::spin_loop();
             }
         }
-
         // 3.5 限速 + 下轮掉帧指令发布：栅栏刚对齐过，各核按同一预算自旋。
         // BSP 判迟（本轮耗时超 2 倍预算 → 下轮丢 1 帧追赶），独写发布；
         // AP 只等 gen 可见。BSP 不等（自己刚发布），AP 等（发布必达，无死锁：
@@ -997,6 +1021,9 @@ pub fn mp_draw(
     let (scr_width, scr_height) = screen.get_gop().current_mode_info().resolution();
     let scr_stride = screen.get_gop().current_mode_info().stride();
     let fb_base = screen.get_gop().frame_buffer().as_mut_ptr();
+    // GOP 裸指针只给 BSP 调 Blt 整推用（AP 永不碰 GOP）。
+    // `mp_draw` 帧内不返回（`play_task` 死循环），Screen 活着，安全。
+    let gop_ptr = &mut **screen.get_gop() as *mut GraphicsOutput;
 
     let sync_counter = Box::leak(Box::new(AtomicUsize::new(0)));
     // P3 掉帧世代：gen 预置 0（首轮即就绪），flag 预置 0（不丢）。
@@ -1029,7 +1056,10 @@ pub fn mp_draw(
             ok = ok && ring.len() == sh_n;
         }
         if !ok {
-            log::warn!("video: shadow ring alloc failed ({} bufs), fallback direct", sh_n);
+            log::warn!(
+                "video: shadow ring alloc failed ({} bufs), fallback direct",
+                sh_n
+            );
             sh_n = 0;
             (core::ptr::null(), 0, 0)
         } else {
@@ -1074,6 +1104,7 @@ pub fn mp_draw(
         sh_row,
         sh_h,
         push_gen,
+        gop: gop_ptr,
     }));
 
     let arg_ptr = ctx as *mut _ as *mut c_void;

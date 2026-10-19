@@ -17,6 +17,8 @@ workers = "auto"        # auto | bsp_only | all（只对 direct 有效；Blt 恒
 dist    = "auto"        # auto | static | tile | dynamic（多核分工；只对 direct+all 有效）
 vsync   = "auto"        # auto | static | half | off（软件帧预算；旧 "on" 按 static 照读）
 blt_op  = "buffer_to_video"  # buffer_to_video | video_to_video | video_fill | video_to_blt_buffer
+# 只有 buffer_to_video 能上屏播视频（单发整推 + 混合整推都用它）；
+# 其余三项只在矩阵里单发出数（引擎能力对照，不参选），Blt 不在测时跳过。
 # 首启校准记忆（固件回写，GUI 只读展示；"auto"/0 = 未测，下次启动必测）：
 measured_render  = "auto"  # "direct" | "blt"
 measured_workers = "auto"  # "bsp_only" | "all"
@@ -29,7 +31,7 @@ measured_cores   = 0       # 校准时机型 AP+BSP 总数
 frames    = 30          # 每次矩阵/微基准的帧数（>=1，GUI 1-120）
 tile_rows = 64          # tile 高（行），MP 自调度切块粒度（8-512）
 vsync_fps = 60          # vsync 预算帧率：static 的封顶 + auto 探测达标线（15-240）
-buffers   = 0           # 后缓冲帧数（0-16；0 = 直写前台，>0 = 影子环 + 整推）
+buffers   = 0           # 后缓冲帧数（0-16；0 = 直写前台，>0 = 影子环 + 整推；Blt 单发路不用）
 
 [play]
 fps = "auto"            # auto | max | 1..240
@@ -57,4 +59,7 @@ preload = 8             # 预载帧数上限（1-32；1080p BGRA 单帧约 8MB�
 - `vsync=static`：不探测，直接按 `tune.vsync_fps` 滑杆值封顶。
 - `vsync=half`：开机实测冠军路最高帧率，取半稳定跑并回写 `measured_vsync_fps`；
   下次启动有记忆直接复用。
+- `buffers>0` 时 direct 全核 cell 跑混合形态（多核画影子 + BSP 单发 Blt 整推，
+  AP 永不碰 GOP；单核路走影子 + CPU 整推；Blt 单发路不变）。
+  所选 `blt_op` 若非 `buffer_to_video`，矩阵里单发出数（引擎能力对照，不参选）。
 - `accel.level=auto`：探最高可用位宽；显式档位只管上限语义，实际搬运走位宽。
