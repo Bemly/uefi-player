@@ -16,7 +16,7 @@ macOS 用 `hdiutil`（已验证），Linux 走 `mtools`（未在本机验证，�
 ## 用法（与 config-gui 同式：显式 host target，根 `.cargo/config` 把默认钉死了）
 
 ```bash
-# 全量（先编固件 debug，再逐 case 跑；慢 case 默认跳过）
+# 全量（先编固件 debug，逐 case 跑；慢 case 默认跳过）
 cargo run --manifest-path tools/qemu-matrix/Cargo.toml --target "$(rustc -vV | sed -n 's/^host: //p')"
 
 # 只看列表 / 只跑一个 / 含慢 case / 留盘排查
@@ -24,7 +24,25 @@ cargo run --manifest-path tools/qemu-matrix/Cargo.toml --target "$(rustc -vV | s
 cargo run --manifest-path tools/qemu-matrix/Cargo.toml --target "$(rustc -vV | sed -n 's/^host: //p')" -- --case menu-smoke
 cargo run --manifest-path tools/qemu-matrix/Cargo.toml --target "$(rustc -vV | sed -n 's/^host: //p')" -- --include-slow
 cargo run --manifest-path tools/qemu-matrix/Cargo.toml --target "$(rustc -vV | sed -n 's/^host: //p')" -- --case video-mp --keep
+
+# 固件双轨：默认 brew 瓶 DEBUG OVMF（带 ASSERT，门禁口径）；
+# --ovmf-set release 全切 RELEASE（`assets/ovmf-release-x86_64-code.fd`），
+# --ovmf-set both 双轨全跑（`-release` 后缀，比视频性能用它）。
+# 单 case 也可在 matrix.toml 里钉 `ovmf = "release"`。
+cargo run --manifest-path tools/qemu-matrix/Cargo.toml --target "$(rustc -vV | sed -n 's/^host: //p')" -- --ovmf-set both --case video-mp
 ```
+
+## 固件来源（轮子结论：不自编 edk2，直接用现成二进制）
+
+- DEBUG：brew 瓶自带 `/usr/local/share/qemu/edk2-x86_64-code.fd`
+  （Gerd Hoffmann 构建，`DEBUG_GCC5`，3.5MB；ASSERT 全开，门禁默认）。
+- RELEASE：`assets/ovmf-release-x86_64-code.fd`（1.9MB，
+  osdev0/edk2-ovmf-nightly `20261019T035340Z`，上游 edk2 `c1415771`，
+  `build -b RELEASE`；无 ASSERT、启动更快）。
+  二进制重 1.9MB，随仓库入库（video.qois 同先例）；edk2 许可证见上游
+  `edk2-licenses.txt`（BSD 家族），与 brew 瓶同性质。
+- 该换 release 跑全量上游直调（如 `actions::chainload` 的 `resolve_path`）
+  时，先重跑 `--ovmf-set both` 全绿再谈（见 `docs/bootloader.md` 复用地图）。
 
 产物在 `tools/qemu-matrix/runs/<case>/`（串口全文 + verdict，默认清掉重跑；
 `--keep` 留盘排查；已进 `.gitignore`，不入库）。

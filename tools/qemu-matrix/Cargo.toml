@@ -13,6 +13,9 @@ description = "QEMU 黑盒矩阵 runner（host 工具，与 UEFI 固件包独立
 #   发 monitor 按键，std 足够（subprocess/socket/fs），故零新依赖。
 # - 系统工具（qemu-system-x86_64 / OVMF / hdiutil+newfs_msdos / mtools）只当子进程
 #   调，不写测试逻辑（AGENTS 有令：测试必须 100% Rust）。
+# - OVMF 双轨：DEBUG 用 brew 瓶（ASSERT 抓 bug，门禁默认）；RELEASE 用
+#   assets/ovmf-release-x86_64-code.fd（osdev0 nightly 20261019，build -b RELEASE，
+#   无 ASSERT，比性能用；二进制入库，来源见 README）。
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 toml = "1"

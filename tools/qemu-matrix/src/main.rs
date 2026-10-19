@@ -61,6 +61,11 @@ struct Case {
     slow: bool,
     soak_sec: Option<u64>,
     artifact: Option<Artifact>,
+    /// 本 case 的固件：缺省跟全局/命令行；"debug" = brew 瓶里的 DEBUG OVMF
+    ///（带 ASSERT，抓固件 bug），"release" = 自带 nightly RELEASE
+    ///（`assets/ovmf-release-x86_64-code.fd`，无 ASSERT、更快，适合比性能），
+    /// 其它值按路径原样用。命令行 `--ovmf/--ovmf-set` 优先于此。
+    ovmf: Option<String>,
     /// 附加卷（第二盘及以后）：多卷自动发现的测试夹具，按顺序挂 hd2、hd3…。
     #[serde(default)]
     extra_volumes: Vec<ExtraVolume>,
@@ -145,6 +150,9 @@ struct Args {
     keep: bool,
     no_build: bool,
     ovmf: Option<String>,
+    /// 全局固件档：debug（默认，沿用全局/单 case 设置）、release（全用 RELEASE 跑一遍）、
+    /// both（每个 case 跑两遍，第二遍挂 `-release` 后缀；与 `--ovmf` 同给时以它为准）。
+    ovmf_set: Option<String>,
 }
 
 fn parse_args() -> Args {
@@ -158,6 +166,7 @@ fn parse_args() -> Args {
             "--no-build" => a.no_build = true,
             "--case" => a.case = it.next(),
             "--ovmf" => a.ovmf = it.next(),
+            "--ovmf-set" => a.ovmf_set = it.next(),
             other => {
                 eprintln!("unknown arg: {other}");
                 std::process::exit(2);
@@ -471,9 +480,27 @@ fn build_efi(force: bool) -> Result<String, String> {
     Ok(format!("{ROOT}/target/x86_64-unknown-uefi/debug/uefi-player.efi"))
 }
 
-fn run_case(case: &Case, glob: &Global, efi: &str, keep: bool, ovmf_default: &str) -> (bool, String) {
-    println!("=== case {} ===", case.name);
-    let rundir = format!("{TOOL_DIR}/runs/{}", case.name);
+/// 固件路径解析："debug" = 全局默认（brew 瓶 DEBUG OVMF，`matrix.toml [global] ovmf`
+/// 可改），"release" = 自带 nightly RELEASE（`assets/` 下，无 ASSERT），其它按路径原样用。
+fn resolve_ovmf(req: Option<&str>, debug_default: &str) -> String {
+    match req {
+        None | Some("debug") => debug_default.into(),
+        Some("release") => format!("{TOOL_DIR}/assets/ovmf-release-x86_64-code.fd"),
+        Some(p) => p.into(),
+    }
+}
+
+fn run_case(
+    case: &Case,
+    glob: &Global,
+    efi: &str,
+    keep: bool,
+    ovmf: &str,
+    suffix: &str,
+) -> (bool, String) {
+    let tag = format!("{}{}", case.name, suffix);
+    println!("=== case {tag} ===");
+    let rundir = format!("{TOOL_DIR}/runs/{tag}");
     if std::path::Path::new(&rundir).exists() && !keep {
         let _ = std::fs::remove_dir_all(&rundir);
     }
@@ -556,8 +583,7 @@ fn run_case(case: &Case, glob: &Global, efi: &str, keep: bool, ovmf_default: &st
     }
 
     // 2. 起 QEMU。
-    let port: u16 = 44000 + (case.name.bytes().fold(0u32, |a, b| a.wrapping_add(b as u32)) % 1000) as u16;
-    let ovmf = glob.ovmf.clone().unwrap_or_else(|| ovmf_default.into());
+    let port: u16 = 44000 + (tag.bytes().fold(0u32, |a, b| a.wrapping_add(b as u32)) % 1000) as u16;
     let mut cmd = vec![
         qemu_bin().unwrap_or_else(|e| {
             println!("{e}");
@@ -735,13 +761,41 @@ fn main() {
         eprintln!("efi missing: {efi}");
         std::process::exit(1);
     }
-    let ovmf_default = "/usr/local/share/qemu/edk2-x86_64-code.fd".to_string();
-    let ovmf_default = args.ovmf.as_deref().unwrap_or(&ovmf_default);
+    let debug_default = "/usr/local/share/qemu/edk2-x86_64-code.fd";
+    // 固件档：--ovmf-set both = 每个 case 跑两遍（debug 原样 + release 挂 -release 后缀）；
+    // release = 全用 RELEASE 跑一遍；缺省单跑：命令行 --ovmf > case.ovmf > 全局 ovmf > 内建 debug。
+    let set_mode = args.ovmf_set.as_deref().unwrap_or("debug");
+    if !["debug", "release", "both"].contains(&set_mode) {
+        eprintln!("unknown --ovmf-set {set_mode:?} (want debug|release|both)");
+        std::process::exit(2);
+    }
 
     let mut results = Vec::new();
     for c in cases {
-        let (ok, detail) = run_case(c, &matrix.global, &efi, args.keep, ovmf_default);
-        results.push((c.name.clone(), ok, detail));
+        let passes: Vec<(String, String)> = match set_mode {
+            "both" => vec![
+                (resolve_ovmf(Some("debug"), debug_default), String::new()),
+                (
+                    resolve_ovmf(Some("release"), debug_default),
+                    "-release".to_string(),
+                ),
+            ],
+            "release" => vec![(resolve_ovmf(Some("release"), debug_default), String::new())],
+            _ => vec![(
+                resolve_ovmf(
+                    args.ovmf
+                        .as_deref()
+                        .or(c.ovmf.as_deref())
+                        .or(matrix.global.ovmf.as_deref()),
+                    debug_default,
+                ),
+                String::new(),
+            )],
+        };
+        for (ovmf, suffix) in &passes {
+            let (ok, detail) = run_case(c, &matrix.global, &efi, args.keep, ovmf, suffix);
+            results.push((format!("{}{}", c.name, suffix), ok, detail));
+        }
     }
 
     println!("\n==== matrix ====");
