@@ -53,6 +53,10 @@ pub struct BootEntry {
     pub file_name: String,
     pub kind: BootKind,
     pub tries_left: Option<u32>,
+    /// BLS 排序键（`sort-key` 字段；自动发现项填对应值，无则 None）。
+    pub sort_key: Option<String>,
+    /// BLS 版本号（`version` 字段；新版排前，见 `sort_boot_group`）。
+    pub version: Option<String>,
 }
 
 pub struct BootList {
@@ -99,6 +103,8 @@ fn parse_entry(
         .filter(|t| !t.is_empty())
         .unwrap_or_else(|| String::from(id));
     let options = edera_sprout_parsing::empty_is_none(parsed.options.clone());
+    let sort_key = parsed.sort_key.clone();
+    let version = parsed.version.clone();
     if let Some(efi) = parsed.efi.clone().or_else(|| parsed.uki.clone()) {
         Ok(BootEntry {
             title,
@@ -109,6 +115,8 @@ fn parse_entry(
                 volume,
             },
             tries_left: counter.map(|c| c.tries_left),
+            sort_key,
+            version,
         })
     } else if let Some(kernel) = parsed.linux.clone() {
         Ok(BootEntry {
@@ -122,10 +130,31 @@ fn parse_entry(
                 volume,
             },
             tries_left: counter.map(|c| c.tries_left),
+            sort_key,
+            version,
         })
     } else {
         Err(format!("{}: no efi/uki/linux image, skipped", name))
     }
+}
+
+/// BLS 组内排序（上游 `sort_bls` 同规则，减 machine-id 一项）。
+/// 有 sort_key 的排前面（字典序），都没有的不动（稳定排序保发现顺序）；
+/// 都有则版本号大的在前（`compare_versions` 现货，`10.0` > `2.0` 是数值比）。
+/// 上游另按 machine-id 再排一次：同机启动该值恒等，省了；
+/// profile 顺序靠稳定排序自然保留（同文件 profile 相邻且等价）。
+/// 调用方：同卷 BLS 全量 + UKI 全量拼完调一次（跨卷不混排，卷顺序优先）。
+pub fn sort_boot_group(es: &mut [BootEntry]) {
+    use core::cmp::Ordering;
+    use edera_sprout_bls::compare_versions_optional;
+    es.sort_by(|a, b| match (&a.sort_key, &b.sort_key) {
+        (Some(x), Some(y)) => x.cmp(y).then_with(|| {
+            compare_versions_optional(a.version.as_deref(), b.version.as_deref()).reverse()
+        }),
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (None, None) => Ordering::Equal,
+    });
 }
 
 /// 枚举给定卷 `\loader\entries\*.conf`（`volume` 为条目打卷标，

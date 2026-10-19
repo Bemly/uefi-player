@@ -24,11 +24,15 @@
   用既有原语拼；失败只记 warning，不挡启动）。
 - `detect.rs`：多卷自动发现（读 sprout `boot/autoconfigure` 学的，自研）。
   `find_handles::<SimpleFileSystem>` 逐卷扫：本卷 BLS 除外（`entries.rs` 已列，
-  默认项只看本卷），其它卷 BLS 全列；全卷 UKI（`EFI/Linux/*.efi`，标题取文件名，
-  不解析 `.uname` 区）/ Linux 内核对（`\boot` + `\`，前缀配对 + initramfs 拼接，
+  默认项只看本卷），其它卷 BLS 全列；全卷 UKI（`EFI/Linux/*.efi`，
+  读 `.osrel/.cmdline/.uname/.profile` 建条目，一 profile 一项，
+  标题/版本/sort-key 走上游 `from_uki_profile_with`，读不到用文件名）/
+  Linux 内核对（`\boot` + `\`，前缀配对 + initramfs 拼接，有 BLS/UKI 的卷跳过，
   `parsing` 轮子）/ Windows（`bootmgfw.efi` 存在即链）/ UEFI Shell
   （`shellx64.efi` 三个候选位，systemd-boot 式，上游没有）。
   失败卷只记 warning，不挡其它卷；标题撞车挂 ` (2)` 后缀（本卷占原名）。
+  同卷 BLS+UKI 按上游规则排序（sort_key 字典序 + 版本新者在前，跨卷不混排）。
+  `strict=true` 时 BLS 只认本卷 + XBOOTLDR 卷（`eficore::xbootldr` 定位）。
 - `chainload.rs`：序列照抄上游，路径解析自研——
   BLS 的 `efi` 路径是 `/` 分隔（systemd 风格），入口先转 `\` 再用
   （UEFI 文件 API 与 FilePath 节点都要反斜杠，不转直接 `INVALID_PARAMETER`，

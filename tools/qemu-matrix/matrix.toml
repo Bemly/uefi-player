@@ -301,6 +301,98 @@ keys = [
 ]
 expect = ["boot: starting image", { pat = "cfg: version=1", count = 2 }, { pat = "menu: ready", count = 2 }]
 
+# BLS 组内排序：同 sort-key 下版本号大的在前（10.0 > 2.0 是数值比，不是字典序）。
+# 目录顺序是反的（aaa 在前），排完 [0] 必须是 New。
+[[case]]
+name = "boot-sort"
+timeout_sec = 180
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+workers = "bsp_only"
+dist = "static"
+vsync = "off"
+[play]
+fps = "max"
+[wallpaper]
+enable = false
+"""
+boot_expect = ["cfg: version=1", "menu: ready"]
+keys = [{ send = "b", wait_after = 3 }]
+expect = ["boot: 2 entries", "boot: [0] New", "boot: [1] Old"]
+
+[[case.extra_volumes]]
+  [[case.extra_volumes.files]]
+  path = "loader/entries/aaa.conf"
+  text = "title Old\nsort-key k\nversion 1.0\nefi /EFI/other/app.efi\n"
+  [[case.extra_volumes.files]]
+  path = "loader/entries/zzz.conf"
+  text = "title New\nsort-key k\nversion 2.0\nefi /EFI/other/app.efi\n"
+  [[case.extra_volumes.files]]
+  path = "EFI/other/app.efi"
+  efi = true
+
+# UKI 回退标题：test.efi 无 .uname 区，标题取文件名，照样 chainload（count x2）。
+[[case]]
+name = "boot-uki"
+timeout_sec = 300
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+workers = "bsp_only"
+dist = "static"
+vsync = "off"
+[play]
+fps = "max"
+[wallpaper]
+enable = false
+"""
+boot_expect = ["cfg: version=1", "menu: ready"]
+keys = [
+  { send = "b", wait_after = 2 },
+  { send = "0", wait_for = ["boot: 1 entries"], wait_after = 5 },
+]
+expect = ["boot: [0] test", "boot: starting image", { pat = "cfg: version=1", count = 2 }, { pat = "menu: ready", count = 2 }]
+
+[[case.extra_volumes]]
+  [[case.extra_volumes.files]]
+  path = "EFI/Linux/test.efi"
+  efi = true
+
+# UKI 多 profile：合成 UKI（2 个 profile），只验列出 + 标题区分，不真起。
+# 上游 version-sort：新版本在前（third-kernel > second-kernel），故 [0] 是 Second。
+[[case]]
+name = "boot-uki-profiles"
+timeout_sec = 180
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+workers = "bsp_only"
+dist = "static"
+vsync = "off"
+[play]
+fps = "max"
+[wallpaper]
+enable = false
+"""
+boot_expect = ["cfg: version=1", "menu: ready"]
+keys = [{ send = "b", wait_after = 3 }]
+expect = ["boot: 2 entries", "boot: [0] testos (Second)", "boot: [1] testos (First)"]
+
+[[case.extra_volumes]]
+  [[case.extra_volumes.files]]
+  path = "EFI/Linux/multi.efi"
+  asset = "tools/qemu-matrix/assets/multi-profile.efi"
+
 # 慢：HW bench 落盘工件（默认跳过，--include-slow 才跑）。
 [[case]]
 name = "hwbench-artifact"

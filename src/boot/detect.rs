@@ -18,7 +18,7 @@
 
 use alloc::collections::BTreeSet;
 use alloc::format;
-use alloc::string::{String, ToString};
+use alloc::string::String;
 use alloc::vec::Vec;
 use uefi::Handle;
 use uefi::proto::loaded_image::LoadedImage;
@@ -82,25 +82,18 @@ fn dir_files(fs: &mut Fs, dir: &str) -> Vec<String> {
     }
 }
 
-/// UKI 项命名：`Skip(msg)` 跳过（非 PE/错架构，坏项不上菜单）；
-/// `Title(t)` 直接用（无 `.uname` 区时 t 即文件名，照样能起）。
-enum UkiName {
-    Skip(String),
-    Title(String),
-}
-
-fn uki_name(fs: &mut Fs, path: &str, stem: &str) -> UkiName {
-    match read_uki_inner(fs, path) {
-        Ok(Some(t)) => UkiName::Title(t),
-        Ok(None) => UkiName::Title(String::from(stem)),
-        Err(e) => UkiName::Skip(format!("{:#}", e)),
-    }
-}
-
-/// 读 `.uname` 区 + 机器字长。`Ok(None)` = 有效 PE 但无名（回退文件名）；
-/// `Err` = 坏项（非 PE/错架构/读失败），调用方跳过。
-fn read_uki_inner(fs: &mut Fs, path: &str) -> anyhow::Result<Option<String>> {
-    use edera_sprout_bls::{PE_MACHINE_X86_64, read_pe};
+/// UKI 全套 profile 读出（`.osrel/.cmdline/.uname/.profile`，上游同款
+/// `uki_profiles`），一 profile 一条目，标题/版本/sort-key 走上游同款
+/// `BlsEntry::from_uki_profile_with`（strict 差异一并继承）。
+/// 错架构/坏文件整文件跳过并说明原因；单 profile 无题时回退文件名。
+fn uki_entries(
+    fs: &mut Fs,
+    path: &str,
+    file_name: &str,
+    volume: Option<Handle>,
+    strict: bool,
+) -> Result<Vec<BootEntry>, String> {
+    use edera_sprout_bls::{PE_MACHINE_X86_64, UKI_SECTIONS, read_pe, uki_profiles};
 
     struct Reader {
         file: uefi::proto::media::file::RegularFile,
@@ -125,24 +118,40 @@ fn read_uki_inner(fs: &mut Fs, path: &str) -> anyhow::Result<Option<String>> {
         }
     }
 
-    let cstr =
-        uefi::data_types::CString16::try_from(path).map_err(|_| anyhow::anyhow!("bad path"))?;
+    let cstr = uefi::data_types::CString16::try_from(path).map_err(|_| String::from("bad path"))?;
     let file = fs
         .open_file(&cstr)
-        .map_err(|e| anyhow::anyhow!("unable to open: {:?}", e))?;
+        .map_err(|e| format!("unable to open: {:?}", e))?;
     let mut reader = Reader { file };
-    let pe = read_pe(&mut reader, &[".uname"])?;
+    let pe = read_pe(&mut reader, &UKI_SECTIONS).map_err(|e| format!("not a PE UKI: {:#}", e))?;
     if pe.machine != PE_MACHINE_X86_64 {
-        anyhow::bail!("wrong architecture: {:#x}", pe.machine);
+        return Err(format!("wrong architecture: {:#x}", pe.machine));
     }
-    Ok(pe
-        .sections
-        .into_iter()
-        .find(|s| s.name == ".uname")
-        .and_then(|s| s.data)
-        .and_then(|d| String::from_utf8(d).ok())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty()))
+    let stem = file_name
+        .strip_suffix(".efi")
+        .or_else(|| file_name.strip_suffix(".EFI"))
+        .unwrap_or(file_name);
+    let profiles = uki_profiles(&pe.sections);
+    if profiles.is_empty() {
+        return Err(String::from("no profiles"));
+    }
+    let mut out = Vec::new();
+    for p in &profiles {
+        let be = edera_sprout_bls::BlsEntry::from_uki_profile_with(p, path, strict);
+        out.push(BootEntry {
+            title: be.title.clone().unwrap_or_else(|| String::from(stem)),
+            file_name: String::from(file_name),
+            kind: BootKind::Efi {
+                path: String::from(path),
+                options: None,
+                volume,
+            },
+            tries_left: None,
+            sort_key: be.sort_key.clone(),
+            version: be.version.clone(),
+        });
+    }
+    Ok(out)
 }
 
 /// 单卷扫描（`volume=None` 即本卷；BLS 在本卷上跳过——`entries::enumerate`
@@ -166,52 +175,42 @@ fn scan_volume(
     let mut warnings = Vec::new();
     let mut w = |s: String| warnings.push(format!("{}: {}", vol_tag, s));
 
+    // BLS + UKI 同属“BLS 家族”，拼完一起按上游规则排序（见 sort_boot_group）。
+    let mut bls_group: Vec<BootEntry> = Vec::new();
+
     // BLS（本卷跳过，见上；strict 模式下其它卷也只认 XBOOTLDR 卷）。
-    let n_before = entries.len();
     if !is_own && (!strict || strict_bls) {
         let (mut es, mut ws) = scan_bls(fs, volume);
-        entries.append(&mut es);
+        bls_group.append(&mut es);
         for x in ws.drain(..) {
             w(x);
         }
     }
-    let bls_here = entries.len() > n_before;
+    let bls_here = !bls_group.is_empty();
 
-    // UKI：EFI/Linux/*.efi 全是可直接起的 PE。标题读 `.uname` 区，
-    // 读不到回退文件名；坏项（非 PE/错架构）跳过并 warning。
-    let mut uki_found = false;
+    // UKI：读全套 profile（`.osrel/.cmdline/.uname/.profile`，上游同款
+    // `uki_profiles`），一 profile 一条目（标题 `profile_title`，单 profile
+    // 时退化为 `.uname`/文件名）；错架构整文件跳过。
+    // BLS 条目复用同一排序组（上游 UKI 本来就是 BLS Type #2 同一队列）。
+    let n_uki_before = bls_group.len();
     if cfg_uki {
         for name in dir_files(fs, UKI_DIR) {
             if !name.to_ascii_lowercase().ends_with(".efi") {
                 continue;
             }
-            let stem = name
-                .strip_suffix(".efi")
-                .or_else(|| name.strip_suffix(".EFI"))
-                .unwrap_or(&name);
-            let full = format!("{}\\{}", UKI_DIR, name);
-            match uki_name(fs, &full, stem) {
-                UkiName::Skip(why) => w(format!("{}: skipped ({})", name, why)),
-                UkiName::Title(title) => {
-                    uki_found = true;
-                    entries.push(BootEntry {
-                        title,
-                        file_name: String::from(name.as_str()),
-                        kind: BootKind::Efi {
-                            path: full,
-                            options: None,
-                            volume,
-                        },
-                        tries_left: None,
-                    });
-                }
+            match uki_entries(fs, &format!("{}\\{}", UKI_DIR, name), &name, volume, strict) {
+                Ok(mut es) => bls_group.append(&mut es),
+                Err(why) => w(format!("{}: skipped ({})", name, why)),
             }
         }
     }
+    let uki_here = bls_group.len() > n_uki_before;
+    crate::boot::entries::sort_boot_group(&mut bls_group);
+    entries.append(&mut bls_group);
 
     // Linux 内核对：\boot + \ 扫前缀，initramfs 按后缀配对（上游同规则）。
     // 该卷已有 BLS/UKI 时跳过（上游同款去重：一个内核只留一种入口）。
-    if cfg_linux && !bls_here && !uki_found {
+    if cfg_linux && !bls_here && !uki_here {
         use edera_sprout_parsing::{
             LINUX_INITRAMFS_PREFIXES, LINUX_KERNEL_PREFIXES, initramfs_candidates,
             match_kernel_prefix,
@@ -253,6 +252,8 @@ fn scan_volume(
                         volume,
                     },
                     tries_left: None,
+                    sort_key: None,
+                    version: None,
                 });
             }
         }
@@ -271,6 +272,8 @@ fn scan_volume(
                     volume,
                 },
                 tries_left: None,
+                sort_key: None,
+                version: None,
             });
         }
     }
@@ -296,6 +299,8 @@ fn scan_volume(
                     volume,
                 },
                 tries_left: None,
+                sort_key: None,
+                version: None,
             });
         }
     }

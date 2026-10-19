@@ -119,6 +119,8 @@ struct ExtraFile {
     zeros: Option<usize>,
     #[serde(default)]
     efi: bool,
+    #[serde(default)]
+    asset: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -526,8 +528,14 @@ fn run_case(case: &Case, glob: &Global, efi: &str, keep: bool, ovmf_default: &st
                 vfiles.push((leak, t.as_bytes().to_vec()));
             } else if let Some(n) = f.zeros {
                 vfiles.push((leak, vec![0u8; n]));
+            } else if let Some(a) = &f.asset {
+                let src = format!("{ROOT}/{a}");
+                match std::fs::read(&src) {
+                    Ok(d) => vfiles.push((leak, d)),
+                    Err(_) => return (false, format!("missing asset {src}")),
+                }
             } else {
-                return (false, format!("extra volume file {} has no source", f.path));
+                return (false, format!("extra file {} has no source", f.path));
             }
         }
         if let Err(e) = make_fat_image(&vimg, 128) {

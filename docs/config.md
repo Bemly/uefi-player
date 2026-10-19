@@ -46,10 +46,11 @@ preload = 8             # 预载帧数上限（1-32；1080p BGRA 单帧约 8MB�
 
 [boot]
 auto = true             # 多卷自动发现总开关（关 = 只列本卷 BLS，老行为）
-windows = true          # 自动发现 Windows Boot Manager
-linux = true            # 自动发现 Linux 内核对（kernel + initramfs）
-shell = true            # 自动发现 UEFI Shell（shellx64.efi）
-uki = true              # 自动发现 EFI/Linux/*.efi（标题取文件名）
+windows = true          # 自动发现 Windows Boot Manager（bootmgfw.efi 存在即链）
+linux = true            # 自动发现 Linux 内核对（\boot + \ 扫 vmlinuz*/image* + initramfs 配对）
+shell = true            # 自动发现 UEFI Shell（shellx64.efi 三处候选）
+uki = true              # 自动发现 EFI/Linux/*.efi（读 .uname/.profile 建条目，读不到用文件名）
+strict = false          # 严格模式：BLS 只认本卷 + XBOOTLDR 卷（默认全卷都认）
 ```
 
 ## 生效规则速查
@@ -66,6 +67,10 @@ uki = true              # 自动发现 EFI/Linux/*.efi（标题取文件名）
 - `vsync=static`：不探测，直接按 `tune.vsync_fps` 滑杆值封顶。
 - `vsync=half`：开机实测冠军路最高帧率，取半稳定跑并回写 `measured_vsync_fps`；
   下次启动有记忆直接复用。
+- `boot.auto=false`：关闭多卷自动发现，只列本卷 BLS（老行为）。
+  打开时：逐卷 BLS（本卷除外，已列）+ 全卷 UKI/Linux/Windows/Shell；
+  同卷 BLS/UKI 按 `sort_key`、新版优先排序；`strict=true` 时 BLS 只认
+  本卷 + XBOOTLDR 卷。
 - `buffers>0` 时 direct 全核 cell 跑混合形态（多核画影子 + BSP 单发 Blt 整推，
   AP 永不碰 GOP；单核路走影子 + CPU 整推；Blt 单发路不变）。
   所选 `blt_op` 若非 `buffer_to_video`，矩阵里单发出数（引擎能力对照，不参选）。
