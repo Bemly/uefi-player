@@ -68,7 +68,7 @@ cargo run --manifest-path tools/config-gui/Cargo.toml --target "$(rustc -vV | se
 
 - 可见控件只用库内件：`Glass` / `GlassButton` / `GlassSlider` /
   `GlassToolbar` / `GlassStyle` / `LiveBackdrop` / `paint_glass`。
-  动作按钮、导航、单选开关全是 `GlassButton`（选中态描蓝 + ●，`● ○` 已打进 CJK 子集）；
+  动作按钮、导航、单选开关全是 `GlassButton`（选中态描蓝 + ●，`● ○` 全量字体自带）；
   档位这类多值开关用 `GlassSlider` 拨下标（库内滑杆只吃 `f32`，镜像字段写法见
   `tools/config-gui/src/main.rs` 的 `*_f` 字段）。
 - 禁止一切有玻璃替代品的普通控件：`Button` / `ComboBox` / `TextEdit` /
@@ -84,6 +84,10 @@ cargo run --manifest-path tools/config-gui/Cargo.toml --target "$(rustc -vV | se
   拍板结论写进文件头注释。
 - 无 GPU 兜底分支除外（玻璃管线没注册，只能用普通控件；renderer 已强制
   Wgpu，实际走不到）。
+- 字体禁止子集化（血泪：子集漏字只能事后补）：`tools/config-gui/assets/` 下
+  直接放上游原包全量文件（当前 `fusion-pixel-10px-proportional-zh_hans.ttf`
+  v2026.10.16，约 4MB），缺字加文案即可，不许 `pyftsubset` 裁剪。
+  体积换完整（host 工具，不进 UEFI 固件，无体积压力）。
 
 ## 代码约定
 
