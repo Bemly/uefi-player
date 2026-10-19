@@ -857,7 +857,6 @@ impl App {
         };
         page.painter().rect_filled(page.max_rect(), 0.0, bg);
         page.add_space(4.0);
-        page.heading(t!("app.title"));
         page.label(egui::RichText::new(t!("sum.hint")).weak().small());
         page.add_space(8.0);
         page.label(
@@ -1247,8 +1246,7 @@ impl eframe::App for App {
                 ui.add_space(8.0);
                 ui.vertical_centered(|ui| {
                     egui_glass::GlassToolbar::new(self.bar_style()).show(ui, |ui| {
-                        ui.heading(t!("app.title"));
-                        ui.add_space(6.0);
+                        // 顶栏不放标题（窗口标题栏 + 导航/文件页已有，不重复）。
                         act = self.action_buttons(ui);
                     });
                 });
@@ -1421,7 +1419,7 @@ fn main() -> eframe::Result<()> {
         ..Default::default()
     };
     eframe::run_native(
-        "player.toml editor",
+        "UEFI播放器",
         opts,
         Box::new(|cc| Ok(Box::new(App::new(cc)))),
     )

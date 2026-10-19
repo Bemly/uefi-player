@@ -1,5 +1,5 @@
 _version: 1
-app.title: "player.toml"
+app.title: "UEFI播放器"
 toolbar.open: "打开…"
 toolbar.save: "保存"
 toolbar.save_as: "另存为…"
