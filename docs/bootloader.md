@@ -93,7 +93,14 @@
   文本往返（`eficore/src/path.rs:103` 起三处 `text_to_device_path`）。
   本矩阵 OVMF（`edk2-x86_64-code.fd`，调试版）该调用必 ASSERT
   进 `CpuDeadLoop`（串口停在 `boot: resolving`，见 handover 踩坑 §3.1）。
-  调了就是 8+ 矩阵 case 全红。`chainload.rs` 头注释有完整案发记录。
+  在 debug 门禁下调了就是 8+ 矩阵 case 全红。`chainload.rs` 头注释有完整案发记录。
+- 关键反查（用户问"上游自己怎么 debug"逼出来的）：sprout 根本没有
+  DEBUG OVMF 流程——dev 用 Alpine 包的 `bios.bin`（发行版预编译二进制，
+  `hack/dev/vm/Dockerfile.ovmf`），CI（`ci-code.yml`）只做
+  fmt/build/clippy，连 QEMU 都不起。也就是说上游天天调 `resolve_path`
+  的代码，只在无 ASSERT 的 release 固件上被 exercised；咱的 brew
+  DEBUG 门禁比上游自己还严。这也是矩阵开 OVMF 双轨的原因：
+  `boot-*` 钉 release（上游实测过的环境，为切上游管线铺路），其余留 debug。
 - `autoconfigure::{windows,linux}::scan`：输出是为 `resolve_path`
   启动而建的 device-path 文本根（`<DP-text>/...`），翻译回"相对路径+卷句柄"
   的成本 ≥ 现有 50 行直读（且 Linux 结果只是 generator 声明，还要再跑

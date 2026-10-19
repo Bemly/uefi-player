@@ -9,6 +9,10 @@
 # `build -b RELEASE`，无 ASSERT、更快，适合比性能）。
 # 命令行 `--ovmf debug|release|PATH` 强制全矩阵用一种；
 # `--ovmf-set both` 每个 case 跑两遍（第二遍 `-release` 后缀，双轨全绿才算过）。
+#
+# 分轨口径：`boot-*` 全钉 `ovmf = "release"——引导 lane 用上游实测过的环境
+#（sprout 自家 dev 就是发行版 bios.bin，CI 连 QEMU 都不起，见 docs/bootloader.md），
+# 后续 `src/boot/` 切上游管线（`resolve_path` 那套）的前提；其余 case 留 debug。
 
 [global]
 smp = 4
@@ -230,6 +234,7 @@ expect = ["Total number of logic processors:", "Starting Multi-Processor", "AVX 
 # 引导子菜单：b 进 q 回，再按 7 能出数 = 没卡死在子菜单。
 [[case]]
 name = "boot-menu"
+ovmf = "release"
 timeout_sec = 180
 config = """
 version = 1
@@ -286,6 +291,7 @@ forbid = ["panicked at", "CpuDeadLoop", "menu bg skipped"]
 # 换个路径（单盘场景）；成功 = 同一串口出现第二遍 cfg + 菜单就绪（计数断言）。
 [[case]]
 name = "boot-chainload"
+ovmf = "release"
 timeout_sec = 300
 needs_chainload = true
 config = """
@@ -313,6 +319,7 @@ expect = ["boot: starting image", { pat = "cfg: version=1", count = 2 }, { pat =
 # 目录顺序是反的（aaa 在前），排完 [0] 必须是 New。
 [[case]]
 name = "boot-sort"
+ovmf = "release"
 timeout_sec = 180
 config = """
 version = 1
@@ -346,6 +353,7 @@ expect = ["boot: 2 entries", "boot: [0] New", "boot: [1] Old"]
 # UKI 回退标题：test.efi 无 .uname 区，标题取文件名，照样 chainload（count x2）。
 [[case]]
 name = "boot-uki"
+ovmf = "release"
 timeout_sec = 300
 config = """
 version = 1
@@ -377,6 +385,7 @@ expect = ["boot: [0] test", "boot: starting image", { pat = "cfg: version=1", co
 # 上游 version-sort：新版本在前（third-kernel > second-kernel），故 [0] 是 Second。
 [[case]]
 name = "boot-uki-profiles"
+ovmf = "release"
 timeout_sec = 180
 config = """
 version = 1
@@ -431,6 +440,7 @@ artifact = { glob = "HWBENCH*.TXT", contains = ["ticks"] }
 # 按 0 直接交权，第二遍 cfg + 菜单证明跨盘 DevicePath + 跨盘读都通了。
 [[case]]
 name = "boot-windows-crossvol"
+ovmf = "release"
 timeout_sec = 300
 config = """
 version = 1
@@ -461,6 +471,7 @@ expect = ["boot: starting image", { pat = "cfg: version=1", count = 2 }, { pat =
 # 第二卷 BLS：other.conf 指第二卷自己的 app.efi，跨盘 chainload。
 [[case]]
 name = "boot-bls-secondvol"
+ovmf = "release"
 timeout_sec = 300
 config = """
 version = 1
@@ -495,6 +506,7 @@ expect = ["boot: starting image", { pat = "cfg: version=1", count = 2 }, { pat =
 #（假内核不是有效 PE，起了也是 INVALID_IMAGE，不浪费时间）。
 [[case]]
 name = "boot-linux-detect"
+ovmf = "release"
 timeout_sec = 180
 config = """
 version = 1
@@ -525,6 +537,7 @@ expect = ["boot: 1 entries", "vmlinuz-test", "<linux>"]
 # UEFI Shell 发现 + chainload（shellx64.efi 就是我们的 efi，起了算数）。
 [[case]]
 name = "boot-shell"
+ovmf = "release"
 timeout_sec = 300
 config = """
 version = 1
@@ -557,6 +570,7 @@ expect = ["boot: starting image", { pat = "cfg: version=1", count = 2 }, { pat =
 # 不扫通用 BOOTX64.EFI（那可能是我们自己，会自举死循环），只认固定路径。
 [[case]]
 name = "boot-macos"
+ovmf = "release"
 timeout_sec = 300
 config = """
 version = 1
@@ -590,6 +604,7 @@ expect = ["boot: [0] OpenCore <efi>", "boot: starting image", { pat = "cfg: vers
 # 旧读旧写新删旧实现已删。工件在第二盘（artifact.volume = 2）。
 [[case]]
 name = "boot-counting"
+ovmf = "release"
 timeout_sec = 300
 config = """
 version = 1
@@ -625,6 +640,7 @@ artifact = { glob = "test+1-1.conf", contains = ["Chainload Counting"], volume =
 # 不加 strict 的话同一镜像会列出 2 项（other.conf 排第一），见 boot-bls-secondvol。
 [[case]]
 name = "boot-strict"
+ovmf = "release"
 timeout_sec = 180
 config = """
 version = 1

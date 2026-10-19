@@ -43,6 +43,9 @@ cargo run --manifest-path tools/qemu-matrix/Cargo.toml --target "$(rustc -vV | s
   `edk2-licenses.txt`（BSD 家族），与 brew 瓶同性质。
 - 该换 release 跑全量上游直调（如 `actions::chainload` 的 `resolve_path`）
   时，先重跑 `--ovmf-set both` 全绿再谈（见 `docs/bootloader.md` 复用地图）。
+- 分轨口径：`boot-*` case 全钉 `ovmf = "release"`（上游自家 dev 就是发行版
+  bios.bin，这是它实测过的环境；切上游管线的前提）。其余 case 留 debug
+ （ASSERT 抓 bug）。`--ovmf-set both` 仍可手动双跑抽查。
 
 产物在 `tools/qemu-matrix/runs/<case>/`（串口全文 + verdict，默认清掉重跑；
 `--keep` 留盘排查；已进 `.gitignore`，不入库）。
