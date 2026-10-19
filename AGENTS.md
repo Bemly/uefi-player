@@ -89,6 +89,23 @@ cargo run --manifest-path tools/config-gui/Cargo.toml --target "$(rustc -vV | se
   v2026.10.16，约 4MB），缺字加文案即可，不许 `pyftsubset` 裁剪。
   体积换完整（host 工具，不进 UEFI 固件，无体积压力）。
 
+## 测试 100% Rust（硬性）
+
+- 本仓测试代码只用 Rust 写：GUI 黑盒矩阵是 `tools/config-gui` 内 `#[cfg(test)]`
+  表格测试（`blackbox_matrix`），QEMU 黑盒矩阵是 `tools/qemu-matrix` 纯 Rust
+  runner（`std` + 与 GUI 同版本的 `serde`/`toml`，不许引 `clap`/`regex` 等新轮子，
+  手写即可，结论见该包 `Cargo.toml` 头注释）。
+- 禁止 Python/shell 测试脚本（发现即删了重写）：系统工具（`qemu`/`hdiutil`/
+  `mtools`）只许当子进程调，不许写测试逻辑。
+- 黑盒矩阵测试（两套，必同步更新）：
+  - GUI 侧：`tools/config-gui/src/main.rs` 的 `blackbox_matrix` 模组——TOML 全档位
+    笛卡尔回写、旧文件兼容、读盘/落盘钳制、`bench_pending`、`tune_visible`。
+  - QEMU 侧：`tools/qemu-matrix/matrix.toml`——每个 case 内联 `player.toml` +
+    串口断言 + 按键脚本（事件驱动，`wait_for` 卡点，不靠裸睡；屏显-only 界面
+    靠 `log::` 标记同步，见该目录 `README.md`）。
+- 新增/修改功能必同步更新两套矩阵（GUI 加表行，QEMU 加 case），提交前两套全绿；
+  固件新串口日志想想矩阵能不能用上，能用就地加断言。
+
 ## 代码约定
 
 - 发现疑似笔误/命名问题（拼写、术语、前后不一致）先指出再动手，不将错就错。

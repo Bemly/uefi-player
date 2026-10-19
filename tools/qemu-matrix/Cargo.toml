@@ -1,0 +1,18 @@
+[package]
+name = "qemu-matrix"
+version = "0.1.0"
+edition = "2021"
+description = "QEMU 黑盒矩阵 runner（host 工具，与 UEFI 固件包独立）"
+
+# 轮子选择（见根 AGENTS.md「轮子优先」+「测试 100% Rust」）：
+# - serde 1 + toml 1：读 matrix.toml，与 config-gui 同版本，不另选。
+# - 不引 clap/regex/glob：6 个命令行开关手写解析足够；断言是字面包含
+#   （matrix.toml 头注释已写明），通配只用一种 `HWBENCH*.TXT` 手写 20 行。
+#   搜过 crates.io（qemu runner / uefi blackbox harness）：只有底层 QMP 协议
+#   轮子，无开箱即用的 UEFI 黑盒矩阵工具；线束只是调 qemu 进程 + 读串口文件 +
+#   发 monitor 按键，std 足够（subprocess/socket/fs），故零新依赖。
+# - 系统工具（qemu-system-x86_64 / OVMF / hdiutil+newfs_msdos / mtools）只当子进程
+#   调，不写测试逻辑（AGENTS 有令：测试必须 100% Rust）。
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+toml = "1"

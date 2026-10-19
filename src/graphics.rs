@@ -315,6 +315,8 @@ impl Screen {
         self.sh_w = w;
         self.sh_h = h;
         self.sh_k = 0;
+        // 起用记一行（串口可断言；QEMU 黑盒矩阵靠它确认缓冲生效）。
+        log::info!("shadow: {} bufs {}x{} armed", n, w, h);
         true
     }
 

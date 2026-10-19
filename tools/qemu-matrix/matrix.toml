@@ -1,0 +1,299 @@
+# QEMU 黑盒矩阵：case = 内联 player.toml + 串口断言 + 按键脚本。
+# 断言是字面包含匹配（非正则；runner 是纯 Rust std，无 regex 轮子）。
+# 新增配置项/路径时在这里加行（和 AGENTS「黑盒矩阵测试」规则配套）。
+
+[global]
+smp = 4
+mem_mb = 1024
+ovmf = "/usr/local/share/qemu/edk2-x86_64-code.fd"
+timeout_sec = 240
+forbid = ["panicked at", "CpuDeadLoop", "No valid frames", "startup_all_aps failed"]
+
+# 冒烟：全显式最快配置，进菜单后按 7，AVX 探针必须出数。
+[[case]]
+name = "menu-smoke"
+timeout_sec = 180
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+workers = "bsp_only"
+dist = "static"
+vsync = "off"
+[play]
+fps = "max"
+[wallpaper]
+enable = false
+"""
+boot_expect = ["cfg: version=1", "reuse measured", "menu: ready"]
+keys = [{ send = "7", wait_after = 5 }]
+expect = ["AVX is "]
+
+# 矩阵冒烟：全 auto + 2 帧，矩阵行必须出现（赢家不定，不锁）。
+[[case]]
+name = "matrix-tiny"
+timeout_sec = 600
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "auto"
+workers = "auto"
+dist = "auto"
+vsync = "auto"
+tune = { frames = 2 }
+[play]
+fps = "max"
+[wallpaper]
+enable = false
+"""
+boot_expect = ["cfg: version=1"]
+expect = ["render auto:"]
+forbid = ["panicked at", "CpuDeadLoop"]
+
+# 分工 dynamic 显式：cfg 行必须原样回显（GUI 改 dynamic 落盘即生效的固件侧证明）。
+[[case]]
+name = "matrix-dist-dynamic"
+timeout_sec = 180
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+workers = "all"
+dist = "dynamic"
+vsync = "off"
+[play]
+fps = "max"
+[wallpaper]
+enable = false
+"""
+boot_expect = ["cfg: version=1", "dist=Dynamic"]
+expect = ["reuse measured"]
+
+# half 定档：冠军计时取半，预算必须落串口。
+[[case]]
+name = "matrix-vsync-half"
+timeout_sec = 300
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+workers = "bsp_only"
+dist = "static"
+vsync = "half"
+tune = { frames = 2 }
+[play]
+fps = "max"
+[wallpaper]
+enable = false
+"""
+boot_expect = ["cfg: version=1"]
+expect = ["half probe winner_ticks", "budget"]
+
+# 后缓冲影子环：buffers=2 + auto 单核矩阵（单 cell 经 upload_frame 整推），
+# 影子起用行必须出现（无上屏动作时环永不起，这是预期行为）。
+[[case]]
+name = "matrix-buffers"
+timeout_sec = 180
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "auto"
+workers = "bsp_only"
+dist = "static"
+vsync = "off"
+tune = { buffers = 2 }
+[play]
+fps = "max"
+[wallpaper]
+enable = false
+"""
+boot_expect = ["cfg: version=1"]
+expect = ["shadow: 2 bufs", "render auto:"]
+
+# Blt 引擎对照数：选中非 B2V op，单发出数行必须出现（不参选播视频）。
+[[case]]
+name = "matrix-blt-op"
+timeout_sec = 300
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "blt"
+workers = "bsp_only"
+dist = "static"
+vsync = "off"
+blt_op = "video_to_blt_buffer"
+tune = { frames = 2 }
+[play]
+fps = "max"
+[wallpaper]
+enable = false
+"""
+boot_expect = ["cfg: version=1"]
+expect = ["blt_op(VideoToBltBuffer)"]
+
+# 播放多核：按 0 进 mp_draw， soak 20 秒只看红线（不断言画面）。
+[[case]]
+name = "video-mp"
+timeout_sec = 180
+needs_video = true
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+workers = "all"
+dist = "static"
+vsync = "off"
+[play]
+fps = "max"
+[wallpaper]
+enable = false
+"""
+boot_expect = ["cfg: version=1", "menu: ready"]
+keys = [{ send = "0", wait_after = 5 }]
+expect = ["play: path=mp_draw"]
+soak_sec = 20
+
+# 播放 Blt：按 0 进 blt_loop，soak 15 秒。
+[[case]]
+name = "video-blt"
+timeout_sec = 180
+needs_video = true
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "blt"
+workers = "bsp_only"
+dist = "static"
+vsync = "off"
+[play]
+fps = "max"
+[wallpaper]
+enable = false
+"""
+boot_expect = ["cfg: version=1", "menu: ready"]
+keys = [{ send = "0", wait_after = 5 }]
+expect = ["play: path=blt_loop"]
+soak_sec = 15
+
+# 诊断键：1/4/7 各出数，x 回菜单（pause_return 吞键）。
+[[case]]
+name = "diag-keys"
+timeout_sec = 240
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+workers = "bsp_only"
+dist = "static"
+vsync = "off"
+[play]
+fps = "max"
+[wallpaper]
+enable = false
+"""
+boot_expect = ["cfg: version=1", "menu: ready"]
+keys = [
+  { send = "1", wait_after = 8 },
+  { send = "x", wait_after = 3 },
+  { send = "4", wait_after = 8 },
+  { send = "x", wait_after = 3 },
+  { send = "7", wait_after = 5 },
+]
+expect = ["Total number of logic processors:", "Starting Multi-Processor", "AVX is "]
+
+# 引导子菜单：b 进 q 回，再按 7 能出数 = 没卡死在子菜单。
+[[case]]
+name = "boot-menu"
+timeout_sec = 180
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+workers = "bsp_only"
+dist = "static"
+vsync = "off"
+[play]
+fps = "max"
+[wallpaper]
+enable = false
+"""
+boot_expect = ["cfg: version=1", "menu: ready"]
+# 引导子菜单：b 进（等无项标记）q 回（等返回标记）→ 臂还有一次 pause，
+# x 消解 → 7 出数（7 发两次防 flush 吞键，AVX 可重入）。
+keys = [
+  { send = "b", wait_after = 2 },
+  { send = "q", wait_for = ["boot: no entries"], wait_after = 2 },
+  { send = "x", wait_for = ["menu: back from b"], wait_after = 2 },
+  { send = "7", wait_after = 5 },
+  { send = "7", wait_after = 5 },
+]
+expect = ["AVX is "]
+
+# 壁纸开：2 帧黑场，无缺片警告，菜单照常响应。
+[[case]]
+name = "wallpaper-on"
+timeout_sec = 180
+needs_wallpaper = 2
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+workers = "bsp_only"
+dist = "static"
+vsync = "off"
+[play]
+fps = "max"
+[wallpaper]
+enable = true
+fps = 15
+"""
+boot_expect = ["cfg: version=1", "menu: ready"]
+keys = [{ send = "7", wait_after = 5 }]
+expect = ["AVX is "]
+forbid = ["panicked at", "CpuDeadLoop", "menu bg skipped"]
+
+# 慢：HW bench 落盘工件（默认跳过，--include-slow 才跑）。
+[[case]]
+name = "hwbench-artifact"
+slow = true
+timeout_sec = 1500
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+workers = "bsp_only"
+dist = "static"
+vsync = "off"
+[play]
+fps = "max"
+[wallpaper]
+enable = false
+"""
+boot_expect = ["cfg: version=1", "menu: ready"]
+keys = [{ send = "8", wait_after = 10 }]
+expect = ["-- bench done --"]
+artifact = { glob = "HWBENCH*.TXT", contains = ["ticks"] }

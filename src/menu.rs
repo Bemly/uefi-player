@@ -117,6 +117,9 @@ pub fn run_menu(mut screen: Screen) -> ! {
     // P4-A：菜单背景预载（关/无片源/分辨率不对 → None，纯静态菜单）。
     let mut wp = load_background(&mut screen);
     let mut wp_warned = false;
+    // 就绪标记（串口可断言）：QEMU 黑盒矩阵靠它定发送按键的时机
+    // （早发的键会被下面的 flush_keys 当陈旧输入排空）。
+    log::info!("menu: ready (press key)");
     loop {
         draw_menu(&mut screen);
         // 开着但没片源：提示一次（随后重画不再刷，避免挤占行区预留）。
@@ -136,17 +139,21 @@ pub fn run_menu(mut screen: Screen) -> ! {
             if key_match(item.key, key, raw) {
                 matched = true;
                 match item.run {
-                    Entry::Shared(f) => run_shared(&mut screen, f, item.fatal_on_error),
+                    Entry::Shared(f) => {
+                        run_shared(&mut screen, f, item.fatal_on_error);
+                        // 子菜单返回标记（串口可断言；QEMU 黑盒矩阵靠它同步按键）。
+                        log::info!("menu: back from {}", item.key);
+                    }
                     Entry::Exclusive(f) => {
-                        // 该 demo 需要自己独占 GOP（含切显示模式），
+                        // 该 demo 需要自己独占 GOP（强制切显示模式）。
                         // 先释放 Screen 再跑，跑完重建 Screen 回菜单。
                         // 注意：这里不清屏——demo 画面要留给用户看，
                         // 提示行打在底部。
-                        drop(screen);
-                        let result = f();
-                        screen =
-                            Screen::reacquire().expect("Failed to re-create screen");
-                        screen.cursor_to_bottom();
+                    drop(screen);
+                    let result = f();
+                    screen = Screen::reacquire().expect("Failed to re-create screen");
+                    screen.cursor_to_bottom();
+                    log::info!("menu: back from {}", item.key);
                         match result {
                             Ok(()) => pause_return(&mut screen),
                             Err(e) => show_recoverable(&mut screen, e),

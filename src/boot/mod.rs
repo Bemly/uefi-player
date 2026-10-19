@@ -37,6 +37,8 @@ pub fn run() -> Result {
             screen.draw_str(w);
         }
         screen.draw_str("no bootable entries.");
+        // 串口标记（QEMU 黑盒矩阵靠它同步按键，屏显测不到）。
+        log::warn!("boot: no entries, press any key");
         pause_return(&mut screen);
         return Ok(());
     }

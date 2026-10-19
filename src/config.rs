@@ -841,6 +841,17 @@ pub fn needs_render_bench() -> bool {
     if vsync_mode() == VsyncMode::Half && measured_vsync_fps() == 0 {
         return true;
     }
+    // Blt 引擎对照操作：选中非 B2V 且 Blt 在测时，单发出数（不参选，只出数）。
+    let blt_in_play = match render_mode() {
+        RenderMode::Blt => true,
+        RenderMode::Direct => false,
+        RenderMode::Auto => {
+            measured_render() == RenderMode::Auto || measured_render() == RenderMode::Blt
+        }
+    };
+    if blt_in_play && blt_op() != BltOpKind::BufferToVideo {
+        return true;
+    }
     vsync_mode() == VsyncMode::Auto && measured_vsync() == VsyncMode::Auto
 }
 

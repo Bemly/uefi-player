@@ -65,4 +65,7 @@
 ```bash
 cargo build --target x86_64-unknown-uefi && cargo clippy --target x86_64-unknown-uefi && cargo fmt --all --check
 cargo check --manifest-path tools/config-gui/Cargo.toml --target "$(rustc -vV | sed -n 's/^host: //p')"
+# 黑盒矩阵（GUI 表 + QEMU 矩阵，改功能必跑，见 AGENTS「测试 100% Rust」）
+cargo test --manifest-path tools/config-gui/Cargo.toml --target "$(rustc -vV | sed -n 's/^host: //p')"
+cargo run --manifest-path tools/qemu-matrix/Cargo.toml --target "$(rustc -vV | sed -n 's/^host: //p')"
 ```

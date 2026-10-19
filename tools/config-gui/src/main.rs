@@ -260,7 +260,7 @@ fn parse_fps(s: &str) -> FpsPolicy {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 struct AccelConfig {
     level: AccelLevel,
@@ -301,7 +301,7 @@ impl Default for RenderTune {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(default)]
 struct RenderConfig {
     mode: RenderMode,
@@ -328,7 +328,7 @@ struct RenderConfig {
 
 /// `[play]`：`fps` 是字符串（三态没法用纯数字表达），`measured_max_fps`
 /// 只由固件实测回写（0 = 未测），这里只读展示 + 重测清零。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 struct PlayConfig {
     #[serde(default = "default_fps")]
@@ -338,7 +338,7 @@ struct PlayConfig {
 }
 
 /// `[wallpaper]`：与固件 `WallpaperConfig` 同构。无校准记忆，纯开关。
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 struct WallpaperConfig {
     enable: bool,
@@ -370,7 +370,7 @@ impl Default for PlayConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 struct FileConfig {
     version: u32,
@@ -473,6 +473,88 @@ fn vsync_desc(v: VsyncMode) -> String {
         VsyncMode::Off => t!("accel.desc_vsync_off"),
     }
     .into_owned()
+}
+
+/// 黑盒矩阵可测的纯规则（无 display 依赖；`App` 方法只是薄委托，UI 照此摆）。
+/// 新增 GUI 规则时先加这里 + 矩阵表，再接 UI（见 AGENTS「黑盒矩阵测试」）。
+/// 微调区四旋钮显隐。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TuneVisible {
+    frames: bool,
+    tile: bool,
+    vfps: bool,
+    buf: bool,
+}
+
+/// 开机矩阵待测（与固件 `config::needs_render_bench` 同逻辑 + half）：
+/// Blt 下 workers/dist 不参测，单核下 dist 不参测。
+fn bench_pending(m: &RenderConfig) -> bool {
+    if m.mode == RenderMode::Auto && m.measured_render == RenderMode::Auto {
+        return true;
+    }
+    let render_is_blt = match m.mode {
+        RenderMode::Blt => true,
+        RenderMode::Direct => false,
+        RenderMode::Auto => m.measured_render == RenderMode::Blt,
+    };
+    if !render_is_blt
+        && m.workers == WorkersMode::Auto
+        && m.measured_workers == WorkersMode::Auto
+    {
+        return true;
+    }
+    let dist_in_play = !render_is_blt
+        && m.workers != WorkersMode::BspOnly
+        && !(m.workers == WorkersMode::Auto && m.measured_workers == WorkersMode::BspOnly);
+    if dist_in_play && m.dist == DistMode::Auto && m.measured_dist == DistMode::Auto {
+        return true;
+    }
+    // half 自带 bench（冠军计时取半）：无记忆即待测。
+    if m.vsync == VsyncMode::Half && m.measured_vsync_fps == 0 {
+        return true;
+    }
+    // Blt 引擎对照操作：选中非 B2V 且 Blt 在测时，单发出数（不参选，只出数）。
+    let blt_in_play = match m.mode {
+        RenderMode::Blt => true,
+        RenderMode::Direct => false,
+        RenderMode::Auto => {
+            m.measured_render == RenderMode::Auto || m.measured_render == RenderMode::Blt
+        }
+    };
+    if blt_in_play && m.blt_op != BltOpKind::BufferToVideo {
+        return true;
+    }
+    m.vsync == VsyncMode::Auto && m.measured_vsync == VsyncMode::Auto
+}
+
+/// 微调区显隐：frames=矩阵有待测；tile=直写全核且分工沾 tile；
+/// vfps=static 封顶/auto 达标线；buf=非 Blt（Blt 已是单 push）。
+fn tune_visible(m: &RenderConfig) -> TuneVisible {
+    let dist_in_play = m.mode != RenderMode::Blt && m.workers != WorkersMode::BspOnly;
+    TuneVisible {
+        frames: bench_pending(m),
+        tile: dist_in_play && (m.dist == DistMode::Auto || m.dist == DistMode::Tile),
+        vfps: m.vsync == VsyncMode::Auto || m.vsync == VsyncMode::Static,
+        buf: m.mode != RenderMode::Blt,
+    }
+}
+
+/// 读盘钳制：Blt 三个非上屏操作 GUI 置灰不可选，残留值钳回 B2V
+/// （播放行为无变化——固件上屏路本来就只认 B2V；手写值想出引擎数
+/// 的改完别点保存，或固件侧照读，见 player.md）。
+fn coerce_loaded(mut cfg: FileConfig) -> FileConfig {
+    if cfg.render.blt_op != BltOpKind::BufferToVideo {
+        cfg.render.blt_op = BltOpKind::BufferToVideo;
+    }
+    cfg
+}
+
+/// 落盘前钳制 tune（滑杆已钳，这里防手改文件后的脏值回写）。
+fn clamp_tune(t: &mut RenderTune) {
+    t.frames = t.frames.max(1);
+    t.tile_rows = t.tile_rows.clamp(8, 512);
+    t.vsync_fps = t.vsync_fps.clamp(15, 240);
+    t.buffers = t.buffers.min(16);
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -659,48 +741,11 @@ impl App {
         }
     }
 
-    /// 开机矩阵还有没有待测维度（与固件 `config::needs_render_bench` 同逻辑：
-    /// Blt 下 workers/dist 不参测，单核下 dist 不参测）。
-    /// `tune.frames` 只给开机矩阵用，无待测维度时隐藏。
-    fn render_bench_pending(&self) -> bool {
-        let m = &self.cfg.render;
-        if m.mode == RenderMode::Auto && m.measured_render == RenderMode::Auto {
-            return true;
-        }
-        let render_is_blt = match m.mode {
-            RenderMode::Blt => true,
-            RenderMode::Direct => false,
-            RenderMode::Auto => m.measured_render == RenderMode::Blt,
-        };
-        if !render_is_blt
-            && m.workers == WorkersMode::Auto
-            && m.measured_workers == WorkersMode::Auto
-        {
-            return true;
-        }
-        let dist_in_play = !render_is_blt
-            && m.workers != WorkersMode::BspOnly
-            && !(m.workers == WorkersMode::Auto && m.measured_workers == WorkersMode::BspOnly);
-        if dist_in_play && m.dist == DistMode::Auto && m.measured_dist == DistMode::Auto {
-            return true;
-        }
-        // half 自带 bench（冠军计时取半）：无记忆即待测。
-        if m.vsync == VsyncMode::Half && m.measured_vsync_fps == 0 {
-            return true;
-        }
-        m.vsync == VsyncMode::Auto && m.measured_vsync == VsyncMode::Auto
-    }
-
     fn load_path(&mut self, path: String) {
         match std::fs::read_to_string(&path) {
             Ok(text) => match toml::from_str::<FileConfig>(&text) {
-                Ok(mut cfg) => {
-                    // Blt 三个非上屏操作 GUI 置灰不可选：旧/手写文件的残留值钳回 B2V
-                    // （播放行为无变化——固件上屏路本来就只认 B2V；手写值想出引擎数
-                    // 的改完别点保存，或固件侧照读，见 player.md）。
-                    if cfg.render.blt_op != BltOpKind::BufferToVideo {
-                        cfg.render.blt_op = BltOpKind::BufferToVideo;
-                    }
+                Ok(cfg) => {
+                    let cfg = coerce_loaded(cfg);
                     let msg = t!(
                         "status.loaded",
                         path = path.clone(),
@@ -727,11 +772,7 @@ impl App {
     }
 
     fn save_to(&mut self, path: &str) {
-        // 落盘前钳住 tune（滑杆已钳，这里防手改文件后的脏值回写）。
-        self.cfg.render.tune.frames = self.cfg.render.tune.frames.max(1);
-        self.cfg.render.tune.tile_rows = self.cfg.render.tune.tile_rows.clamp(8, 512);
-        self.cfg.render.tune.vsync_fps = self.cfg.render.tune.vsync_fps.clamp(15, 240);
-        self.cfg.render.tune.buffers = self.cfg.render.tune.buffers.min(16);
+        clamp_tune(&mut self.cfg.render.tune);
         // tune 变了 = bench 条件变了：旧记忆作废，下次启动重测。
         // 不做这个，改 tune 会被“有记忆快启”吞掉，永远不生效。
         if self.cfg.render.tune != self.tune_at_load {
@@ -1083,25 +1124,12 @@ impl App {
                     });
                 }
                 ui.add_space(10.0);
-                // 微调只摆本模式用得上的，整组无关直接隐藏：
-                // frames = 开机矩阵帧数（无待测 bench 则藏）；
-                // tile_rows 只跟 tile 切块有关（auto 保留待测，static/dynamic 藏）；
-                // vsync_fps 只在 static 封顶 / auto 达标线时用（half 自带预算、off 不用，都藏）。
-                // buffers 后缓冲旋钮常显（Blt 下整组无意义，随 Blt 隐藏）。
-                let dist_in_play = self.cfg.render.mode != RenderMode::Blt
-                    && self.cfg.render.workers != WorkersMode::BspOnly;
-                let show_tile = dist_in_play
-                    && (self.cfg.render.dist == DistMode::Auto
-                        || self.cfg.render.dist == DistMode::Tile);
-                let show_vfps = self.cfg.render.vsync == VsyncMode::Auto
-                    || self.cfg.render.vsync == VsyncMode::Static;
-                let show_frames = self.render_bench_pending();
-                // 后缓冲是显式旋钮（即时生效，不进矩阵 bench）：Blt 路无意义隐藏。
-                let show_buf = self.cfg.render.mode != RenderMode::Blt;
-                if show_frames || show_tile || show_vfps || show_buf {
+                // 微调只摆本模式用得上的，整组无关直接隐藏（判定见 `tune_visible`）。
+                let vis = tune_visible(&self.cfg.render);
+                if vis.frames || vis.tile || vis.vfps || vis.buf {
                     ui.label(t!("tune.heading"));
                     ui.small(t!("tune.hint"));
-                    if show_frames {
+                    if vis.frames {
                         ui.label(t!("tune.frames"));
                         let frames_label = format!("{} frames", self.cfg.render.tune.frames);
                         egui_glass::GlassSlider::new(&mut self.tune_frames_f, 1.0..=120.0)
@@ -1116,7 +1144,7 @@ impl App {
                         self.cfg.render.tune.frames =
                             self.tune_frames_f.round().clamp(1.0, 120.0) as u32;
                     }
-                    if show_tile {
+                    if vis.tile {
                         ui.label(t!("tune.tile_rows"));
                         let tile_label = format!("{} rows", self.cfg.render.tune.tile_rows);
                         egui_glass::GlassSlider::new(&mut self.tune_tile_f, 8.0..=512.0)
@@ -1131,7 +1159,7 @@ impl App {
                         self.cfg.render.tune.tile_rows =
                             self.tune_tile_f.round().clamp(8.0, 512.0) as u32;
                     }
-                    if show_vfps {
+                    if vis.vfps {
                         ui.label(t!("tune.vsync_fps"));
                         let vsync_fps_label = format!("{} fps", self.cfg.render.tune.vsync_fps);
                         egui_glass::GlassSlider::new(&mut self.tune_vsync_fps_f, 15.0..=240.0)
@@ -1146,7 +1174,7 @@ impl App {
                         self.cfg.render.tune.vsync_fps =
                             self.tune_vsync_fps_f.round().clamp(15.0, 240.0) as u32;
                     }
-                    if show_buf {
+                    if vis.buf {
                         ui.label(t!("tune.buffers"));
                         let buffers_label = if self.cfg.render.tune.buffers == 0 {
                             t!("tune.buffers_off").into_owned()
@@ -1550,6 +1578,272 @@ mod schema_tests {
         assert!(back.wallpaper.enable);
         assert_eq!(back.wallpaper.fps, 20);
         assert_eq!(back.wallpaper.frames, 30);
+    }
+}
+
+/// 配置黑盒矩阵：GUI 改配置 → 落盘 → 固件生效，全链路只走 TOML 文本 + 纯规则，
+/// 无 display 下 `cargo test` 可跑。新增 GUI 规则/档位/字段时先在这里加行
+/// （表格即口径），再接 UI 与固件（见 AGENTS「黑盒矩阵测试」；QEMU 侧见
+/// `tools/qemu-matrix/matrix.toml`，两边一起更新）。
+#[cfg(test)]
+mod blackbox_matrix {
+    use super::*;
+
+    fn rc(
+        mode: RenderMode,
+        workers: WorkersMode,
+        dist: DistMode,
+        vsync: VsyncMode,
+    ) -> RenderConfig {
+        let mut m = RenderConfig::default();
+        m.mode = mode;
+        m.workers = workers;
+        m.dist = dist;
+        m.vsync = vsync;
+        m
+    }
+
+    /// 全档位笛卡尔回写：9 accel × 3 render × 3 workers × 4 dist × 4 vsync × 4 blt，
+    /// 序列化再解析必须逐字节等价（顺序/缺键都由 serde 保证，不许丢字段）。
+    #[test]
+    fn schema_roundtrip_matrix() {
+        let mut n = 0;
+        for a in AccelLevel::ALL {
+            for m in [RenderMode::Auto, RenderMode::Direct, RenderMode::Blt] {
+                for w in WorkersMode::ALL {
+                    for d in DistMode::ALL {
+                        for v in VsyncMode::ALL {
+                            for b in BltOpKind::ALL {
+                                let cfg = FileConfig {
+                                    version: 1,
+                                    accel: AccelConfig { level: a },
+                                    render: RenderConfig {
+                                        mode: m,
+                                        workers: w,
+                                        dist: d,
+                                        vsync: v,
+                                        blt_op: b,
+                                        tune: RenderTune {
+                                            frames: 7,
+                                            tile_rows: 100,
+                                            vsync_fps: 77,
+                                            buffers: 3,
+                                        },
+                                        measured_render: m,
+                                        measured_workers: w,
+                                        measured_dist: d,
+                                        measured_vsync: v,
+                                        measured_vsync_fps: 11,
+                                        measured_cores: 4,
+                                    },
+                                    play: PlayConfig {
+                                        fps: String::from("60"),
+                                        measured_max_fps: 120,
+                                    },
+                                    wallpaper: WallpaperConfig {
+                                        enable: true,
+                                        fps: 20,
+                                        frames: 30,
+                                        preload: 4,
+                                    },
+                                };
+                                let text = toml::to_string(&cfg).unwrap();
+                                let back: FileConfig = toml::from_str(&text).unwrap();
+                                assert_eq!(back, cfg, "roundtrip {a:?}/{m:?}/{w:?}/{d:?}/{v:?}/{b:?}");
+                                n += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(n, 9 * 3 * 3 * 4 * 4 * 4);
+    }
+
+    /// fps 三态字符串照读照写（非法值不断解析，语义由 `parse_fps` 兜底）。
+    #[test]
+    fn fps_string_matrix() {
+        for s in ["auto", "max", "0", "1", "60", "120", "240", "999", "abc", ""] {
+            let text = format!("[play]\nfps = \"{s}\"\n");
+            let cfg: FileConfig = toml::from_str(&text).unwrap();
+            assert_eq!(cfg.play.fps, s);
+            let back: FileConfig = toml::from_str(&toml::to_string(&cfg).unwrap()).unwrap();
+            assert_eq!(back.play.fps, s);
+        }
+    }
+
+    /// 远古文件（v0.1 时代：无 wallpaper/tune 表）照读，新键全按默认。
+    #[test]
+    fn compat_legacy_matrix() {
+        let text = "version = 1\n[accel]\nlevel = \"auto\"\n[render]\nmode = \"auto\"\n[play]\nfps = \"auto\"\n";
+        let cfg: FileConfig = toml::from_str(text).unwrap();
+        assert!(!cfg.wallpaper.enable);
+        assert_eq!(cfg.render.dist, DistMode::Auto);
+        assert_eq!(cfg.render.vsync, VsyncMode::Auto);
+        assert_eq!(cfg.render.blt_op, BltOpKind::BufferToVideo);
+        assert_eq!(cfg.render.tune.buffers, default_buffers());
+        assert_eq!(cfg.render.measured_vsync_fps, 0);
+    }
+
+    /// 空文件全默认（缺表缺键一路 Default，不 halt）。
+    #[test]
+    fn compat_empty_matrix() {
+        let cfg: FileConfig = toml::from_str("").unwrap();
+        assert_eq!(cfg, FileConfig::default());
+    }
+
+    /// 读盘钳制矩阵：只有 B2V 能留，其余三项一律钳回 B2V（播放行为不变）。
+    #[test]
+    fn coerce_matrix() {
+        for (input, expected) in [
+            ("buffer_to_video", BltOpKind::BufferToVideo),
+            ("video_to_video", BltOpKind::BufferToVideo),
+            ("video_fill", BltOpKind::BufferToVideo),
+            ("video_to_blt_buffer", BltOpKind::BufferToVideo),
+        ] {
+            let text = format!("[render]\nblt_op = \"{input}\"\n");
+            let cfg: FileConfig = toml::from_str(&text).unwrap();
+            assert_eq!(coerce_loaded(cfg).render.blt_op, expected, "{input}");
+        }
+    }
+
+    /// 落盘钳制矩阵：越界钳住，正常值不动。
+    #[test]
+    fn clamp_matrix() {
+        let mut t = RenderTune { frames: 0, tile_rows: 4, vsync_fps: 999, buffers: 99 };
+        clamp_tune(&mut t);
+        assert_eq!(t, RenderTune { frames: 1, tile_rows: 8, vsync_fps: 240, buffers: 16 });
+        let mut ok = RenderTune { frames: 30, tile_rows: 64, vsync_fps: 60, buffers: 2 };
+        clamp_tune(&mut ok);
+        assert_eq!(ok, RenderTune { frames: 30, tile_rows: 64, vsync_fps: 60, buffers: 2 });
+    }
+
+    /// 待测判定矩阵（与固件 `needs_render_bench` 同逻辑 + half）。
+    /// 行：(mode, workers, dist, vsync, measured..., cores, half_fps, 期待)。
+    #[test]
+    fn bench_pending_matrix() {
+        // 基线：全 auto 无记忆 → 必测。
+        assert!(bench_pending(&RenderConfig::default()));
+        // 全显式（Direct/BspOnly/Static/Off）→ 跳过。
+        let mut m = rc(RenderMode::Direct, WorkersMode::BspOnly, DistMode::Static, VsyncMode::Off);
+        assert!(!bench_pending(&m));
+        // Direct + workers auto 无记忆 → 测 workers。
+        m = rc(RenderMode::Direct, WorkersMode::Auto, DistMode::Auto, VsyncMode::Off);
+        assert!(bench_pending(&m));
+        // workers 已记忆 BspOnly → dist 不参测 → 跳过。
+        m.measured_workers = WorkersMode::BspOnly;
+        assert!(!bench_pending(&m));
+        // Direct + 全核 + dist auto 无记忆 → 测 dist。
+        m = rc(RenderMode::Direct, WorkersMode::All, DistMode::Auto, VsyncMode::Off);
+        assert!(bench_pending(&m));
+        // dist 已记忆 → 跳过。
+        m.measured_dist = DistMode::Static;
+        assert!(!bench_pending(&m));
+        // Blt 定死：workers/dist 不参测（auto 也白搭）。
+        m = rc(RenderMode::Blt, WorkersMode::Auto, DistMode::Auto, VsyncMode::Off);
+        assert!(!bench_pending(&m));
+        // mode auto 无记忆 → 必测（哪怕 Blt 倾向，首轮也得跑）。
+        m = rc(RenderMode::Auto, WorkersMode::Auto, DistMode::Auto, VsyncMode::Off);
+        assert!(bench_pending(&m));
+        // mode auto 已记忆 Direct + workers auto 无记忆 → 测 workers。
+        m.measured_render = RenderMode::Direct;
+        assert!(bench_pending(&m));
+        // mode auto 已记忆 Blt + workers auto 无记忆 → workers 被忽略 → 跳过。
+        m.measured_render = RenderMode::Blt;
+        assert!(!bench_pending(&m));
+        // vsync auto 无记忆 → 测（其余全显式）。
+        m = rc(RenderMode::Direct, WorkersMode::BspOnly, DistMode::Static, VsyncMode::Auto);
+        assert!(bench_pending(&m));
+        // vsync auto 已记忆 → 跳过。
+        m.measured_vsync = VsyncMode::Static;
+        assert!(!bench_pending(&m));
+        // half 无记忆 → 必测（其余全显式）。
+        m = rc(RenderMode::Direct, WorkersMode::BspOnly, DistMode::Static, VsyncMode::Half);
+        assert!(bench_pending(&m));
+        // half 已记忆 → 跳过。
+        m.measured_vsync_fps = 45;
+        assert!(!bench_pending(&m));
+        // 显式 half + dist auto 无记忆（全核）→ dist 照测。
+        m = rc(RenderMode::Direct, WorkersMode::All, DistMode::Auto, VsyncMode::Half);
+        m.measured_vsync_fps = 45;
+        assert!(bench_pending(&m));
+        // Blt 引擎对照：Blt 在测 + 选中非 B2V → 必测（只出数）。
+        m = rc(RenderMode::Blt, WorkersMode::BspOnly, DistMode::Static, VsyncMode::Off);
+        m.blt_op = BltOpKind::VideoToBltBuffer;
+        assert!(bench_pending(&m));
+        // 同上但选中 B2V → B2V 格本就覆盖，无额外待测。
+        m.blt_op = BltOpKind::BufferToVideo;
+        assert!(!bench_pending(&m));
+        // Blt 不在测（Direct 定死）→ 选中啥都不测 op 格。
+        m = rc(RenderMode::Direct, WorkersMode::BspOnly, DistMode::Static, VsyncMode::Off);
+        m.blt_op = BltOpKind::VideoFill;
+        assert!(!bench_pending(&m));
+        // mode auto 已记忆 Blt + 选中非 B2V → Blt 在测 → 测 op 格。
+        m = rc(RenderMode::Auto, WorkersMode::BspOnly, DistMode::Static, VsyncMode::Off);
+        m.measured_render = RenderMode::Blt;
+        m.blt_op = BltOpKind::VideoFill;
+        assert!(bench_pending(&m));
+    }
+
+    /// 微调显隐矩阵：行 = (mode, workers, dist, vsync) → (frames, tile, vfps, buf)。
+    #[test]
+    fn tune_visible_matrix() {
+        // 全 auto 无记忆：全摆。
+        assert_eq!(
+            tune_visible(&RenderConfig::default()),
+            TuneVisible { frames: true, tile: true, vfps: true, buf: true }
+        );
+        // Blt 定死：只剩 vfps（auto）+ frames（render auto 无记忆）。
+        let m = rc(RenderMode::Blt, WorkersMode::Auto, DistMode::Auto, VsyncMode::Auto);
+        assert_eq!(
+            tune_visible(&m),
+            TuneVisible { frames: true, tile: false, vfps: true, buf: false }
+        );
+        // 全显式 Direct/BspOnly/Static/Off：只剩 buf。
+        let m = rc(RenderMode::Direct, WorkersMode::BspOnly, DistMode::Static, VsyncMode::Off);
+        assert_eq!(
+            tune_visible(&m),
+            TuneVisible { frames: false, tile: false, vfps: false, buf: true }
+        );
+        // tile 沾边（auto/Tile）→ tile 摆；static/dynamic 藏。
+        for (d, tile) in [
+            (DistMode::Auto, true),
+            (DistMode::Tile, true),
+            (DistMode::Static, false),
+            (DistMode::Dynamic, false),
+        ] {
+            let mut m = rc(RenderMode::Direct, WorkersMode::All, d, VsyncMode::Off);
+            // dist 无记忆会点亮 frames，先给记忆压住，只看 tile。
+            m.measured_dist = DistMode::Static;
+            assert_eq!(
+                tune_visible(&m),
+                TuneVisible { frames: false, tile, vfps: false, buf: true },
+                "{d:?}"
+            );
+        }
+        // vfps 只在 static/auto 摆；half/off 藏（half 自带预算）。
+        for (v, vfps) in [
+            (VsyncMode::Auto, true),
+            (VsyncMode::Static, true),
+            (VsyncMode::Half, false),
+            (VsyncMode::Off, false),
+        ] {
+            let mut m = rc(
+                RenderMode::Direct,
+                WorkersMode::BspOnly,
+                DistMode::Static,
+                v,
+            );
+            // 无关记忆先压住（auto 无记忆会点亮 frames，half 无记忆同理），只看 vfps。
+            m.measured_vsync = VsyncMode::Static;
+            m.measured_vsync_fps = 45;
+            let vis = tune_visible(&m);
+            assert_eq!(vis.vfps, vfps, "{v:?}");
+            assert!(!vis.frames && !vis.tile && vis.buf, "{v:?}");
+        }
+        // half 无记忆 → frames 亮（自带 bench）。
+        let m = rc(RenderMode::Direct, WorkersMode::BspOnly, DistMode::Static, VsyncMode::Half);
+        assert!(tune_visible(&m).frames);
     }
 }
 
