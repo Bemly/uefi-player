@@ -849,9 +849,10 @@ impl App {
         b.show(ui).clicked()
     }
 
-    /// 实时背景的页面层：只读摘要文档。`live.run` 会让它跑两遍
+    /// 实时背景的页面层：只留一句提示做折射燃料。`live.run` 会让它跑两遍
     /// （可见 + 离屏），所以这里禁止任何写状态、禁止放玻璃件、
     /// 禁止放可交互控件——只许纯文本。
+    /// 摘要行只放左侧导航卡，不在这里重复占右侧空间。
     fn page_backdrop(&self, page: &mut egui::Ui) {
         // 先铺底色：窗口清屏色不可控（实测透黑），两遍（可见 + 离屏）用同一底，
         // 映射才一致。深浅跟主题走。
@@ -863,38 +864,7 @@ impl App {
         page.painter().rect_filled(page.max_rect(), 0.0, bg);
         page.add_space(4.0);
         page.label(egui::RichText::new(t!("sum.hint")).weak().small());
-        page.add_space(8.0);
-        page.label(
-            egui::RichText::new(t!("sum.accel", v = self.cfg.accel.level.file_str())).weak(),
-        );
-        page.label(
-            egui::RichText::new(t!("sum.render", v = self.cfg.render.mode.file_str())).weak(),
-        );
-        if self.cfg.render.mode == RenderMode::Blt {
-            page.label(
-                egui::RichText::new(t!("sum.blt", v = self.cfg.render.blt_op.file_str())).weak(),
-            );
-        }
-        page.label(
-            egui::RichText::new(t!("sum.workers", v = self.cfg.render.workers.file_str())).weak(),
-        );
-        page.label(egui::RichText::new(t!("sum.dist", v = self.cfg.render.dist.file_str())).weak());
-        page.label(
-            egui::RichText::new(t!("sum.vsync", v = self.cfg.render.vsync.file_str())).weak(),
-        );
-        page.label(
-            egui::RichText::new(t!(
-                "sum.wallpaper",
-                v = if self.cfg.wallpaper.enable {
-                    "on"
-                } else {
-                    "off"
-                }
-            ))
-            .weak(),
-        );
-        page.label(egui::RichText::new(t!("sum.play", v = self.play_text())).weak());
-        page.label(egui::RichText::new(self.measured_line()).weak());
+        page.add_space(4.0);
     }
 
     /// 中央不透明面板里的开关（只拨开关，不暴露 TOML 原文）。
@@ -1299,6 +1269,16 @@ impl eframe::App for App {
                     ui.small(t!("sum.workers", v = self.cfg.render.workers.file_str()));
                     ui.small(t!("sum.dist", v = self.cfg.render.dist.file_str()));
                     ui.small(t!("sum.vsync", v = self.cfg.render.vsync.file_str()));
+                    ui.small(t!(
+                        "sum.wallpaper",
+                        v = if self.cfg.wallpaper.enable {
+                            "on"
+                        } else {
+                            "off"
+                        }
+                    ));
+                    ui.small(t!("sum.play", v = self.play_text()));
+                    ui.small(self.measured_line());
                     ui.small(t!("sum.version", v = self.cfg.version));
                 });
                 ui.add_space(8.0);
