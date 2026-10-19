@@ -76,6 +76,35 @@
 - 不搬 sprout 的菜单/phase/extractor/driver/SBAT/交互配置语言
   （见 AGENTS；本仓交互层保持自己的）。
 
+## 复用地图（轮子优先结论：`boot` lib 13 个模块逐个验过）
+
+直调现货（`patches/` 叠 `[lib]` 后）：
+
+- `bls`（`BlsEntry/LoaderConf/BootCounter/version-sort/compare_versions`）
+- `parsing`（内核前缀表/initrd 拼接/`empty_is_none`/`append_initrd`）
+- `eficore`（`ImageLoader/media_loader/xbootldr/devicetree/secure`）
+- `config`（只借 `options.default_entry` 覆盖默认项）
+- `boot::boot_counter::BootCounterTarget::consume`（真改名，首个直调落地）
+
+有意不调（证据链，不是偷懒）：
+
+- `generators/*` + `actions/chainload` + `drivers`：全经
+  `eficore::path::resolve_path`，而它无条件走 `DevicePathFromText`
+  文本往返（`eficore/src/path.rs:103` 起三处 `text_to_device_path`）。
+  本矩阵 OVMF（`edk2-x86_64-code.fd`，调试版）该调用必 ASSERT
+  进 `CpuDeadLoop`（串口停在 `boot: resolving`，见 handover 踩坑 §3.1）。
+  调了就是 8+ 矩阵 case 全红。`chainload.rs` 头注释有完整案发记录。
+- `autoconfigure::{windows,linux}::scan`：输出是为 `resolve_path`
+  启动而建的 device-path 文本根（`<DP-text>/...`），翻译回"相对路径+卷句柄"
+  的成本 ≥ 现有 50 行直读（且 Linux 结果只是 generator 声明，还要再跑
+  `list::generate` + 盯 stamping，标题一变矩阵全改）。同款解析轮子
+  （`match_kernel_prefix` 等）本来就共用着。
+- Shell/OpenCore：上游没有对应物（全仓 grep 零命中），20 行探测保留。
+- 目录枚举：`uefi-rs` 无 walker（`find_handles` 只有卷级），`Fs::list_dir`
+  自研是唯一选择；`strict`/排序/去重规则与上游同语义。
+- 全量上游化的唯一杠杆是换 release OVMF（环境侧，真机 release 固件无此
+  ASSERT），代价是重验 22 矩阵 + 真机回归，未立项前不动。
+
 ## 验收（QEMU 黑盒矩阵，已跑过）
 
 - 单盘 chainload（`boot-chainload`）：locate ok → loading → starting image →
