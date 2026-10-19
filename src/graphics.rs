@@ -1,6 +1,7 @@
 use alloc::boxed::Box;
 use alloc::string::{String, ToString};
 use alloc::vec;
+use alloc::vec::Vec;
 use core::arch::asm;
 use core::ffi::c_void;
 use core::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
@@ -347,7 +348,7 @@ impl Screen {
     ///
     /// - 首启（任一 auto 无记忆，见 `config::needs_render_bench`）必跑全矩阵：
     ///   直写 vs Blt 取快；直写路再比 BSP 单核 vs 全核并行，全核路再比
-    ///   静态分区 vs tile 自调度；冠军路按 60fps 预算跑一遍，
+    ///   静态分区 vs tile 自调度 vs dynamic 加权（三选一）；冠军路按 60fps 预算跑一遍，
     ///   零超期则 vsync 开否则关。
     /// - 全核 cell 用 AP 常驻循环 + 轮次同步（`gop_bench` 方法论：单发 startup
     ///   测到的是 SIPI 唤醒开销而非扩展性，必须常驻 + 热身吸收后再计时）。
@@ -433,9 +434,24 @@ impl Screen {
         // AP 常驻会话（栈上 ctx + 轮次号驱动，方法论见 gop_bench 计时轮）。
         let cal_round = AtomicUsize::new(0);
         let cal_done = AtomicUsize::new(0);
-        // tile 游标 + 模式开关（static/tile 双 cell 共用一个会话，轮次间翻转）。
+        // tile 游标 + 模式开关 + dynamic 计时/边界（三 cell 共用一个会话，轮次间翻转）。
         let cal_mode = AtomicU8::new(0);
         let cal_tile = AtomicUsize::new(0);
+        // dynamic 定权状态：各核上一轮静态 copy 耗时（AP 自记，BSP 读来算权重），
+        // 加权行边界（n+1 项，BSP 写、mode/round 发布后 AP 读）。Box 漏存，会话期常驻。
+        let cal_times: &mut [AtomicUsize] = Box::leak(
+            (0..n_cores.max(1))
+                .map(|_| AtomicUsize::new(0))
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+        );
+        let cal_bounds: &mut [AtomicUsize] = Box::leak(
+            dynamic_row_bounds(&vec![0u64; n_cores.max(1)], n_cores.max(1), 0, h)
+                .into_iter()
+                .map(AtomicUsize::new)
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+        );
         let mut mp_drive: Option<MpDrive> = None;
         if want_mp {
             if let Some(mp) = mp_store.as_deref() {
@@ -455,6 +471,8 @@ impl Screen {
                     tile: &cal_tile,
                     tile_rows: config::tune_tile_rows() as usize,
                     tiles_total: h.div_ceil(config::tune_tile_rows().max(1) as usize),
+                    times: cal_times.as_ptr(),
+                    bounds: cal_bounds.as_ptr(),
                 };
                 // ctx 必须活到 AP 退场：Box 漏存，函数尾 QUIT + stall 后不再访问。
                 let arg_ptr = Box::leak(Box::new(ctx)) as *mut _ as *mut c_void;
@@ -465,26 +483,30 @@ impl Screen {
                             .startup_all_aps(false, ap_cal_copy, arg_ptr, Some(ev), None)
                             .is_ok()
                         {
-                            let bsp_id = mp.who_am_i().unwrap_or(0) % n_cores.max(1);
-                            let (by0, by1) = rows_for_cal(bsp_id, n_cores, h);
-                            mp_drive = Some(MpDrive {
-                                fb_base,
-                                fb_stride,
-                                src: pixels.as_ptr() as *const u8,
-                                row_bytes: w * 4,
-                                height: h,
-                                bsp_y0: by0,
-                                bsp_y1: by1,
-                                expected: n_cores.saturating_sub(1),
-                                round: &cal_round,
-                                done: &cal_done,
+                        let bsp_id = mp.who_am_i().unwrap_or(0) % n_cores.max(1);
+                        let (by0, by1) = rows_for_cal(bsp_id, n_cores, h);
+                        mp_drive = Some(MpDrive {
+                            n: n_cores,
+                            bsp_id,
+                            fb_base,
+                            fb_stride,
+                            src: pixels.as_ptr() as *const u8,
+                            row_bytes: w * 4,
+                            height: h,
+                            bsp_y0: by0,
+                            bsp_y1: by1,
+                            expected: n_cores.saturating_sub(1),
+                            round: &cal_round,
+                            done: &cal_done,
                     mode: &cal_mode,
                     tile: &cal_tile,
                     tile_rows: config::tune_tile_rows() as usize,
                     tiles_total: h.div_ceil(config::tune_tile_rows().max(1) as usize),
-                                next: 0,
-                                tps,
-                            });
+                            times: cal_times.as_ptr(),
+                            bounds: cal_bounds.as_ptr(),
+                            next: 0,
+                            tps,
+                        });
                         } else {
                             log::warn!("render auto: MP startup failed, all-core cell SKIP");
                         }
@@ -506,9 +528,15 @@ impl Screen {
         let time_blt = fixed_render.map(|m| m == RenderMode::Blt).unwrap_or(true);
         let time_mp =
             mp_drive.is_some() && (probe_workers || fixed_workers == Some(WorkersMode::All));
-        // static/tile 双 cell：只测需要的（auto 全测，显式只测选中的）。
+        // static/tile/dynamic 三 cell：只测需要的（auto 全测，显式只测选中的）。
         let time_static = time_mp && (probe_dist || fixed_dist == Some(DistMode::Static));
         let time_tile = time_mp && (probe_dist || fixed_dist == Some(DistMode::Tile));
+        let mut time_dynamic = time_mp && (probe_dist || fixed_dist == Some(DistMode::Dynamic));
+        let mut acc_direct = 0u64;
+        let mut acc_static = 0u64;
+        let mut acc_tile = 0u64;
+        let mut acc_dynamic = 0u64;
+        let mut acc_blt = 0u64;
         // 多核热身各 1 轮（吸收 AP 唤醒延迟，不计时）。
         if time_static {
             mp_drive.as_mut().expect("mp drive").warmup_static();
@@ -516,10 +544,24 @@ impl Screen {
         if time_tile {
             mp_drive.as_mut().expect("mp drive").warmup_tiled();
         }
-        let mut acc_direct = 0u64;
-        let mut acc_static = 0u64;
-        let mut acc_tile = 0u64;
-        let mut acc_blt = 0u64;
+        // dynamic 定权：先跑一轮静态给各核计时（AP 在静态分支自记耗时），
+        // BSP 读耗时算加权边界，再热身一轮 dynamic。probe 失败说明 MP 已坏，
+        // 与静态/tile 熔断同处理：整个 MP 会话作废退回单核。
+        if time_dynamic {
+            let ok = mp_drive
+                .as_mut()
+                .map(|d| d.probe_dynamic())
+                .unwrap_or(false);
+            if ok {
+                mp_drive.as_mut().expect("mp drive").warmup_dynamic();
+            } else {
+                acc_static = 0;
+                acc_tile = 0;
+                acc_dynamic = 0;
+                mp_drive = None;
+                time_dynamic = false;
+            }
+        }
         for _ in 0..frames {
             if time_direct {
                 let t = tsc();
@@ -533,9 +575,10 @@ impl Screen {
                 if ok {
                     acc_static += dt;
                 } else {
-                    // 熔断：本轮 AP 没跟上，会话作废，两个 MP cell 全退回单核。
+                    // 熔断：本轮 AP 没跟上，会话作废，三个 MP cell 全退回单核。
                     acc_static = 0;
                     acc_tile = 0;
+                    acc_dynamic = 0;
                     mp_drive = None;
                     break;
                 }
@@ -550,8 +593,28 @@ impl Screen {
                 if ok {
                     acc_tile += dt;
                 } else {
+                    // 熔断：本轮 AP 没跟上，会话作废，三个 MP cell 全退回单核。
                     acc_static = 0;
                     acc_tile = 0;
+                    acc_dynamic = 0;
+                    mp_drive = None;
+                    break;
+                }
+            }
+            if time_dynamic {
+                let Some(drive) = mp_drive.as_mut() else {
+                    break;
+                };
+                let t = tsc();
+                let ok = drive.run_round_dynamic();
+                let dt = tsc().saturating_sub(t);
+                if ok {
+                    acc_dynamic += dt;
+                } else {
+                    // 熔断：同上，三个 MP cell 全退回单核。
+                    acc_static = 0;
+                    acc_tile = 0;
+                    acc_dynamic = 0;
                     mp_drive = None;
                     break;
                 }
@@ -565,17 +628,22 @@ impl Screen {
         let mp_alive = mp_drive.is_some();
         let time_static = time_static && mp_alive;
         let time_tile = time_tile && mp_alive;
+        let time_dynamic = time_dynamic && mp_alive;
 
         // ---- 决胜 ----
         // 直写冠军：多核 cell 跳过/失败则退回单核。
         let static_valid = time_static && acc_static > 0;
         let tile_valid = time_tile && acc_tile > 0;
+        let dynamic_valid = time_dynamic && acc_dynamic > 0;
         let mut direct_ticks = if time_direct { acc_direct } else { u64::MAX };
         if static_valid {
             direct_ticks = direct_ticks.min(acc_static);
         }
         if tile_valid {
             direct_ticks = direct_ticks.min(acc_tile);
+        }
+        if dynamic_valid {
+            direct_ticks = direct_ticks.min(acc_dynamic);
         }
         // 只在“计时且有效”的 cell 里取最小（未测的 acc 为 0，不能参与 min）。
         let mut mp_best_ticks = u64::MAX;
@@ -584,6 +652,9 @@ impl Screen {
         }
         if tile_valid {
             mp_best_ticks = mp_best_ticks.min(acc_tile.max(1));
+        }
+        if dynamic_valid {
+            mp_best_ticks = mp_best_ticks.min(acc_dynamic.max(1));
         }
         let mp_best = mp_best_ticks != u64::MAX;
         let winner_workers = if !direct_in_play {
@@ -607,21 +678,26 @@ impl Screen {
             fixed_render.unwrap_or(RenderMode::Direct)
         };
         // 多核分工：Blt/single 下无意义不记；显式值直接采用。
+        // auto 时三个有效 cell 取计时最小（全无效退回 tile 无害默认）。
         let winner_dist =
             if winner_render != RenderMode::Direct || winner_workers != WorkersMode::All {
                 DistMode::Tile // 无害默认，实际不用（effective_dist 短路）
             } else if probe_dist {
-                match (static_valid, tile_valid) {
-                    (true, true) => {
-                        if acc_tile <= acc_static {
-                            DistMode::Tile
-                        } else {
-                            DistMode::Static
-                        }
-                    }
-                    (true, false) => DistMode::Static,
-                    _ => DistMode::Tile,
+                let mut best = DistMode::Tile;
+                let mut best_ticks = u64::MAX;
+                if static_valid && acc_static < best_ticks {
+                    best = DistMode::Static;
+                    best_ticks = acc_static;
                 }
+                if tile_valid && acc_tile < best_ticks {
+                    best = DistMode::Tile;
+                    best_ticks = acc_tile;
+                }
+                if dynamic_valid && acc_dynamic < best_ticks {
+                    best = DistMode::Dynamic;
+                    best_ticks = acc_dynamic;
+                }
+                best
             } else {
                 fixed_dist.unwrap_or(DistMode::Tile)
             };
@@ -635,7 +711,7 @@ impl Screen {
         let persist_dist = if winner_render == RenderMode::Direct
             && winner_workers == WorkersMode::All
             && probe_dist
-            && (static_valid || tile_valid)
+            && (static_valid || tile_valid || dynamic_valid)
         {
             Some(winner_dist)
         } else {
@@ -653,11 +729,14 @@ impl Screen {
                     && winner_workers == WorkersMode::All
                     && mp_drive.is_some();
                 let use_tile = use_mp && winner_dist == DistMode::Tile;
+                let use_dynamic = use_mp && winner_dist == DistMode::Dynamic;
                 for _ in 0..frames {
                     let fstart = tsc();
                     let mut frame_over = false;
                     if winner_render == RenderMode::Blt {
                         let _ = self.upload_blt(w, h, &pixels);
+                    } else if use_dynamic {
+                        frame_over = !mp_drive.as_mut().expect("mp drive").run_round_dynamic();
                     } else if use_tile {
                         frame_over = !mp_drive.as_mut().expect("mp drive").run_round_tiled();
                     } else if use_mp {
@@ -702,7 +781,7 @@ impl Screen {
             }
         };
         log::info!(
-            "render auto: direct_bsp {} ticks vs mp_static {} vs mp_tile {} vs blt {} ({} frames, {} cores) -> render={:?} workers={:?} dist={:?} vsync={:?} (overruns {}/{})",
+            "render auto: direct_bsp {} ticks vs mp_static {} vs mp_tile {} vs mp_dynamic {} vs blt {} ({} frames, {} cores) -> render={:?} workers={:?} dist={:?} vsync={:?} (overruns {}/{})",
             if time_direct {
                 acc_direct.to_string()
             } else {
@@ -710,6 +789,7 @@ impl Screen {
             },
             cell_str(time_static, acc_static),
             cell_str(time_tile, acc_tile),
+            cell_str(time_dynamic, acc_dynamic),
             cell_str(time_blt, acc_blt),
             frames,
             n_cores,
@@ -767,9 +847,10 @@ pub(crate) fn calibrate_tps() -> u64 {
 /// AP 退场哨兵：BSP 写 QUIT 后 AP 跳出常驻循环（同 `gop_bench::FILL_QUIT` 做法）。
 const CAL_QUIT: usize = usize::MAX;
 
-/// 模式：0=static, 1=tile（双 cell 共用一个会话，轮次间翻转）。
+/// 模式：0=static, 1=tile, 2=dynamic（三 cell 共用一个会话，轮次间翻转）。
 const CAL_MODE_STATIC: u8 = 0;
 const CAL_MODE_TILED: u8 = 1;
+const CAL_MODE_DYNAMIC: u8 = 2;
 
 struct MpCalCtx<'a> {
     mp: &'a MpServices,
@@ -785,10 +866,16 @@ struct MpCalCtx<'a> {
     tile: &'a AtomicUsize,
     tile_rows: usize,
     tiles_total: usize,
+    /// 各核上一轮静态 copy 耗时（AP 自记；BSP 读来算 dynamic 加权边界）。
+    times: *const AtomicUsize,
+    /// dynamic 加权行边界（n+1 项；BSP 写、mode/round 发布后 AP 只读）。
+    bounds: *const AtomicUsize,
 }
 
-/// AP 常驻循环：等新轮次号，按本轮模式拷（静态分区 / tile 游标领活），打卡。
-/// BSP 发 QUIT 后退出。mode 由 BSP 在发布轮次号前写好（SeqCst，先 mode 后 round）。
+/// AP 常驻循环：等新轮次号，按本轮模式拷（静态分区 / tile 游标领活 /
+/// dynamic 加权边界），打卡。静态分支自带计时（dynamic 定权 probe 用）。
+/// BSP 发 QUIT 后退出。mode/bounds 由 BSP 在发布轮次号前写好
+///（SeqCst，先 mode/bounds 后 round）。
 extern "efiapi" fn ap_cal_copy(arg: *mut c_void) {
     if arg.is_null() {
         return;
@@ -807,7 +894,8 @@ extern "efiapi" fn ap_cal_copy(arg: *mut c_void) {
             continue;
         }
         my_round = g;
-        if ctx.mode.load(Ordering::Acquire) == CAL_MODE_TILED {
+        let mode = ctx.mode.load(Ordering::Acquire);
+        if mode == CAL_MODE_TILED {
             let base = (g as u64).saturating_mul(ctx.tiles_total as u64);
             loop {
                 let t = ctx.tile.fetch_add(1, Ordering::SeqCst) as u64;
@@ -821,15 +909,34 @@ extern "efiapi" fn ap_cal_copy(arg: *mut c_void) {
                     copy_rows_cal(ctx.fb_base, ctx.fb_stride, ctx.src, ctx.row_bytes, ty0, ty1)
                 };
             }
+        } else if mode == CAL_MODE_DYNAMIC {
+            let dy0 = unsafe {
+                (*ctx.bounds.add(id))
+                    .load(Ordering::Acquire)
+                    .min(ctx.height)
+            };
+            let dy1 = unsafe {
+                (*ctx.bounds.add(id + 1))
+                    .load(Ordering::Acquire)
+                    .min(ctx.height)
+                    .max(dy0)
+            };
+            unsafe { copy_rows_cal(ctx.fb_base, ctx.fb_stride, ctx.src, ctx.row_bytes, dy0, dy1) };
         } else {
+            let t0 = tsc();
             unsafe { copy_rows_cal(ctx.fb_base, ctx.fb_stride, ctx.src, ctx.row_bytes, y0, y1) };
+            unsafe {
+                (*ctx.times.add(id)).store(tsc().saturating_sub(t0) as usize, Ordering::Relaxed)
+            };
         }
         ctx.done.fetch_add(1, Ordering::SeqCst);
     }
 }
 
-/// BSP 侧驱动器：发轮次号 → 拷自己份（分区/领活）→ 等 AP 打卡齐（单轮 5 秒熔断）。
+/// BSP 侧驱动器：发轮次号 → 拷自己份（分区/领活/加权边界）→ 等 AP 打卡齐（单轮 5 秒熔断）。
 struct MpDrive<'a> {
+    n: usize,
+    bsp_id: usize,
     fb_base: *mut u8,
     fb_stride: usize,
     src: *const u8,
@@ -844,6 +951,8 @@ struct MpDrive<'a> {
     tile: &'a AtomicUsize,
     tile_rows: usize,
     tiles_total: usize,
+    times: *const AtomicUsize,
+    bounds: *const AtomicUsize,
     next: usize,
     tps: u64,
 }
@@ -857,6 +966,51 @@ impl MpDrive<'_> {
     /// 热身 1 轮 tile（同上）。
     fn warmup_tiled(&mut self) {
         let _ = self.run_round_tiled();
+    }
+
+    /// 热身 1 轮 dynamic（定权 probe 之后，不计时）。
+    fn warmup_dynamic(&mut self) {
+        let _ = self.run_round_dynamic();
+    }
+
+    /// dynamic 定权 probe：跑一轮静态（AP 在静态分支自带计时），读各核耗时
+    /// 算加权边界并发布。返回 false = 本轮 AP 没跟上（调用方作废整个 MP 会话）。
+    fn probe_dynamic(&mut self) -> bool {
+        if !self.run_round() {
+            return false;
+        }
+        let mut times = vec![0u64; self.n.max(1)];
+        for (i, t) in times.iter_mut().enumerate() {
+            *t = unsafe { (*self.times.add(i)).load(Ordering::Relaxed) } as u64;
+        }
+        let b = dynamic_row_bounds(&times, self.n, 0, self.height);
+        for (i, v) in b.iter().enumerate() {
+            unsafe { (*self.bounds.add(i)).store(*v, Ordering::Relaxed) };
+        }
+        true
+    }
+
+    /// 跑一轮 dynamic 加权分区（BSP 拷自己的加权行区；AP 按发布的边界拷）。
+    fn run_round_dynamic(&mut self) -> bool {
+        self.next += 1;
+        let r = self.next;
+        self.mode.store(CAL_MODE_DYNAMIC, Ordering::SeqCst);
+        self.round.store(r, Ordering::SeqCst);
+        let dy0 = unsafe { (*self.bounds.add(self.bsp_id)).load(Ordering::Relaxed) };
+        let dy1 = unsafe { (*self.bounds.add(self.bsp_id + 1)).load(Ordering::Relaxed) };
+        let dy0 = dy0.min(self.height);
+        let dy1 = dy1.min(self.height).max(dy0);
+        unsafe {
+            copy_rows_cal(
+                self.fb_base,
+                self.fb_stride,
+                self.src,
+                self.row_bytes,
+                dy0,
+                dy1,
+            )
+        };
+        self.wait_done(r)
     }
 
     /// 跑一轮静态分区，返回是否全员跟上（false = 熔断，调用方作废 MP 双 cell）。
@@ -928,6 +1082,92 @@ fn rows_for_cal(id: usize, n: usize, h: usize) -> (usize, usize) {
     let y0 = id * per;
     let y1 = if id + 1 >= n { h } else { y0 + per };
     (y0.min(h), y1.min(h))
+}
+
+/// 按各核搬运耗时加权分行（dynamic 用；校准定权与播放自适应共用同一数学）。
+/// `times[i]` 为核 i 上一轮 copy ticks（0 = 无数据）；`y0..y1` 为待分行区
+/// （播放侧传 `OSD_ROWS..H`，校准侧传全高）。快核多拿：
+/// 行数正比于速率（`SCALE / t`），最大余数法 + 每核至少 1 行（行数够分时）。
+/// 全无数据 → 等分；核比行多（退化，实机到不了）→ 前面的核各 1 行。
+/// 返回 n+1 项边界（首项 y0、末项 y1）。整数运算，无浮点（软浮点历史，见 AGENTS）。
+pub(crate) fn dynamic_row_bounds(times: &[u64], n: usize, y0: usize, y1: usize) -> Vec<usize> {
+    let n = n.max(1);
+    let total = y1.saturating_sub(y0);
+    let mut bounds = Vec::with_capacity(n + 1);
+    bounds.push(y0);
+    if total == 0 {
+        for _ in 0..n {
+            bounds.push(y0);
+        }
+        return bounds;
+    }
+    // 速率：耗时越小越快。0 耗时视为无数据（首轮/异常），先记 0。
+    const SCALE: u64 = 1 << 24;
+    let mut rates = vec![0u64; n];
+    for (i, r) in rates.iter_mut().enumerate() {
+        let t = times.get(i).copied().unwrap_or(0);
+        if t > 0 {
+            *r = SCALE / t.max(1);
+        }
+    }
+    if rates.iter().all(|&r| r == 0) {
+        // 全无数据 → 等分（首轮就这样，与 static 同分布）。
+        for i in 1..=n {
+            bounds.push(y0 + total * i / n);
+        }
+        return bounds;
+    }
+    // 部分无数据的核按平均速率兜底（防 0 行震荡：0 行 → 耗时 0 → 下轮爆权重）。
+    let known: Vec<u64> = rates.iter().copied().filter(|&r| r > 0).collect();
+    let avg = known.iter().sum::<u64>() / known.len().max(1) as u64;
+    for r in rates.iter_mut() {
+        if *r == 0 {
+            *r = avg.max(1);
+        }
+    }
+    let sum: u64 = rates.iter().sum();
+    let mut rows = vec![0usize; n];
+    if total >= n {
+        // 先每核预留 1 行，剩余按权重最大余数分。
+        let rest = (total - n) as u64;
+        let mut fracs = vec![0u64; n];
+        let mut assigned = 0usize;
+        for (i, r) in rates.iter().enumerate() {
+            let base = rest * r / sum.max(1);
+            fracs[i] = rest * r % sum.max(1);
+            rows[i] = 1 + base as usize;
+            assigned += base as usize;
+        }
+        let mut leftover = rest as usize - assigned;
+        while leftover > 0 {
+            let mut pick = 0;
+            for i in 1..n {
+                if fracs[i] > fracs[pick] {
+                    pick = i;
+                }
+            }
+            if fracs[pick] == 0 && leftover < n {
+                break;
+            }
+            rows[pick] += 1;
+            fracs[pick] = 0;
+            leftover -= 1;
+        }
+    } else {
+        for (i, r) in rows.iter_mut().enumerate() {
+            *r = if i < total { 1 } else { 0 };
+        }
+    }
+    let mut y = y0;
+    for r in rows {
+        y += r;
+        bounds.push(y.min(y1));
+    }
+    // 末项钳到 y1（整除余数场景，rows 总和恒等于 total，钳制只是兜底）。
+    if let Some(last) = bounds.last_mut() {
+        *last = y1;
+    }
+    bounds
 }
 
 /// 从合成帧行区拷到显存行区（显存 stride 可能大于行宽，逐行拷）。

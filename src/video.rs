@@ -11,7 +11,7 @@ use uefi::proto::media::file::{File, FileInfo, RegularFile};
 use uefi::proto::pi::mp::MpServices;
 use crate::config::{self, CopyWidth, DistMode};
 use crate::fs::Fs;
-use crate::graphics::{Screen, copy_block};
+use crate::graphics::{dynamic_row_bounds, Screen, copy_block};
 use crate::video::buffer::{BltFrameBuffer, QoiFrameBuffer, RawFrameBuffer};
 use crate::video::decoder::{VideoMemory, VideoMemoryRaw};
 use crate::error::Result;
@@ -375,11 +375,23 @@ struct PlayTask<'a> {
     tps: u64,
     /// P2 位宽（`config::copy_width` 快照；AP/BSP 同值，见 `copy_block` 门控）。
     copy: u8,
-    /// P2 调度（`config::effective_dist` 快照；tile 时 BSP+AP 从 `tile` 领活）。
+    /// P2 调度（`config::effective_dist` 快照；tile 时 BSP+AP 从 `tile` 领活；
+    /// dynamic 时 BSP+AP 按 `bounds` 加权分行，`bgen` 做发布世代）。
     dist: u8,
     tile: &'a AtomicUsize,
     tile_rows: usize,
     tiles_total: usize,
+    /// P4-dynamic 源：全帧指针表（`[total_frames]`，每帧行 stride 对齐；
+    /// static/tile 沿用 `core_frame_ptrs` 切片，本字段仅 dynamic 有效）。
+    dyn_frames: *const *const u8,
+    /// P4-dynamic 边界：n+1 项行号（首项恒 `OSD_ROWS`，AP 不盖 OSD 字，
+    /// 与 tile 同策略）。BSP 写、AP 只读，`bgen` 做发布。
+    bounds: *const AtomicUsize,
+    /// P4-dynamic 发布世代：BSP 改完 `bounds` 后 bump；AP 每轮对世代--
+    /// 不一致才重载自己的行区（无 tile 游标那样的每块原子开销）。
+    bgen: *const AtomicUsize,
+    /// P4-dynamic 计时：每核本轮搬运行耗时（BSP 读来算下轮权重，EWMA 平滑）。
+    btimes: *const AtomicUsize,
     /// P3 掉帧指令（BSP 独写、AP 只读；`drop_gen` 是世代号，见循环注释）。
     drop_gen: &'a AtomicUsize,
     drop_flag: &'a AtomicUsize,
@@ -416,21 +428,41 @@ extern "efiapi" fn play_task(arg: *mut c_void) {
     let my_id = unsafe { (*ctx.mp).who_am_i().unwrap_or(usize::MAX) };
     if my_id >= ctx.num_cores { return; }
 
-    // 核心参数计算
+    // P4-dynamic 开关（快照自 `effective_dist`；static/tile/dynamic 三路互斥）。
+    let dynamic = ctx.dist == DistMode::Dynamic as u8;
+    // 静态切片参数（static/tile 路用；dynamic 走全帧源 + 加权边界，不碰它——
+    // dynamic 下解码根本不切分片，`core_frame_ptrs` 为空，解引用会踩空指针）。
     let rows_per_core = ctx.height / ctx.num_cores;
     let y_start = my_id * rows_per_core;
-    let my_fb_ptr = unsafe { ctx.fb_base.add(y_start * ctx.stride_bytes) };
-    let my_frames_list = unsafe { *ctx.core_frame_ptrs.add(my_id) };
-    let my_block_size = if my_id == ctx.num_cores - 1 {
-        (ctx.height - y_start) * ctx.stride_bytes
+    let (my_fb_ptr, my_frames_list, my_block_size) = if dynamic {
+        (core::ptr::null_mut(), core::ptr::null(), 0)
     } else {
-        rows_per_core * ctx.stride_bytes
+        unsafe {
+            (
+                ctx.fb_base.add(y_start * ctx.stride_bytes),
+                *ctx.core_frame_ptrs.add(my_id),
+                if my_id == ctx.num_cores - 1 {
+                    (ctx.height - y_start) * ctx.stride_bytes
+                } else {
+                    rows_per_core * ctx.stride_bytes
+                },
+            )
+        }
     };
 
     let mut local_frame_idx = 0;
     let n_cores = ctx.num_cores;
     // P2：本核搬运位宽（快照自 boot 时 `resolve_accel`，全核一致）。
     let copy_w = CopyWidth::from_u8(ctx.copy);
+    // P4-dynamic 本核状态：已见发布世代 + 当前行区（首轮全 MAX/等分，见下）。
+    // BSP 另有一张 EWMA 均值表（`avg`），每轮按各核耗时重算权重。
+    let mut local_bgen = usize::MAX;
+    let (mut dy0, mut dy1) = (OSD_ROWS, ctx.height);
+    let mut avg: Vec<u64> = if dynamic && my_id == 0 {
+        vec![0u64; n_cores.max(1)]
+    } else {
+        Vec::new()
+    };
     // P3：掉帧迭代计数 + BSP 侧累计（确定性：全核读同一发布值，见下）。
     let mut iter: usize = 0;
     let mut drops_total: u64 = 0;
@@ -513,9 +545,37 @@ extern "efiapi" fn play_task(arg: *mut c_void) {
         let fi = (local_frame_idx + skip) % ctx.total_frames.max(1);
         let fstart = rdtsc();
         // 1. 搬运 (生产)：static 按核分区；tile 从共享游标领活
-        //    （`tile` 单调递增，`base = iter*N`，永不回绕；OSD 行跳过）。
-        let tiled = ctx.dist == DistMode::Tile as u8;
-        if tiled {
+        //    （`tile` 单调递增，`base = iter*N`，永不回绕；OSD 行跳过）；
+        //    dynamic 按发布的加权边界分行（BSP 每轮按各核耗时重算，快核多拿，
+        //    无游标原子开销；OSD 行恒划在边界外，AP 不盖字，与 tile 同策略）。
+        let tiled = !dynamic && ctx.dist == DistMode::Tile as u8;
+        if dynamic {
+            let g = unsafe { (*ctx.bgen).load(Ordering::Acquire) };
+            if g != local_bgen {
+                local_bgen = g;
+                dy0 = unsafe { (*ctx.bounds.add(my_id)).load(Ordering::Acquire).min(ctx.height) };
+                dy1 = unsafe {
+                    (*ctx.bounds.add(my_id + 1))
+                        .load(Ordering::Acquire)
+                        .min(ctx.height)
+                        .max(dy0)
+                };
+            }
+            let src_frame = unsafe { *ctx.dyn_frames.add(fi) };
+            let t0 = rdtsc();
+            let mut y = dy0;
+            while y < dy1 {
+                unsafe {
+                    let d = ctx.fb_base.add(y * ctx.stride_bytes);
+                    let s = src_frame.add(y * ctx.stride_bytes);
+                    copy_block(d, s, ctx.stride_bytes, copy_w);
+                }
+                y += 1;
+            }
+            unsafe {
+                (*ctx.btimes.add(my_id)).store(rdtsc().saturating_sub(t0) as usize, Ordering::Relaxed)
+            };
+        } else if tiled {
             let base = (iter as u64).saturating_mul(ctx.tiles_total as u64);
             let src_frame_base = unsafe { *my_frames_list.add(fi) as *const u8 };
             loop {
@@ -574,6 +634,34 @@ extern "efiapi" fn play_task(arg: *mut c_void) {
         // 所有人都在等计数器达到本轮的 my_next_target
         while ctx.sync_counter.load(Ordering::Acquire) < my_next_target {
             core::hint::spin_loop();
+        }
+
+        // 3.2 dynamic 自适应（BSP 独写）：各核本轮耗时已齐（栅栏后可见），
+        // EWMA 平滑后重算加权边界并发布新世代。AP 下轮按世代重载行区；
+        // max 不限速时 AP 不等 drop_gen 也安全（旧世代配旧边界，恒成对）。
+        if dynamic && my_id == 0 {
+            for i in 0..n_cores {
+                let t = unsafe { (*ctx.btimes.add(i)).load(Ordering::Relaxed) } as u64;
+                avg[i] = if avg[i] == 0 { t } else { (avg[i] * 3 + t) / 4 };
+            }
+            let b = dynamic_row_bounds(&avg, n_cores, OSD_ROWS, ctx.height);
+            for (i, v) in b.iter().enumerate() {
+                unsafe { (*ctx.bounds.add(i)).store(*v, Ordering::Relaxed) };
+            }
+            local_bgen = local_bgen.wrapping_add(1);
+            unsafe { (*ctx.bgen).store(local_bgen, Ordering::SeqCst) };
+            // BSP 自己的下一轮行区：刚发布的最热边界，直接装载。
+            dy0 = unsafe {
+                (*ctx.bounds.add(my_id))
+                    .load(Ordering::Relaxed)
+                    .min(ctx.height)
+            };
+            dy1 = unsafe {
+                (*ctx.bounds.add(my_id + 1))
+                    .load(Ordering::Relaxed)
+                    .min(ctx.height)
+                    .max(dy0)
+            };
         }
 
         // 3.5 限速 + 下轮掉帧指令发布：栅栏刚对齐过，各核按同一预算自旋。
@@ -679,7 +767,11 @@ pub fn mp_draw(
     file.read(&mut compressed_buffer).map_err(|e| e.status())?;
 
     // 准备核心存储容器: [核心ID][帧ID] -> 这一帧该核负责的像素切片
+    // （dynamic 不切分片，见下全帧表；容器保持空，`core_frame_ptrs` 传空）。
     let mut core_frames: CoreFrameSegment = (0..n_cores).map(|_| Vec::new()).collect();
+    // P4-dynamic 全帧表：每帧 scr_height 行 × stride（行区由 bounds 逐轮重划，
+    // 源必须是全帧，与 static/tile 的等分切片不兼容，内存总量同级）。
+    let mut dyn_frames: Vec<Frame> = Vec::new();
     let mut offset = 0;
 
     let (scr_width, scr_height) = screen.get_gop().current_mode_info().resolution();
@@ -687,6 +779,11 @@ pub fn mp_draw(
 
     let fb_base = screen.get_gop().frame_buffer().as_mut_ptr();
     let scr_stride = screen.get_gop().current_mode_info().stride();
+    let stride_bytes = scr_stride * 4; // 屏幕物理跨度
+    let row_bytes = width * 4; // 视频实际宽度
+    // P4-dynamic 开关（`video_run` 只在 direct+all 时进 `mp_draw`，
+    // 此时 `effective_dist` 的 direct+all 短路已过，本值即真实调度）。
+    let dynamic = config::effective_dist() == DistMode::Dynamic;
 
     // 原始单帧空间初始化
     let mut single_raw: Frame = vec![0u8; width * height * 4];
@@ -716,69 +813,139 @@ pub fn mp_draw(
             chunk.swap(0, 2);
         }
 
-        // 核心切分
-        for core_id in 0..n_cores {
-            let y_start = core_id * rows_per_core; // 该核心负责的屏幕起始行
-            let y_end = if core_id == n_cores - 1 { scr_height } else { y_start + rows_per_core };
-
-            let mut frame: Frame = Vec::new();
-            let stride_bytes = scr_stride * 4; // 屏幕物理跨度
-            let row_bytes = width * 4;        // 视频实际宽度
-
-            for y in y_start..y_end {
-                let video_y = y;
-
-                if video_y < height {
-                    // 只有当屏幕行落在视频高度范围内时，才去 single_raw 拿数据
-                    let src_row_start = video_y * width * 4;
-                    let src_row_end = src_row_start + row_bytes;
-
-                    if src_row_end > single_raw.len() {
+        // dynamic 全帧：视频行拷入 + stride 补齐，超高行置黑（与切片同语义，
+        // 行区划分推迟到播放时按 bounds 逐轮重算）。
+        if dynamic {
+            let mut full: Frame = vec![0u8; scr_height * stride_bytes];
+            for y in 0..scr_height {
+                if y < height {
+                    let s0 = y * width * 4;
+                    let s1 = s0 + row_bytes;
+                    if s1 > single_raw.len() {
                         Err(Status::INVALID_PARAMETER)?
                     }
-
-                    // 1. 拷贝视频行
-                    frame.extend_from_slice(&single_raw[src_row_start..src_row_end]);
-
-                    // 2. 补齐当前行到屏幕的 stride 跨度
-                    if stride_bytes > row_bytes {
-                        let padding = stride_bytes - row_bytes;
-                        frame.resize(frame.len() + padding, 0u8);
-                    }
-                } else {
-                    // 如果屏幕行超过了视频高度，这一行全是黑的（但也要占满 stride 长度）
-                    frame.resize(frame.len() + stride_bytes, 0u8);
+                    full[y * stride_bytes..y * stride_bytes + row_bytes]
+                        .copy_from_slice(&single_raw[s0..s1]);
                 }
             }
-            core_frames[core_id].push(frame);
+            dyn_frames.push(full);
+        } else {
+            // 核心切分（static/tile 路，不动）
+            for core_id in 0..n_cores {
+                let y_start = core_id * rows_per_core; // 该核心负责的屏幕起始行
+                let y_end = if core_id == n_cores - 1 {
+                    scr_height
+                } else {
+                    y_start + rows_per_core
+                };
+
+                let mut frame: Frame = Vec::new();
+
+                for y in y_start..y_end {
+                    let video_y = y;
+
+                    if video_y < height {
+                        // 只有当屏幕行落在视频高度范围内时，才去 single_raw 拿数据
+                        let src_row_start = video_y * width * 4;
+                        let src_row_end = src_row_start + row_bytes;
+
+                        if src_row_end > single_raw.len() {
+                            Err(Status::INVALID_PARAMETER)?
+                        }
+
+                        // 1. 拷贝视频行
+                        frame.extend_from_slice(&single_raw[src_row_start..src_row_end]);
+
+                        // 2. 补齐当前行到屏幕的 stride 跨度
+                        if stride_bytes > row_bytes {
+                            let padding = stride_bytes - row_bytes;
+                            frame.resize(frame.len() + padding, 0u8);
+                        }
+                    } else {
+                        // 如果屏幕行超过了视频高度，这一行全是黑的（但也要占满 stride 长度）
+                        frame.resize(frame.len() + stride_bytes, 0u8);
+                    }
+                }
+                core_frames[core_id].push(frame);
+            }
         }
         offset = next_frame_pos;
     }
 
     // 空集守卫：全坏文件直接报错，不进“AP 读空指针 + 无限循环”（曾 OOB）。
-    if core_frames[0].is_empty() {
+    let total_frames = if dynamic {
+        dyn_frames.len()
+    } else {
+        core_frames[0].len()
+    };
+    if total_frames == 0 {
         return Err(crate::error::NyaStatus::_Debug(alloc::format!(
             "video: no valid frames ({} skipped)",
             skipped
         )));
     }
     if skipped > 0 {
-        log::warn!("video: mp predecoded {} frames, skipped {} bad", core_frames[0].len(), skipped);
+        log::warn!(
+            "video: mp predecoded {} frames ({}), skipped {} bad",
+            total_frames,
+            if dynamic {
+                "dynamic full frames"
+            } else {
+                "static slices"
+            },
+            skipped
+        );
     }
 
     // 2 构造参数
-    let stride_bytes = scr_stride * 4;
 
     // 用来存储所有核心任务包的指针
 
-    // --- 准备指针矩阵 ---
-    // 我们需要把 Vec<Vec<Vec<u8>>> 转换成三级指针，方便 AP 访问
-    let mut all_core_lists = Vec::new();
-    for core_id in 0..n_cores {
-        let frame_addrs: Vec<*const u8> = core_frames[core_id].iter().map(|f| f.as_ptr()).collect();
-        all_core_lists.push(Box::leak(frame_addrs.into_boxed_slice()).as_ptr());
-    }
-    let core_frame_ptrs = Box::leak(all_core_lists.into_boxed_slice()).as_ptr();
+    // --- 准备指针矩阵（static/tile 用；dynamic 传空，AP 不碰，见 play_task） ---
+    let core_frame_ptrs: *const *const *const u8 = if dynamic {
+        core::ptr::null()
+    } else {
+        // 我们需要把 Vec<Vec<Vec<u8>>> 转换成三级指针，方便 AP 访问
+        let mut all_core_lists = Vec::new();
+        for core_id in 0..n_cores {
+            let frame_addrs: Vec<*const u8> =
+                core_frames[core_id].iter().map(|f| f.as_ptr()).collect();
+            all_core_lists.push(Box::leak(frame_addrs.into_boxed_slice()).as_ptr());
+        }
+        Box::leak(all_core_lists.into_boxed_slice()).as_ptr()
+    };
+
+    // --- P4-dynamic 共享状态（Box 漏存，会话期常驻；播完不回收，同既有风格） ---
+    let (dyn_frames_ptr, bounds, bgen, btimes): (
+        *const *const u8,
+        *const AtomicUsize,
+        *const AtomicUsize,
+        *const AtomicUsize,
+    ) = if dynamic {
+        let frame_addrs: Vec<*const u8> = dyn_frames.iter().map(|f| f.as_ptr()).collect();
+        let fp = Box::leak(frame_addrs.into_boxed_slice()).as_ptr();
+        // 首轮等分 `[OSD_ROWS, scr_height)`；BSP 首轮栅栏后即按实测重算发布。
+        let init = dynamic_row_bounds(&vec![0u64; n_cores.max(1)], n_cores, OSD_ROWS, scr_height);
+        let mut bv = Vec::with_capacity(n_cores + 1);
+        for v in init {
+            bv.push(AtomicUsize::new(v));
+        }
+        let bp: *const AtomicUsize = Box::leak(bv.into_boxed_slice()).as_ptr();
+        let gp: *const AtomicUsize = Box::leak(Box::new(AtomicUsize::new(0)));
+        let mut tv = Vec::with_capacity(n_cores.max(1));
+        for _ in 0..n_cores.max(1) {
+            tv.push(AtomicUsize::new(0));
+        }
+        let tp: *const AtomicUsize = Box::leak(tv.into_boxed_slice()).as_ptr();
+        (fp, bp, gp, tp)
+    } else {
+        (
+            core::ptr::null(),
+            core::ptr::null(),
+            core::ptr::null(),
+            core::ptr::null(),
+        )
+    };
 
     let (scr_width, scr_height) = screen.get_gop().current_mode_info().resolution();
     let scr_stride = screen.get_gop().current_mode_info().stride();
@@ -800,7 +967,7 @@ pub fn mp_draw(
         height: scr_height,
         num_cores: n_cores,
         core_frame_ptrs,
-        total_frames: core_frames[0].len(),
+        total_frames,
         sync_counter,
         target_fps: target.unwrap_or(0),
         tps,
@@ -811,6 +978,10 @@ pub fn mp_draw(
         tiles_total: scr_height.div_ceil(config::tune_tile_rows().max(1) as usize),
         drop_gen,
         drop_flag,
+        dyn_frames: dyn_frames_ptr,
+        bounds,
+        bgen,
+        btimes,
     }));
 
     let arg_ptr = ctx as *mut _ as *mut c_void;

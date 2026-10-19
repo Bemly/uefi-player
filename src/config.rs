@@ -10,13 +10,13 @@
 //! [render]
 //! mode    = "auto"        # "auto" | "direct" | "blt"
 //! workers = "auto"        # "auto" | "bsp_only" | "all"（多核开关）
-//! dist    = "auto"        # "auto" | "static" | "tile"（多核分工，只对 direct+all 有效）
+//! dist    = "auto"        # "auto" | "static" | "tile" | "dynamic"（多核分工，只对 direct+all 有效）
 //! vsync   = "auto"        # "auto" | "on" | "off"（软件 60fps 帧预算）
 //! blt_op  = "buffer_to_video"
 //! # 首启校准记忆（固件回写，GUI 只读展示；"auto"/0 = 未测，下次启动必测）：
 //! measured_render  = "auto"  # "direct" | "blt"
 //! measured_workers = "auto"  # "bsp_only" | "all"
-//! measured_dist    = "auto"  # "static" | "tile"
+//! measured_dist    = "auto"  # "static" | "tile" | "dynamic"
 //! measured_vsync   = "auto"  # "on" | "off"
 //! measured_cores   = 0       # 校准时机型 AP+BSP 总数
 //! [render.tune]
@@ -176,7 +176,9 @@ impl CopyWidth {
 
 /// 多核分工（P2 调度矩阵）：`Static` = 每核固定行区（零调度开销，同构最优）；
 /// `Tile` = 帧切小块（行区），BSP+AP 从原子游标自助领活（异构大小核/负载不均时赢，
-/// 顺带把 OSD 行区划出 tile，AP 不再盖 OSD 字）。`Auto` = 同机实测二选一。
+/// 顺带把 OSD 行区划出 tile，AP 不再盖 OSD 字）；`Dynamic` = 按实测核速加权分行
+/// （快核多拿；校准时 probe 定权计时，播放时每轮按各核上一轮耗时重算，无 tile 游标开销）。
+/// `Auto` = 同机实测三选一。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum DistMode {
@@ -184,6 +186,7 @@ pub enum DistMode {
     Auto,
     Static,
     Tile,
+    Dynamic,
 }
 
 impl DistMode {
@@ -192,12 +195,14 @@ impl DistMode {
             Self::Auto => 0,
             Self::Static => 1,
             Self::Tile => 2,
+            Self::Dynamic => 3,
         }
     }
     fn from_u8(v: u8) -> Self {
         match v {
             1 => Self::Static,
             2 => Self::Tile,
+            3 => Self::Dynamic,
             _ => Self::Auto,
         }
     }
@@ -470,7 +475,7 @@ static RESOLVED_RENDER: AtomicU8 = AtomicU8::new(0);
 static RESOLVED_WORKERS: AtomicU8 = AtomicU8::new(0);
 /// 0 = 未测，1 = on，2 = off（`vsync = "auto"` 的探测结论）
 static RESOLVED_VSYNC: AtomicU8 = AtomicU8::new(0);
-/// 0 = 未测，1 = static，2 = tile（`dist = "auto"` 的矩阵结论）
+/// 0 = 未测，1 = static，2 = tile，3 = dynamic（`dist = "auto"` 的矩阵结论）
 static RESOLVED_DIST: AtomicU8 = AtomicU8::new(0);
 /// 硬件实测最大搬运位宽（`CopyWidth` 判别值；0 = 未探，按 X128 保守用）。
 /// `auto` 取它，显式档位超出它会被钳住并警告（不断 boot）。
@@ -606,6 +611,7 @@ pub fn effective_dist() -> DistMode {
     match dist_mode() {
         DistMode::Auto => match RESOLVED_DIST.load(Ordering::Relaxed) {
             1 => DistMode::Static,
+            3 => DistMode::Dynamic,
             _ => DistMode::Tile,
         },
         explicit => explicit,

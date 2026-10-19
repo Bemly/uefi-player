@@ -137,7 +137,8 @@ impl WorkersMode {
     }
 }
 
-/// 多核分工（与固件 `DistMode` 同构；`Tile` = tile 自调度，`Static` = 固定分区）。
+/// 多核分工（与固件 `DistMode` 同构；`Tile` = tile 自调度，`Static` = 固定分区，
+/// `Dynamic` = 按实测核速加权分行，播中逐轮重算）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 enum DistMode {
@@ -145,15 +146,17 @@ enum DistMode {
     Auto,
     Static,
     Tile,
+    Dynamic,
 }
 
 impl DistMode {
-    const ALL: [Self; 3] = [Self::Auto, Self::Static, Self::Tile];
+    const ALL: [Self; 4] = [Self::Auto, Self::Static, Self::Tile, Self::Dynamic];
     fn file_str(self) -> &'static str {
         match self {
             Self::Auto => "auto",
             Self::Static => "static",
             Self::Tile => "tile",
+            Self::Dynamic => "dynamic",
         }
     }
 }
@@ -441,6 +444,7 @@ fn dist_desc(v: DistMode) -> String {
         DistMode::Auto => t!("accel.desc_dist_auto"),
         DistMode::Static => t!("accel.desc_dist_static"),
         DistMode::Tile => t!("accel.desc_dist_tile"),
+        DistMode::Dynamic => t!("accel.desc_dist_dynamic"),
     }
     .into_owned()
 }
@@ -963,7 +967,8 @@ impl App {
                 {
                     ui.small(t!("accel.dist_hidden"));
                 } else {
-                    ui.horizontal(|ui| {
+                    // 一行四个（窄窗自动换行保底，不断尾；与 blt 行同式）。
+                    ui.horizontal_wrapped(|ui| {
                         for v in DistMode::ALL {
                             if self.option_button(ui, self.cfg.render.dist == v, v.file_str()) {
                                 self.cfg.render.dist = v;
@@ -1356,6 +1361,19 @@ mod schema_tests {
         assert_eq!(cfg.render.tune.frames, default_frames());
         assert_eq!(cfg.render.tune.tile_rows, default_tile_rows());
         assert_eq!(cfg.render.tune.vsync_fps, default_vsync_fps());
+    }
+
+    #[test]
+    fn dist_dynamic_roundtrip() {
+        // 新档位：显式 dynamic 照读照写，measured 同理（旧文件无该值不受影响）。
+        let text = "version = 1\n[accel]\nlevel = \"auto\"\n[render]\nmode = \"direct\"\nworkers = \"all\"\ndist = \"dynamic\"\n[play]\nfps = \"auto\"\n";
+        let cfg: FileConfig = toml::from_str(text).unwrap();
+        assert_eq!(cfg.render.dist, DistMode::Dynamic);
+        let mut cfg = cfg;
+        cfg.render.measured_dist = DistMode::Dynamic;
+        let back: FileConfig = toml::from_str(&toml::to_string(&cfg).unwrap()).unwrap();
+        assert_eq!(back.render.dist, DistMode::Dynamic);
+        assert_eq!(back.render.measured_dist, DistMode::Dynamic);
     }
 
     #[test]
