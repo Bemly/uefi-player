@@ -13,7 +13,8 @@ use crate::diag::common::{flush_keys, pause_return, poll_key};
 use crate::diag::registry::{Entry, ITEMS};
 use crate::error::{handle_fatal, NyaStatus, Result};
 use crate::graphics::{Screen, calibrate_tps, tsc};
-use crate::wallpaper::{self, WP_H, WP_TOP, WP_W, WallpaperSet};
+use crate::video::decoder::Clip;
+use crate::wallpaper::{self, WP_H, WP_TOP, WP_W};
 
 fn draw_menu(screen: &mut Screen) {
     let _ = screen.clear();
@@ -105,9 +106,9 @@ fn key_match(want: char, key: char, raw: u16) -> bool {
         || want == ((raw & 0x7F) as u8 as char).to_ascii_lowercase()
 }
 
-/// 壁纸 idle 状态：预载集 + 下一帧序号 + 上一帧 ticks + 帧预算。
+/// 壁纸 idle 状态：预载剪辑（`Clip`，双格式统一）+ 下一帧序号 + 上一帧 ticks + 帧预算。
 struct WpState {
-    set: WallpaperSet,
+    set: Clip,
     idx: usize,
     last: u64,
     budget: u64,

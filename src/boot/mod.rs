@@ -19,7 +19,8 @@ use self::entries::{BootKind, BootList, enumerate};
 use crate::diag::common::{flush_keys, pause_return, wait_key_ex};
 use crate::error::Result;
 use crate::graphics::{Screen, calibrate_tps, tsc};
-use crate::wallpaper::{self, WallpaperSet};
+use crate::video::decoder::Clip;
+use crate::wallpaper::{self};
 
 /// 子菜单按键：36 个（BLS 项再多也够，超了截断并 warning）。
 const KEYS: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyz";
@@ -117,7 +118,7 @@ fn draw_boot_menu(screen: &mut Screen, list: &BootList) {
 fn boot_index(
     screen: Screen,
     list: &BootList,
-    wp: &Option<WallpaperSet>,
+    wp: &Option<Clip>,
     tps: u64,
     i: usize,
 ) -> Result<Screen> {
@@ -141,7 +142,7 @@ fn volume_of(entry: &crate::boot::entries::BootEntry) -> Option<uefi::Handle> {
 fn boot_entry(
     mut screen: Screen,
     list: &BootList,
-    wp: &Option<WallpaperSet>,
+    wp: &Option<Clip>,
     tps: u64,
     i: usize,
 ) -> Result<Screen> {
@@ -216,7 +217,7 @@ fn boot_entry(
 
 /// P4-B 过渡：`frames` 封顶（0 = 全播预载集），按壁纸 fps 限速。
 /// 非 1920x1080 现显模式跳过（帧几何定死，不缩放）。
-fn play_transition(screen: &mut Screen, wp: &Option<WallpaperSet>, tps: u64) {
+fn play_transition(screen: &mut Screen, wp: &Option<Clip>, tps: u64) {
     let Some(set) = wp else {
         return;
     };

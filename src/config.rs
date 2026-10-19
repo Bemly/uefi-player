@@ -27,9 +27,11 @@
 //! buffers   = 0    # 后缓冲帧数（0 = 直写前台，现状；1-16 = 影子环 + 整推，撕裂窗口压成一次 push）
 //! [play]
 //! fps = "auto"            # "auto" | "max" | "1".."240"
+//! format = "qois"         # 片源格式："qois"（1080p/video.qois）| "raw"（1080p/frameNNNN.raw）
 //! measured_max_fps = 0    # 固件实测后回写，GUI 只读展示
 //! [wallpaper]
 //! enable = false          # 菜单背景 + 引导过渡总开关（默认关）
+//! format = "raw"          # 片源格式："raw"（wallpaper/frameNNNN.raw）| "qois"（wallpaper/wall.qois）
 //! fps = 15                # 背景循环帧率（低帧即可）
 //! frames = 0              # B 过渡封顶帧数（0 = 全播预载集）
 //! preload = 8             # A/B 共用预载帧数上限（1080p BGRA ≈ 8MB/帧）
@@ -421,8 +423,11 @@ const fn default_wallpaper_preload() -> u32 {
     8
 }
 
-/// `[wallpaper]`：动态壁纸开关（P4）。序列位图 `wallpaper/frameNNNN.raw`
-///（BGRA 直存，首版定死 1920x1080），缺键老配置按默认（关）处理。
+/// `[wallpaper]`：动态壁纸开关（P4）。片源双格式（`format` 矩阵，见 `MediaFormat`）：
+/// - `raw`（默认）：`wallpaper/frameNNNN.raw`，BGRA 直存，首版定死 1920x1080；
+/// - `qois`：`wallpaper/wall.qois`（`u32le len + QOI` 串接，与视频同格式），
+///   开机预解码（与播片同代价，首帧无抖动但启动慢一拍）。
+/// 缺键老配置按默认（关/raw）处理。
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WallpaperConfig {
@@ -435,6 +440,9 @@ pub struct WallpaperConfig {
     /// 预载帧数上限（内存兜底；单帧 1920x1080x4 ≈ 8MB）。
     #[serde(default = "default_wallpaper_preload")]
     pub preload: u32,
+    /// 片源格式（默认 raw，老文件照读）。
+    #[serde(default = "default_wallpaper_format")]
+    pub format: MediaFormat,
 }
 
 impl Default for WallpaperConfig {
@@ -444,6 +452,42 @@ impl Default for WallpaperConfig {
             fps: default_wallpaper_fps(),
             frames: 0,
             preload: default_wallpaper_preload(),
+            format: MediaFormat::Raw,
+        }
+    }
+}
+
+/// 片源格式矩阵（播放器 + 壁纸共用，`Clip` 统一解码）：
+/// - `Qois`：QOI 压缩序列（省 U 盘，费解码）；
+/// - `Raw`：BGRA 裸帧序列（零解码直搬，费显存/体积）。
+/// 非法值整个文件回默认 + 警告（与其它枚举档位同规则，不单独兜底）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MediaFormat {
+    Qois,
+    Raw,
+}
+
+const fn default_play_format() -> MediaFormat {
+    MediaFormat::Qois
+}
+
+const fn default_wallpaper_format() -> MediaFormat {
+    MediaFormat::Raw
+}
+
+impl MediaFormat {
+    const fn as_u8(self) -> u8 {
+        match self {
+            MediaFormat::Qois => 0,
+            MediaFormat::Raw => 1,
+        }
+    }
+
+    fn from_u8(v: u8) -> MediaFormat {
+        match v {
+            1 => MediaFormat::Raw,
+            _ => MediaFormat::Qois,
         }
     }
 }
@@ -475,7 +519,8 @@ pub fn parse_fps(s: &str) -> FpsPolicy {
 }
 
 /// `[play]`：`fps` 是字符串（三态没法用纯数字表达），`measured_max_fps`
-/// 只由固件实测回写（0 = 未测），GUI 只读展示。
+/// 只由固件实测回写（0 = 未测），GUI 只读展示。`format` 切片源：
+/// `qois`（默认，`1080p/video.qois`）/ `raw`（`1080p/frameNNNN.raw` 序列）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PlayConfig {
@@ -483,6 +528,9 @@ pub struct PlayConfig {
     pub fps: String,
     #[serde(default)]
     pub measured_max_fps: u32,
+    /// 片源格式（默认 qois，老文件照读）。
+    #[serde(default = "default_play_format")]
+    pub format: MediaFormat,
 }
 
 impl Default for PlayConfig {
@@ -490,6 +538,7 @@ impl Default for PlayConfig {
         Self {
             fps: default_fps(),
             measured_max_fps: 0,
+            format: MediaFormat::Qois,
         }
     }
 }
@@ -558,6 +607,9 @@ static PLAY_MODE: AtomicU8 = AtomicU8::new(0);
 static PLAY_CAP: AtomicU32 = AtomicU32::new(0);
 /// 固件实测的最大播放帧率（0 = 未测）。`auto` 首启测完写入并回盘。
 static PLAY_MEASURED: AtomicU32 = AtomicU32::new(0);
+/// 片源格式（0 = qois，1 = raw；`[play]` 默认 qois，`[wallpaper]` 默认 raw）。
+static PLAY_FORMAT: AtomicU8 = AtomicU8::new(0);
+static WALLPAPER_FORMAT: AtomicU8 = AtomicU8::new(1);
 /// 0 = 未测，1 = direct，2 = blt（`mode = "auto"` 的矩阵结论，校准/记忆二选一写入）
 static RESOLVED_RENDER: AtomicU8 = AtomicU8::new(0);
 /// 0 = 未测，1 = bsp_only，2 = all（`workers = "auto"` 的矩阵结论）
@@ -600,6 +652,8 @@ pub fn load() -> Option<String> {
         FpsPolicy::Max => PLAY_MODE.store(2, Ordering::Relaxed),
     }
     PLAY_MEASURED.store(cfg.play.measured_max_fps, Ordering::Relaxed);
+    PLAY_FORMAT.store(cfg.play.format.as_u8(), Ordering::Relaxed);
+    WALLPAPER_FORMAT.store(cfg.wallpaper.format.as_u8(), Ordering::Relaxed);
     WALLPAPER_ENABLE.store(cfg.wallpaper.enable as u8, Ordering::Relaxed);
     WALLPAPER_FPS.store(cfg.wallpaper.fps.clamp(1, 60).max(1), Ordering::Relaxed);
     WALLPAPER_FRAMES.store(cfg.wallpaper.frames, Ordering::Relaxed);
@@ -612,7 +666,7 @@ pub fn load() -> Option<String> {
     BOOT_MACOS.store(cfg.boot.macos as u8, Ordering::Relaxed);
     BOOT_STRICT.store(cfg.boot.strict as u8, Ordering::Relaxed);
     log::info!(
-        "cfg: version={} accel.level={:?} render.mode={:?} workers={:?} dist={:?} vsync={:?} blt_op={:?} tune.frames={} measured(render={:?} workers={:?} dist={:?} vsync={:?} vhalf={} cores={}) play.fps={} measured_max_fps={} boot(auto={} win={} lin={} sh={} uki={} mac={} strict={})",
+        "cfg: version={} accel.level={:?} render.mode={:?} workers={:?} dist={:?} vsync={:?} blt_op={:?} tune.frames={} measured(render={:?} workers={:?} dist={:?} vsync={:?} vhalf={} cores={}) play.fps={} play.fmt={:?} measured_max_fps={} wallpaper.fmt={:?} boot(auto={} win={} lin={} sh={} uki={} mac={} strict={})",
         cfg.version,
         cfg.accel.level,
         cfg.render.mode,
@@ -628,7 +682,9 @@ pub fn load() -> Option<String> {
         cfg.render.measured_vsync_fps,
         cfg.render.measured_cores,
         cfg.play.fps,
+        cfg.play.format,
         cfg.play.measured_max_fps,
+        cfg.wallpaper.format,
         cfg.boot.auto,
         cfg.boot.windows,
         cfg.boot.linux,
@@ -872,6 +928,10 @@ pub fn measured_cores() -> u32 {
 pub fn wallpaper_enabled() -> bool {
     WALLPAPER_ENABLE.load(Ordering::Relaxed) != 0
 }
+/// 壁纸片源格式（默认 raw；qois 读 `wallpaper/wall.qois`）。
+pub fn wallpaper_format() -> MediaFormat {
+    MediaFormat::from_u8(WALLPAPER_FORMAT.load(Ordering::Relaxed))
+}
 /// 壁纸循环帧率（1-60，已钳制）。
 pub fn wallpaper_fps() -> u32 {
     WALLPAPER_FPS.load(Ordering::Relaxed).max(1)
@@ -1058,6 +1118,11 @@ pub fn play_policy() -> FpsPolicy {
 /// 已实测的最大播放帧率（0 = 未测）。
 pub fn measured_max_fps() -> u32 {
     PLAY_MEASURED.load(Ordering::Relaxed)
+}
+
+/// 播片片源格式（默认 qois；raw 读 `1080p/frameNNNN.raw` 序列）。
+pub fn play_format() -> MediaFormat {
+    MediaFormat::from_u8(PLAY_FORMAT.load(Ordering::Relaxed))
 }
 
 /// 实测完把最大帧率写回 `\player.toml`（GUI 下次打开即见）。

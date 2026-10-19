@@ -12,7 +12,7 @@ use uefi::proto::pi::mp::MpServices;
 use crate::config::{self, BltOpKind, CopyWidth, DistMode, RenderMode, VsyncMode, WorkersMode};
 use crate::error::Result;
 use crate::video::ascii_font::FONT_8X16;
-use crate::video::decoder::VideoMemoryRaw;
+use crate::video::decoder::Clip;
 
 pub struct Screen {
     gop: ScopedProtocol<GraphicsOutput>,
@@ -146,7 +146,7 @@ impl Screen {
         self.stdout += 18;
     }
 
-    pub fn draw_all_mem_raw_zero_copy(&mut self, video: &mut VideoMemoryRaw, width: usize, height: usize) {
+    pub fn draw_all_mem_raw_zero_copy(&mut self, video: &mut Clip, width: usize, height: usize) {
         // 获取下一帧的原始像素引用
         if let Some(pixel_slice) = video.next_frame() {
             // 直接绘制到屏幕
@@ -168,7 +168,7 @@ impl Screen {
     /// 高性能显存直接写入
     pub fn draw_fast_direct_copy(
         &mut self,
-        video: &mut VideoMemoryRaw,
+        video: &mut Clip,
         width: usize,
         height: usize
     ) {
@@ -214,7 +214,7 @@ impl Screen {
     #[inline]
     pub fn draw_u64_optimized(
         &mut self,
-        video: &mut VideoMemoryRaw,
+        video: &mut Clip,
         width: usize,
         height: usize,
         stride: usize,
@@ -246,7 +246,7 @@ impl Screen {
         }
     }
 
-    pub fn draw_u64_optimized_loop(&mut self, video: &mut VideoMemoryRaw, width: usize, height: usize) {
+    pub fn draw_u64_optimized_loop(&mut self, video: &mut Clip, width: usize, height: usize) {
         let mode_info = self.gop.current_mode_info();
         let stride = mode_info.stride();
         let mut fb = self.gop.frame_buffer();
@@ -258,7 +258,7 @@ impl Screen {
         }
     }
 
-    pub fn parallel_video_draw(&mut self, video: &mut VideoMemoryRaw, width: usize, height: usize) -> Result {
+    pub fn parallel_video_draw(&mut self, video: &mut Clip, width: usize, height: usize) -> Result {
         let mp_handle = get_handle_for_protocol::<MpServices>()?;
         let mp_services = open_protocol_exclusive::<MpServices>(mp_handle)?;
 

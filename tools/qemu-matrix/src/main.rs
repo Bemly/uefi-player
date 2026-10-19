@@ -57,6 +57,13 @@ struct Case {
     needs_video: bool,
     #[serde(default)]
     needs_wallpaper: u32,
+    /// 播片 raw 片源：`1080p/frameNNNN.raw` 黑场 N 帧（`[play] format = "raw"` 用）。
+    #[serde(default)]
+    needs_rawvideo: u32,
+    /// 壁纸 qois 片源：把测试视频拷成 `wallpaper/wall.qois`
+    ///（`[wallpaper] format = "qois"` 用，验开机预解码 + 循环）。
+    #[serde(default)]
+    needs_wallpaper_qois: bool,
     /// chainload 自举：镜像里再放一份 efi + 一条 BLS entry（单盘场景）。
     #[serde(default)]
     needs_chainload: bool,
@@ -543,6 +550,21 @@ fn run_case(
             Box::leak(format!("wallpaper/frame{i:04}.raw").into_boxed_str()),
             vec![0u8; 1920 * 1080 * 4],
         ));
+    }
+    for i in 0..case.needs_rawvideo {
+        // 播片 raw 片源黑场帧（`[play] format = "raw"` 用，同上只走通路）。
+        files.push((
+            Box::leak(format!("1080p/frame{i:04}.raw").into_boxed_str()),
+            vec![0u8; 1920 * 1080 * 4],
+        ));
+    }
+    if case.needs_wallpaper_qois {
+        // 壁纸 qois 片源：复用测试视频（真 QOI 帧，验预解码 + 循环）。
+        let src = format!("{ROOT}/usb_reports/1080p/video.qois");
+        match std::fs::read(&src) {
+            Ok(d) => files.push(("wallpaper/wall.qois", d)),
+            Err(_) => return (false, format!("missing {src}")),
+        }
     }
     if case.needs_chainload {
         // 被起镜像：同一份 efi 换个路径（单盘场景；跨盘见 extra_volumes 的 case）。

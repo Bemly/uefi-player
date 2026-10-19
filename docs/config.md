@@ -36,10 +36,12 @@ buffers   = 0           # 后缓冲帧数（0-16；0 = 直写前台，>0 = 影�
 [play]
 fps = "auto"            # auto | max | 1..240
                         # auto: 首启实测最大帧率并回写，按 min(视频帧率, 实测*3/4) 跑
+format = "qois"         # 片源格式：qois（1080p/video.qois）| raw（1080p/frameNNNN.raw）
 measured_max_fps = 0    # 固件实测回写（0 = 未测）；GUI 只读展示
 
 [wallpaper]
 enable = false          # 菜单背景 + 引导过渡总开关
+format = "raw"          # 片源格式：raw（wallpaper/frameNNNN.raw，默认）| qois（wallpaper/wall.qois，开机预解码）
 fps = 15                # 背景循环帧率（1-60，已钳制）
 frames = 0              # B 过渡封顶帧数（0 = 全播预载集）
 preload = 8             # 预载帧数上限（1-32；1080p BGRA 单帧约 8MB）

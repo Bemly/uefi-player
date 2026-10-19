@@ -204,6 +204,32 @@ keys = [{ send = "0", wait_after = 5 }]
 expect = ["play: path=blt_loop"]
 soak_sec = 15
 
+# 播放 raw：裸位图序列片源（needs_rawvideo 黑场 2 帧），走 direct 单核整轮。
+# 统一 Clip 的 raw 分支证明：格式矩阵另一半不断播。
+[[case]]
+name = "video-raw"
+timeout_sec = 180
+needs_rawvideo = 2
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+workers = "bsp_only"
+dist = "static"
+vsync = "off"
+[play]
+fps = "max"
+format = "raw"
+[wallpaper]
+enable = false
+"""
+boot_expect = ["cfg: version=1", "menu: ready"]
+keys = [{ send = "0", wait_after = 5 }]
+expect = ["play: path=direct_loop"]
+soak_sec = 15
+
 # 诊断键：1/4/7 各出数，x 回菜单（pause_return 吞键）。
 [[case]]
 name = "diag-keys"
@@ -282,6 +308,33 @@ fps = "max"
 [wallpaper]
 enable = true
 fps = 15
+"""
+boot_expect = ["cfg: version=1", "menu: ready"]
+keys = [{ send = "7", wait_after = 5 }]
+expect = ["AVX is "]
+forbid = ["panicked at", "CpuDeadLoop", "menu bg skipped"]
+
+# 壁纸 qois：wall.qois 预解码循环（复用测试视频真帧），菜单照常响应。
+# 统一 Clip 的 qois 分支在壁纸侧的证明（与 raw 的 wallpaper-on 对称）。
+[[case]]
+name = "wallpaper-qois"
+timeout_sec = 180
+needs_wallpaper_qois = true
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+workers = "bsp_only"
+dist = "static"
+vsync = "off"
+[play]
+fps = "max"
+[wallpaper]
+enable = true
+fps = 15
+format = "qois"
 """
 boot_expect = ["cfg: version=1", "menu: ready"]
 keys = [{ send = "7", wait_after = 5 }]

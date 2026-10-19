@@ -326,8 +326,35 @@ struct RenderConfig {
     measured_cores: u32,
 }
 
+/// 片源格式（与固件 `MediaFormat` 同构；小写序列化）。
+/// 缺键老配置：play 按 qois、wallpaper 按 raw（见两侧 `default_*_format`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum MediaFormat {
+    Qois,
+    Raw,
+}
+
+impl MediaFormat {
+    fn file_str(self) -> &'static str {
+        match self {
+            Self::Qois => "qois",
+            Self::Raw => "raw",
+        }
+    }
+}
+
+fn default_play_format() -> MediaFormat {
+    MediaFormat::Qois
+}
+
+fn default_wallpaper_format() -> MediaFormat {
+    MediaFormat::Raw
+}
+
 /// `[play]`：`fps` 是字符串（三态没法用纯数字表达），`measured_max_fps`
 /// 只由固件实测回写（0 = 未测），这里只读展示 + 重测清零。
+/// `format` 切片源：qois 读 `1080p/video.qois`，raw 读 `1080p/frameNNNN.raw`。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 struct PlayConfig {
@@ -335,6 +362,8 @@ struct PlayConfig {
     fps: String,
     #[serde(default)]
     measured_max_fps: u32,
+    #[serde(default = "default_play_format")]
+    format: MediaFormat,
 }
 
 /// `[boot]`：多卷自动发现开关（与固件 `BootConfig` 同构；全 `true` = 默认全开）。
@@ -357,6 +386,7 @@ impl Default for BootConfig {
 }
 
 /// `[wallpaper]`：与固件 `WallpaperConfig` 同构。无校准记忆，纯开关。
+/// `format` 切片源：raw 读 `wallpaper/frameNNNN.raw`，qois 读 `wallpaper/wall.qois`。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 struct WallpaperConfig {
@@ -367,6 +397,8 @@ struct WallpaperConfig {
     frames: u32,
     #[serde(default = "default_wallpaper_preload")]
     preload: u32,
+    #[serde(default = "default_wallpaper_format")]
+    format: MediaFormat,
 }
 
 impl Default for WallpaperConfig {
@@ -376,6 +408,7 @@ impl Default for WallpaperConfig {
             fps: default_wallpaper_fps(),
             frames: 0,
             preload: default_wallpaper_preload(),
+            format: MediaFormat::Raw,
         }
     }
 }
@@ -385,6 +418,7 @@ impl Default for PlayConfig {
         Self {
             fps: default_fps(),
             measured_max_fps: 0,
+            format: MediaFormat::Qois,
         }
     }
 }
@@ -711,11 +745,26 @@ impl App {
 
     /// 滑杆/摘要共用的档位文本。
     fn play_text(&self) -> String {
-        match parse_fps(&self.cfg.play.fps) {
+        let base = match parse_fps(&self.cfg.play.fps) {
             FpsPolicy::Auto => t!("play.text_auto").into_owned(),
             FpsPolicy::Max => t!("play.text_max").into_owned(),
             FpsPolicy::Capped(n) => format!("{} fps", n),
-        }
+        };
+        format!("{} {}", base, self.cfg.play.format.file_str())
+    }
+
+    /// 片源格式行（两颗玻璃按钮，qois/raw 二选一，壁纸/播放共用形状）。
+    fn format_row(&mut self, ui: &mut egui::Ui, cur: MediaFormat) -> MediaFormat {
+        let mut next = cur;
+        ui.horizontal(|ui| {
+            if self.option_button(ui, cur == MediaFormat::Qois, &t!("format.qois")) {
+                next = MediaFormat::Qois;
+            }
+            if self.option_button(ui, cur == MediaFormat::Raw, &t!("format.raw")) {
+                next = MediaFormat::Raw;
+            }
+        });
+        next
     }
 
     /// 实测行：有值报数，无值提示切 auto 下次启动测。
@@ -1272,6 +1321,10 @@ impl App {
                     n => n.to_string(),
                 };
                 ui.small(t!("play.hint"));
+                ui.add_space(4.0);
+                ui.label(t!("play.format"));
+                self.cfg.play.format = self.format_row(ui, self.cfg.play.format);
+                ui.small(t!("play.format_hint"));
                 ui.horizontal(|ui| {
                     ui.label(self.measured_line());
                     if egui_glass::GlassButton::new(t!("play.rebench"))
@@ -1299,8 +1352,12 @@ impl App {
                     }
                 });
                 ui.small(wp_enable_desc(self.cfg.wallpaper.enable));
-                // 关壁纸时帧率/帧数/预载全不可选，整组隐藏。
+                // 关壁纸时格式/帧率/帧数/预载全不可选，整组隐藏。
                 if self.cfg.wallpaper.enable {
+                    ui.add_space(10.0);
+                    ui.label(t!("wallpaper.format"));
+                    self.cfg.wallpaper.format = self.format_row(ui, self.cfg.wallpaper.format);
+                    ui.small(t!("wallpaper.format_hint"));
                     ui.add_space(10.0);
                     ui.label(t!("wallpaper.fps"));
                     let fps_label = format!("{} fps", self.cfg.wallpaper.fps);
@@ -1401,7 +1458,8 @@ impl App {
                     "sum.wallpaper",
                     v = if self.cfg.wallpaper.enable {
                         format!(
-                            "on {}fps/{}f/pre{}",
+                            "on {}/{}fps/{}f/pre{}",
+                            self.cfg.wallpaper.format.file_str(),
                             self.cfg.wallpaper.fps,
                             self.cfg.wallpaper.frames,
                             self.cfg.wallpaper.preload
@@ -1664,11 +1722,13 @@ mod schema_tests {
         cfg.wallpaper.enable = true;
         cfg.wallpaper.fps = 20;
         cfg.wallpaper.frames = 30;
+        cfg.wallpaper.format = MediaFormat::Qois;
         let text = toml::to_string(&cfg).unwrap();
         let back: FileConfig = toml::from_str(&text).unwrap();
         assert!(back.wallpaper.enable);
         assert_eq!(back.wallpaper.fps, 20);
         assert_eq!(back.wallpaper.frames, 30);
+        assert_eq!(back.wallpaper.format, MediaFormat::Qois);
     }
 }
 
@@ -1730,12 +1790,14 @@ mod blackbox_matrix {
                                     play: PlayConfig {
                                         fps: String::from("60"),
                                         measured_max_fps: 120,
+                                        format: MediaFormat::Raw,
                                     },
                                 wallpaper: WallpaperConfig {
                                     enable: true,
                                     fps: 20,
                                     frames: 30,
                                     preload: 4,
+                                    format: MediaFormat::Qois,
                                 },
                     boot: BootConfig {
                         auto: true,
@@ -1778,11 +1840,32 @@ mod blackbox_matrix {
         let text = "version = 1\n[accel]\nlevel = \"auto\"\n[render]\nmode = \"auto\"\n[play]\nfps = \"auto\"\n";
         let cfg: FileConfig = toml::from_str(text).unwrap();
         assert!(!cfg.wallpaper.enable);
+        assert_eq!(cfg.wallpaper.format, MediaFormat::Raw);
+        assert_eq!(cfg.play.format, MediaFormat::Qois);
         assert_eq!(cfg.render.dist, DistMode::Auto);
         assert_eq!(cfg.render.vsync, VsyncMode::Auto);
         assert_eq!(cfg.render.blt_op, BltOpKind::BufferToVideo);
         assert_eq!(cfg.render.tune.buffers, default_buffers());
         assert_eq!(cfg.render.measured_vsync_fps, 0);
+    }
+
+    /// 片源格式双档位回写（play/wallpaper 各 qois/raw 四组合，不丢字段）。
+    #[test]
+    fn format_roundtrip_matrix() {
+        for (pf, wf) in [
+            (MediaFormat::Qois, MediaFormat::Qois),
+            (MediaFormat::Qois, MediaFormat::Raw),
+            (MediaFormat::Raw, MediaFormat::Qois),
+            (MediaFormat::Raw, MediaFormat::Raw),
+        ] {
+            let mut cfg = FileConfig::default();
+            cfg.play.format = pf;
+            cfg.wallpaper.format = wf;
+            let back: FileConfig = toml::from_str(&toml::to_string(&cfg).unwrap()).unwrap();
+            assert_eq!(back.play.format, pf);
+            assert_eq!(back.wallpaper.format, wf);
+            assert_eq!(back, cfg);
+        }
     }
 
     /// 空文件全默认（缺表缺键一路 Default，不 halt）。

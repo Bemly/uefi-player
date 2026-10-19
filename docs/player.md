@@ -1,5 +1,11 @@
 # 播放器（P3）
 
+## 片源格式矩阵（`[play] format`，`Clip` 统一解码）
+
+- `qois`（默认）：`1080p/video.qois`（`u32le 帧长 + QOI 帧` 串接）→ 开机全量预解码。
+- `raw`：`1080p/frameNNNN.raw`（1920x1080 BGRA 直存，与壁纸同格式）→ 零解码直读。
+- 两种格式落到同一 `Clip`（`video/decoder.rs`），三条播放路零分支。
+
 ## `video.qois` 格式
 
 `1080p/video.qois`：`u32le 帧长 + QOI 帧` 串接，无帧率元数据。

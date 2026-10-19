@@ -7,13 +7,13 @@ use core::time::Duration;
 use uefi::boot::{create_event, get_handle_for_protocol, open_protocol_exclusive, set_watchdog_timer, EventType, Tpl};
 use uefi::{boot, cstr16, CStr16, Status};
 use uefi::proto::console::gop::{BltOp, BltPixel, BltRegion, GraphicsOutput};
-use uefi::proto::media::file::{File, FileInfo, RegularFile};
+use uefi::proto::media::file::RegularFile;
 use uefi::proto::pi::mp::MpServices;
-use crate::config::{self, CopyWidth, DistMode};
+use crate::config::{self, CopyWidth, DistMode, MediaFormat};
 use crate::fs::Fs;
 use crate::graphics::{dynamic_row_bounds, Screen, copy_block};
 use crate::video::buffer::{BltFrameBuffer, QoiFrameBuffer, RawFrameBuffer};
-use crate::video::decoder::{VideoMemory, VideoMemoryRaw};
+use crate::video::decoder::{Clip, VideoMemory};
 use crate::error::Result;
 use crate::video::ascii_font::FONT_8X16;
 
@@ -43,7 +43,7 @@ fn calibrate_tps() -> u64 {
 /// 限速 + 掉帧（P3，单线程路）：帧内耗时超预算先自旋补齐；迟到超出一整帧则
 /// 丢帧追赶（最多连丢 2 帧防雪崩）。记数只走串口（屏显不刷，不污染画面）。
 fn pace_or_drop(
-    video: &mut VideoMemoryRaw,
+    video: &mut Clip,
     target: Option<u32>,
     tps: u64,
     fstart: u64,
@@ -86,7 +86,7 @@ pub fn video_run(screen: &mut Screen) -> Result {
     let target = resolve_play_target(screen, tps)?;
 
     let mut fs = Fs::new()?;
-    let file = fs.open_file(cstr16!("1080p\\video.qois"))?;
+    let clip = load_video_clip(&mut fs)?;
 
     // 渲染路径矩阵（\player.toml，见 `Screen::ensure_render_calibrated`）：
     //   blt            → 单线程走 GOP Blt 引擎（workers 无意义）
@@ -95,19 +95,32 @@ pub fn video_run(screen: &mut Screen) -> Result {
     match crate::config::effective_render() {
         crate::config::RenderMode::Blt => {
             log::info!("play: path=blt_loop");
-            blt_loop(screen, file, VIDEO_W, VIDEO_H, target, tps)
+            blt_loop(screen, clip, VIDEO_W, VIDEO_H, target, tps)
         }
         _ => match crate::config::effective_workers() {
             crate::config::WorkersMode::BspOnly => {
                 log::info!("play: path=direct_loop");
-                direct_loop(screen, file, VIDEO_W, VIDEO_H, target, tps)
+                direct_loop(screen, clip, VIDEO_W, VIDEO_H, target, tps)
             }
             _ => {
                 log::info!("play: path=mp_draw");
-                let mut file = file;
-                mp_draw(screen, &mut file, VIDEO_W, VIDEO_H, target, tps)
+                mp_draw(screen, clip, VIDEO_W, VIDEO_H, target, tps)
             }
         },
+    }
+}
+
+/// 片源加载（`[play] format` 矩阵）：qois 读整文件预解码，raw 读序列目录。
+/// 两种格式都落到同一 `Clip`，三条播放路零分支。
+fn load_video_clip(fs: &mut Fs) -> Result<Clip> {
+    match config::play_format() {
+        MediaFormat::Qois => {
+            let file = fs.open_file(cstr16!("1080p\\video.qois"))?;
+            Clip::from_qois_file(file, "video")
+        }
+        MediaFormat::Raw => {
+            Clip::from_raw_dir(fs, "1080p", usize::MAX, VIDEO_W * VIDEO_H * 4, "video")
+        }
     }
 }
 
@@ -147,8 +160,7 @@ fn resolve_play_target(screen: &mut Screen, tps: u64) -> Result<Option<u32>> {
 fn measure_max_fps(screen: &mut Screen, tps: u64) -> Result<u32> {
     screen.draw_str("play: benching max playback fps (one fast pass)...");
     let mut fs = Fs::new()?;
-    let file = fs.open_file(cstr16!("1080p\\video.qois"))?;
-    let mut video = VideoMemoryRaw::new(file)?;
+    let mut video = load_video_clip(&mut fs)?;
     let frames = video.frames.len().max(1);
     let t0 = rdtsc();
     for _ in 0..frames {
@@ -165,17 +177,16 @@ fn measure_max_fps(screen: &mut Screen, tps: u64) -> Result<u32> {
     Ok(fps)
 }
 
-/// 单线程 Blt 播放：`VideoMemoryRaw` 预解码全部帧（含 RGBA→BGRA），
+/// 单线程 Blt 播放：`Clip` 预解码全部帧，
 /// 每帧经 `upload_frame` 交给 GOP Blt 引擎。牺牲多核并行，换引擎搬运。
 fn blt_loop(
     screen: &mut Screen,
-    file: RegularFile,
+    mut video: Clip,
     width: usize,
     height: usize,
     target: Option<u32>,
     tps: u64,
 ) -> Result {
-    let mut video = VideoMemoryRaw::new(file)?;
     let mut drops = 0u64;
     loop {
         let fstart = rdtsc();
@@ -192,13 +203,12 @@ fn blt_loop(
 /// 这里 render 已定 direct，实际就是 `upload_direct`）。
 fn direct_loop(
     screen: &mut Screen,
-    file: RegularFile,
+    mut video: Clip,
     width: usize,
     height: usize,
     target: Option<u32>,
     tps: u64,
 ) -> Result {
-    let mut video = VideoMemoryRaw::new(file)?;
     let mut drops = 0u64;
     loop {
         let fstart = rdtsc();
@@ -814,28 +824,19 @@ extern "efiapi" fn play_task(arg: *mut c_void) {
 
 pub fn mp_draw(
     screen: &mut Screen,
-    file: &mut RegularFile,
-    width: usize,
-    height: usize,
+    clip: Clip,
+    _width: usize,
+    _height: usize,
     target: Option<u32>,
     tps: u64,
 ) -> Result {
-    // 1 解码
+    // 1 切片（`Clip` 已预解码：qois 整文件解码 / raw 整目录直读，
+    // 双格式同一下游切分；坏帧记数在 `Clip` 内，见 `decoder.rs`）。
     let mp_handle = get_handle_for_protocol::<MpServices>()?;
     let mp = open_protocol_exclusive::<MpServices>(mp_handle)?;
     let n_cores = mp.get_number_of_processors()?.enabled;
-    let mut info_buf = vec![0u8; 128];
-    let info = loop {
-        match file.get_info::<FileInfo>(&mut info_buf) {
-            Ok(info) => break info,
-            Err(e) if e.status() == Status::BUFFER_TOO_SMALL => {
-                if let Some(size) = *e.data() { info_buf.resize(size, 0) }
-            }
-            Err(e) => return Err(e.status())?,
-        }
-    };
-    let mut compressed_buffer = vec![0u8; info.file_size() as usize];
-    file.read(&mut compressed_buffer).map_err(|e| e.status())?;
+    // 片源几何（qois 取文件头一致值，raw 取定值 1920x1080）。
+    let (width, height) = (clip.w, clip.h);
 
     // 准备核心存储容器: [核心ID][帧ID] -> 这一帧该核负责的像素切片
     // （dynamic 不切分片，见下全帧表；容器保持空，`core_frame_ptrs` 传空）。
@@ -843,7 +844,6 @@ pub fn mp_draw(
     // P4-dynamic 全帧表：每帧 scr_height 行 × stride（行区由 bounds 逐轮重划，
     // 源必须是全帧，与 static/tile 的等分切片不兼容，内存总量同级）。
     let mut dyn_frames: Vec<Frame> = Vec::new();
-    let mut offset = 0;
 
     let (scr_width, scr_height) = screen.get_gop().current_mode_info().resolution();
     let rows_per_core = scr_height / n_cores;
@@ -856,32 +856,14 @@ pub fn mp_draw(
     // 此时 `effective_dist` 的 direct+all 短路已过，本值即真实调度）。
     let dynamic = config::effective_dist() == DistMode::Dynamic;
 
-    // 原始单帧空间初始化
-    let mut single_raw: Frame = vec![0u8; width * height * 4];
-    let mut skipped = 0u32;
-    // 文件末尾越界保护
-    while offset + 4 <= compressed_buffer.len() {
-        let len_bytes = &compressed_buffer[offset..offset + 4];
-        let frame_len =
-            u32::from_le_bytes([len_bytes[0], len_bytes[1], len_bytes[2], len_bytes[3]]) as usize;
-        let data_start = offset + 4;
-        let next_frame_pos = data_start + frame_len;
-
-        if next_frame_pos > compressed_buffer.len() { break }
-
-        // 获取当前Qoi帧
-        let frame_data = &compressed_buffer[data_start..next_frame_pos];
-
-        // 错位闭环：坏帧记数跳过（曾无限静默丢帧，见 decoder.rs）。
-        if qoi::decode_to_buf(&mut single_raw, frame_data).is_err() {
-            skipped += 1;
-            offset = next_frame_pos;
-            continue
-        }
-
-        // 红蓝交换 (RGBA -> BGRA)
-        for chunk in single_raw.chunks_exact_mut(4) {
-            chunk.swap(0, 2);
+    // `Clip` 帧已是 BGRA `BltPixel`：reinterpret 为字节做行切分（零拷贝视图，
+    // 下游 `copy_block` 按字节搬运，与旧 `single_raw` 同布局）。
+    for frame in &clip.frames {
+        let raw: &[u8] = unsafe {
+            core::slice::from_raw_parts(frame.as_ptr() as *const u8, frame.len() * 4)
+        };
+        if raw.len() < height.saturating_mul(row_bytes) {
+            continue;
         }
 
         // dynamic 全帧：视频行拷入 + stride 补齐，超高行置黑（与切片同语义，
@@ -892,11 +874,11 @@ pub fn mp_draw(
                 if y < height {
                     let s0 = y * width * 4;
                     let s1 = s0 + row_bytes;
-                    if s1 > single_raw.len() {
+                    if s1 > raw.len() {
                         Err(Status::INVALID_PARAMETER)?
                     }
                     full[y * stride_bytes..y * stride_bytes + row_bytes]
-                        .copy_from_slice(&single_raw[s0..s1]);
+                        .copy_from_slice(&raw[s0..s1]);
                 }
             }
             dyn_frames.push(full);
@@ -916,16 +898,16 @@ pub fn mp_draw(
                     let video_y = y;
 
                     if video_y < height {
-                        // 只有当屏幕行落在视频高度范围内时，才去 single_raw 拿数据
+                        // 只有当屏幕行落在视频高度范围内时，才去片源拿数据
                         let src_row_start = video_y * width * 4;
                         let src_row_end = src_row_start + row_bytes;
 
-                        if src_row_end > single_raw.len() {
+                        if src_row_end > raw.len() {
                             Err(Status::INVALID_PARAMETER)?
                         }
 
                         // 1. 拷贝视频行
-                        frame.extend_from_slice(&single_raw[src_row_start..src_row_end]);
+                        frame.extend_from_slice(&raw[src_row_start..src_row_end]);
 
                         // 2. 补齐当前行到屏幕的 stride 跨度
                         if stride_bytes > row_bytes {
@@ -940,10 +922,10 @@ pub fn mp_draw(
                 core_frames[core_id].push(frame);
             }
         }
-        offset = next_frame_pos;
     }
 
     // 空集守卫：全坏文件直接报错，不进“AP 读空指针 + 无限循环”（曾 OOB）。
+    // `Clip` 构造时已保证非空（空集直接 Err），这里是双保险。
     let total_frames = if dynamic {
         dyn_frames.len()
     } else {
@@ -951,21 +933,8 @@ pub fn mp_draw(
     };
     if total_frames == 0 {
         return Err(crate::error::NyaStatus::_Debug(alloc::format!(
-            "video: no valid frames ({} skipped)",
-            skipped
+            "video: no valid frames"
         )));
-    }
-    if skipped > 0 {
-        log::warn!(
-            "video: mp predecoded {} frames ({}), skipped {} bad",
-            total_frames,
-            if dynamic {
-                "dynamic full frames"
-            } else {
-                "static slices"
-            },
-            skipped
-        );
     }
 
     // 2 构造参数
