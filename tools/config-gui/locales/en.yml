@@ -1,5 +1,5 @@
 _version: 1
-app.title: "UEFI播放器"
+app.title: "UEFI Player"
 toolbar.open: "Open…"
 toolbar.save: "Save"
 toolbar.save_as: "Save as…"

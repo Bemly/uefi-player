@@ -520,7 +520,10 @@ impl App {
         cc.egui_ctx.set_fonts(fonts);
 
         // 默认英文 + 浅色（白底），与初始 backdrop 一致。
+        // 窗口标题跟语言走（中英切换时见 ToggleLang），首帧即按当前 locale 下发。
         rust_i18n::set_locale("en");
+        cc.egui_ctx
+            .send_viewport_cmd(egui::ViewportCommand::Title(t!("app.title").into_owned()));
         cc.egui_ctx.set_visuals(egui::Visuals::light());
         let mut glass = false;
         let mut rs = None;
@@ -770,6 +773,8 @@ impl App {
             Action::ToggleLang => {
                 self.zh = !self.zh;
                 rust_i18n::set_locale(if self.zh { "zh-CN" } else { "en" });
+                // 标题栏跟语言走：英文 UEFI Player / 中文 UEFI播放器。
+                ctx.send_viewport_cmd(egui::ViewportCommand::Title(t!("app.title").into_owned()));
                 self.status = t!("status.ready").into_owned();
             }
         }
@@ -1419,7 +1424,7 @@ fn main() -> eframe::Result<()> {
         ..Default::default()
     };
     eframe::run_native(
-        "UEFI播放器",
+        "UEFI Player",
         opts,
         Box::new(|cc| Ok(Box::new(App::new(cc)))),
     )
