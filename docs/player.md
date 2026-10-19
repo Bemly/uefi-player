@@ -35,7 +35,8 @@
 ## 帧率开关（`[play]`）
 
 `max` 不限速；`capped(1-240)` 直接用；`auto` 无实测现测并回写
-（`measured_max_fps`，GUI 只读 + 重测清零）。`vsync=on` 再叠 60fps 帽。
+（`measured_max_fps`，GUI 只读 + 重测清零）。`vsync` 开（static/half/auto 探测开）
+再叠生效预算帽（`effective_vsync_fps()`，static 取滑杆值，half 取实测取半）。
 
 ## 真机错位问题（曾 TODO，现状态）
 

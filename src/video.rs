@@ -113,7 +113,8 @@ pub fn video_run(screen: &mut Screen) -> Result {
 
 /// 播放帧率决策：max 不限速；capped 直接用；auto 无实测就现测并回写，
 /// 按 `min(视频帧率, 实测*3/4)` 跑。返回 `None` = 不限速。
-/// 最后叠 vsync 开关：开 = 再封顶 60fps（软件帧预算，GOP 无硬件 vsync）。
+/// 最后叠 vsync 开关：static / half / auto（探测开）按 `effective_vsync_fps()` 再封顶
+///（软件帧预算，GOP 无硬件 vsync）。
 fn resolve_play_target(screen: &mut Screen, tps: u64) -> Result<Option<u32>> {
     let base = match config::play_policy() {
         config::FpsPolicy::Max => None,
@@ -131,7 +132,7 @@ fn resolve_play_target(screen: &mut Screen, tps: u64) -> Result<Option<u32>> {
         }
     };
     if config::vsync_enabled() {
-        let cap = config::tune_vsync_fps().max(1);
+        let cap = config::effective_vsync_fps();
         Ok(Some(base.map(|t| t.min(cap)).unwrap_or(cap)))
     } else {
         Ok(base)

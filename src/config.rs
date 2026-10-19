@@ -11,18 +11,19 @@
 //! mode    = "auto"        # "auto" | "direct" | "blt"
 //! workers = "auto"        # "auto" | "bsp_only" | "all"（多核开关）
 //! dist    = "auto"        # "auto" | "static" | "tile" | "dynamic"（多核分工，只对 direct+all 有效）
-//! vsync   = "auto"        # "auto" | "on" | "off"（软件 60fps 帧预算）
+//! vsync   = "auto"        # "auto" | "static" | "half" | "off"（软件帧预算，无硬件 vsync）
 //! blt_op  = "buffer_to_video"
 //! # 首启校准记忆（固件回写，GUI 只读展示；"auto"/0 = 未测，下次启动必测）：
 //! measured_render  = "auto"  # "direct" | "blt"
 //! measured_workers = "auto"  # "bsp_only" | "all"
 //! measured_dist    = "auto"  # "static" | "tile" | "dynamic"
-//! measured_vsync   = "auto"  # "on" | "off"
+//! measured_vsync   = "auto"  # "static" | "off"（auto 探测结论；static/half 不用它）
+//! measured_vsync_fps = 0    # half 实测预算（fps；0 = 未测，下次启动现测并回写）
 //! measured_cores   = 0       # 校准时机型 AP+BSP 总数
 //! [render.tune]
 //! frames    = 30   # 每次矩阵/微基准的帧数（>=1）
 //! tile_rows = 64   # tile 高（行），MP 自调度切块粒度（8-512）
-//! vsync_fps = 60   # vsync 预算帧率：on 的封顶 + auto 探测达标线（15-240）
+//! vsync_fps = 60   # vsync 预算帧率：static 的封顶 + auto 探测达标线（15-240）
 //! [play]
 //! fps = "auto"            # "auto" | "max" | "1".."240"
 //! measured_max_fps = 0    # 固件实测后回写，GUI 只读展示
@@ -208,15 +209,19 @@ impl DistMode {
     }
 }
 
-/// 垂直同步（软件 60fps 帧预算）：开 = 每帧按 60Hz 预算自旋（防撕裂只保证节奏，
-/// GOP 无硬件 vsync）；关 = 只按 `play.fps` 限速。`Auto` = 校准时看冠军路径
-/// 能否零超期跑满 60fps，能则开否则关。
+/// 垂直同步（软件帧预算，GOP 无硬件 vsync）：`Static` = 按 `tune.vsync_fps`
+/// 固定封顶；`Half` = 开机实测冠军路最高帧率，取半稳定跑并回写
+/// `measured_vsync_fps`（下次启动复用）；`Auto` = 按 `tune.vsync_fps` 预算探测
+/// 冠军路，零超期则开（封顶同预算）否则关；`Off` = 只按 `play.fps` 跑。
+/// 旧文件的 `"on"` 按 `static` 照读（alias，不断旧配置）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum VsyncMode {
     #[default]
     Auto,
-    On,
+    #[serde(alias = "on")]
+    Static,
+    Half,
     Off,
 }
 
@@ -224,14 +229,16 @@ impl VsyncMode {
     fn as_u8(self) -> u8 {
         match self {
             Self::Auto => 0,
-            Self::On => 1,
+            Self::Static => 1,
             Self::Off => 2,
+            Self::Half => 3,
         }
     }
     fn from_u8(v: u8) -> Self {
         match v {
-            1 => Self::On,
+            1 => Self::Static,
             2 => Self::Off,
+            3 => Self::Half,
             _ => Self::Auto,
         }
     }
@@ -275,7 +282,8 @@ pub struct RenderTune {
     /// tile 高（行）：MP 自调度切块粒度，BSP+AP 共用。
     #[serde(default = "default_tile_rows")]
     pub tile_rows: u32,
-    /// vsync 预算帧率：`vsync=on` 的封顶 + auto 探测的达标线。
+    /// vsync 预算帧率：`static` 的封顶 + `auto` 探测的达标线。
+    /// `half` 不用它（实测取半自带预算），`off` 更不用。
     #[serde(default = "default_vsync_fps")]
     pub vsync_fps: u32,
 }
@@ -309,6 +317,10 @@ pub struct RenderConfig {
     pub measured_dist: DistMode,
     #[serde(default)]
     pub measured_vsync: VsyncMode,
+    /// half 实测预算（fps；0 = 未测）：`vsync=half` 首启现测取半后回写，下次复用。
+    /// 缺键（老配置）按未测处理。`static`/`auto`/`off` 不用它。
+    #[serde(default)]
+    pub measured_vsync_fps: u32,
     /// 校准时机型 AP+BSP 总数（0 = 未测，供矩阵归因/复核）。
     #[serde(default)]
     pub measured_cores: u32,
@@ -457,6 +469,8 @@ static MEASURED_WORKERS: AtomicU8 = AtomicU8::new(0);
 static MEASURED_VSYNC: AtomicU8 = AtomicU8::new(0);
 static MEASURED_DIST: AtomicU8 = AtomicU8::new(0);
 static MEASURED_CORES: AtomicU32 = AtomicU32::new(0);
+/// 盘上 `measured_vsync_fps`（0 = 未测）。
+static MEASURED_VSYNC_FPS: AtomicU32 = AtomicU32::new(0);
 static WALLPAPER_ENABLE: AtomicU8 = AtomicU8::new(0);
 static WALLPAPER_FPS: AtomicU32 = AtomicU32::new(default_wallpaper_fps());
 static WALLPAPER_FRAMES: AtomicU32 = AtomicU32::new(0);
@@ -473,8 +487,10 @@ static PLAY_MEASURED: AtomicU32 = AtomicU32::new(0);
 static RESOLVED_RENDER: AtomicU8 = AtomicU8::new(0);
 /// 0 = 未测，1 = bsp_only，2 = all（`workers = "auto"` 的矩阵结论）
 static RESOLVED_WORKERS: AtomicU8 = AtomicU8::new(0);
-/// 0 = 未测，1 = on，2 = off（`vsync = "auto"` 的探测结论）
+/// 0 = 未测，1 = static，2 = off（`vsync = "auto"` 的探测结论）
 static RESOLVED_VSYNC: AtomicU8 = AtomicU8::new(0);
+/// half 实测预算（fps；0 = 未测）：`vsync = "half"` 首启现测取半后写入 + 回盘。
+static RESOLVED_VSYNC_FPS: AtomicU32 = AtomicU32::new(0);
 /// 0 = 未测，1 = static，2 = tile，3 = dynamic（`dist = "auto"` 的矩阵结论）
 static RESOLVED_DIST: AtomicU8 = AtomicU8::new(0);
 /// 硬件实测最大搬运位宽（`CopyWidth` 判别值；0 = 未探，按 X128 保守用）。
@@ -493,6 +509,7 @@ pub fn load() -> Option<String> {
     MEASURED_WORKERS.store(cfg.render.measured_workers.as_u8(), Ordering::Relaxed);
     MEASURED_DIST.store(cfg.render.measured_dist.as_u8(), Ordering::Relaxed);
     MEASURED_VSYNC.store(cfg.render.measured_vsync.as_u8(), Ordering::Relaxed);
+    MEASURED_VSYNC_FPS.store(cfg.render.measured_vsync_fps, Ordering::Relaxed);
     MEASURED_CORES.store(cfg.render.measured_cores, Ordering::Relaxed);
     BLTOP.store(cfg.render.blt_op as u8, Ordering::Relaxed);
     TUNE_FRAMES.store(cfg.render.tune.frames.max(1), Ordering::Relaxed);
@@ -512,7 +529,7 @@ pub fn load() -> Option<String> {
     WALLPAPER_FRAMES.store(cfg.wallpaper.frames, Ordering::Relaxed);
     WALLPAPER_PRELOAD.store(cfg.wallpaper.preload.clamp(1, 32).max(1), Ordering::Relaxed);
     log::info!(
-        "cfg: version={} accel.level={:?} render.mode={:?} workers={:?} dist={:?} vsync={:?} blt_op={:?} tune.frames={} measured(render={:?} workers={:?} dist={:?} vsync={:?} cores={}) play.fps={} measured_max_fps={}",
+        "cfg: version={} accel.level={:?} render.mode={:?} workers={:?} dist={:?} vsync={:?} blt_op={:?} tune.frames={} measured(render={:?} workers={:?} dist={:?} vsync={:?} vhalf={} cores={}) play.fps={} measured_max_fps={}",
         cfg.version,
         cfg.accel.level,
         cfg.render.mode,
@@ -525,6 +542,7 @@ pub fn load() -> Option<String> {
         cfg.render.measured_workers,
         cfg.render.measured_dist,
         cfg.render.measured_vsync,
+        cfg.render.measured_vsync_fps,
         cfg.render.measured_cores,
         cfg.play.fps,
         cfg.play.measured_max_fps,
@@ -558,7 +576,7 @@ pub fn tune_tile_rows() -> u32 {
     TUNE_TILE_ROWS.load(Ordering::Relaxed).clamp(8, 512).max(1)
 }
 
-/// vsync 预算帧率（`vsync=on` 的封顶 + auto 探测达标线），已钳制 15-240。
+/// vsync 预算帧率（`static` 的封顶 + `auto` 探测的达标线），已钳制 15-240。
 pub fn tune_vsync_fps() -> u32 {
     TUNE_VSYNC_FPS.load(Ordering::Relaxed).clamp(15, 240).max(1)
 }
@@ -618,20 +636,35 @@ pub fn effective_dist() -> DistMode {
     }
 }
 
-/// 实际生效的垂直同步：`auto` 用探测结论（未测退回关，只按 `play.fps` 跑）。
+/// 实际生效的垂直同步：`auto` 用探测结论（未测退回关，只按 `play.fps` 跑）；
+/// `static`/`half` 即开（预算见 `effective_vsync_fps`）。
 pub fn effective_vsync() -> VsyncMode {
     match vsync_mode() {
         VsyncMode::Auto => match RESOLVED_VSYNC.load(Ordering::Relaxed) {
-            1 => VsyncMode::On,
+            1 => VsyncMode::Static,
             _ => VsyncMode::Off,
         },
         explicit => explicit,
     }
 }
 
-/// vsync 开关量（播放限速用）：开 = 叠加 60fps 预算。
+/// 实际生效的垂直同步预算（fps）：`static` 取 `tune.vsync_fps` 滑杆；
+/// `half` 取本机实测取半（`RESOLVED_VSYNC_FPS`，0 兜底回滑杆值）；
+/// `auto` 探测开时封顶同滑杆。调用方（播放限速）只认这个数，不认 60 硬编码。
+pub fn effective_vsync_fps() -> u32 {
+    match vsync_mode() {
+        VsyncMode::Half => RESOLVED_VSYNC_FPS.load(Ordering::Relaxed),
+        _ => tune_vsync_fps(),
+    }
+    .max(1)
+}
+
+/// vsync 开关量（播放限速用）：`static`/`half` 常开，`auto` 看探测结论。
 pub fn vsync_enabled() -> bool {
-    effective_vsync() == VsyncMode::On
+    match effective_vsync() {
+        VsyncMode::Static | VsyncMode::Half => true,
+        VsyncMode::Auto | VsyncMode::Off => false,
+    }
 }
 
 /// 开机探一次硬件最大搬运位宽（P2）：先 `ensure_xsave_enabled`（CPL0 直接开，
@@ -731,6 +764,10 @@ pub fn measured_dist() -> DistMode {
 pub fn measured_vsync() -> VsyncMode {
     VsyncMode::from_u8(MEASURED_VSYNC.load(Ordering::Relaxed))
 }
+/// half 实测预算（fps；0 = 未测）。
+pub fn measured_vsync_fps() -> u32 {
+    MEASURED_VSYNC_FPS.load(Ordering::Relaxed)
+}
 /// 校准时机型 AP+BSP 总数（0 = 未测）。
 pub fn measured_cores() -> u32 {
     MEASURED_CORES.load(Ordering::Relaxed)
@@ -780,6 +817,10 @@ pub fn needs_render_bench() -> bool {
     if dist_in_play && dist_mode() == DistMode::Auto && measured_dist() == DistMode::Auto {
         return true;
     }
+    // half 自带 bench（冠军计时取半）：无记忆即待测，有记忆直接复用快启。
+    if vsync_mode() == VsyncMode::Half && measured_vsync_fps() == 0 {
+        return true;
+    }
     vsync_mode() == VsyncMode::Auto && measured_vsync() == VsyncMode::Auto
 }
 
@@ -792,6 +833,10 @@ pub fn set_resolved_dist(d: DistMode) {
 }
 pub fn set_resolved_vsync(v: VsyncMode) {
     RESOLVED_VSYNC.store(v.as_u8(), Ordering::Relaxed);
+}
+/// half 定档直写运行结论（冠军 cell 无计时兜底用；正常走 `persist_measured_vsync_fps`）。
+pub fn set_resolved_vsync_fps(fps: u32) {
+    RESOLVED_VSYNC_FPS.store(fps.max(1), Ordering::Relaxed);
 }
 /// 复用盘上记忆：把 `measured_*` 装进本启动的结论（跳过矩阵的快启路径）。
 pub fn apply_measured_render() {
@@ -806,6 +851,9 @@ pub fn apply_measured_render() {
     }
     if measured_vsync() != VsyncMode::Auto {
         set_resolved_vsync(measured_vsync());
+    }
+    if measured_vsync_fps() > 0 {
+        RESOLVED_VSYNC_FPS.store(measured_vsync_fps(), Ordering::Relaxed);
     }
 }
 
@@ -888,6 +936,23 @@ pub fn persist_measured_max_fps(m: u32) -> crate::error::Result {
         Err(_) => Config::default(),
     };
     cfg.play.measured_max_fps = m;
+    let text = toml::to_string(&cfg)
+        .map_err(|_| NyaStatus::_Debug(String::from("cfg: serialize failed")))?;
+    fs.write_file(cstr16!("player.toml"), text.as_bytes())?;
+    Ok(())
+}
+
+/// half 定档完把预算写回 `\player.toml`（GUI 下次打开即见，同 `persist_measured_max_fps`
+/// 策略：重读再改，用户手写项不丢）。同时装进本启动的运行结论。
+pub fn persist_measured_vsync_fps(m: u32) -> crate::error::Result {
+    MEASURED_VSYNC_FPS.store(m, Ordering::Relaxed);
+    RESOLVED_VSYNC_FPS.store(m, Ordering::Relaxed);
+    let mut fs = Fs::new()?;
+    let mut cfg = match fs.read_file(cstr16!("player.toml")) {
+        Ok(bytes) => toml::from_str::<Config>(&String::from_utf8_lossy(&bytes)).unwrap_or_default(),
+        Err(_) => Config::default(),
+    };
+    cfg.render.measured_vsync_fps = m;
     let text = toml::to_string(&cfg)
         .map_err(|_| NyaStatus::_Debug(String::from("cfg: serialize failed")))?;
     fs.write_file(cstr16!("player.toml"), text.as_bytes())?;

@@ -348,7 +348,7 @@ impl Screen {
     ///
     /// - 首启（任一 auto 无记忆，见 `config::needs_render_bench`）必跑全矩阵：
     ///   直写 vs Blt 取快；直写路再比 BSP 单核 vs 全核并行，全核路再比
-    ///   静态分区 vs tile 自调度 vs dynamic 加权（三选一）；冠军路按 60fps 预算跑一遍，
+    ///   静态分区 vs tile 自调度 vs dynamic 加权（三选一）；auto 冠军路按预算跑一遍，
     ///   零超期则 vsync 开否则关。
     /// - 全核 cell 用 AP 常驻循环 + 轮次同步（`gop_bench` 方法论：单发 startup
     ///   测到的是 SIPI 唤醒开销而非扩展性，必须常驻 + 热身吸收后再计时）。
@@ -718,7 +718,8 @@ impl Screen {
             None
         };
 
-        // ---- vsync 探测：冠军路按 60fps 预算跑 `frames` 帧，零超期才开 ----
+        // ---- vsync 探测（auto）：冠军路按 `tune.vsync_fps` 预算跑 `frames` 帧，
+        // 零超期才开（封顶同预算），否则关 ----
         let mut overruns = 0u64;
         let winner_vsync = if probe_vsync {
             let budget = tps.max(1) / config::tune_vsync_fps().max(1) as u64;
@@ -755,7 +756,7 @@ impl Screen {
                     }
                 }
                 if overruns == 0 {
-                    VsyncMode::On
+                    VsyncMode::Static
                 } else {
                     VsyncMode::Off
                 }
@@ -767,6 +768,38 @@ impl Screen {
         } else {
             config::vsync_mode()
         };
+
+        // ---- half 定档（显式 half 且无记忆）：冠军 cell 的矩阵计时即性能检测，
+        // 零额外耗时——max_fps = frames * tps / 冠军耗时，取半稳定跑并回写。
+        if config::vsync_mode() == VsyncMode::Half && config::measured_vsync_fps() == 0 {
+            let wt = if winner_render == RenderMode::Blt {
+                if time_blt { acc_blt } else { 0 }
+            } else if winner_workers != WorkersMode::All {
+                if time_direct { acc_direct } else { 0 }
+            } else if winner_dist == DistMode::Static {
+                acc_static
+            } else if winner_dist == DistMode::Tile {
+                acc_tile
+            } else {
+                acc_dynamic
+            };
+            if wt > 0 {
+                let max_fps = (frames.saturating_mul(tps.max(1)) / wt.max(1)).clamp(1, 240) as u32;
+                let half = (max_fps / 2).max(1);
+                log::info!(
+                    "render auto: half probe winner_ticks={} -> max {}fps, budget {}fps",
+                    wt,
+                    max_fps,
+                    half
+                );
+                if let Err(e) = config::persist_measured_vsync_fps(half) {
+                    log::warn!("render auto: half persist failed: {:?}", e);
+                }
+            } else {
+                // 冠军 cell 无计时（理论到不了）：退回滑杆值，不断 boot。
+                config::set_resolved_vsync_fps(config::tune_vsync_fps());
+            }
+        }
 
         // AP 退场（发 QUIT 后给一个循环周期退出，免得 Box 泄漏的 ctx 被踩）。
         cal_round.store(CAL_QUIT, Ordering::SeqCst);
@@ -834,7 +867,7 @@ pub(crate) fn tsc() -> u64 {
     }
 }
 
-/// TSC 频率校准（100ms × 2，和 `hw_bench` 同方法）。vsync 60fps 预算用。
+/// TSC 频率校准（100ms × 2，和 `hw_bench` 同方法）。vsync 预算/ half 取半用。
 pub(crate) fn calibrate_tps() -> u64 {
     uefi::boot::stall(Duration::from_millis(100));
     let s = tsc();

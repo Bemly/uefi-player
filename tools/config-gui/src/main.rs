@@ -161,22 +161,26 @@ impl DistMode {
     }
 }
 
-/// 垂直同步（与固件 `VsyncMode` 同构；开 = 叠加 60fps 软件帧预算）。
+/// 垂直同步（与固件 `VsyncMode` 同构；`Static` 按预算滑杆封顶，`Half` 实测取半，
+/// `Off` 只按播放帧率跑；旧文件 `"on"` 按 `static` 照读）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 enum VsyncMode {
     #[default]
     Auto,
-    On,
+    #[serde(alias = "on")]
+    Static,
+    Half,
     Off,
 }
 
 impl VsyncMode {
-    const ALL: [Self; 3] = [Self::Auto, Self::On, Self::Off];
+    const ALL: [Self; 4] = [Self::Auto, Self::Static, Self::Half, Self::Off];
     fn file_str(self) -> &'static str {
         match self {
             Self::Auto => "auto",
-            Self::On => "on",
+            Self::Static => "static",
+            Self::Half => "half",
             Self::Off => "off",
         }
     }
@@ -306,6 +310,9 @@ struct RenderConfig {
     measured_dist: DistMode,
     #[serde(default)]
     measured_vsync: VsyncMode,
+    /// half 实测预算（0 = 未测）：固件回写，只读展示 + 重测清零。
+    #[serde(default)]
+    measured_vsync_fps: u32,
     #[serde(default)]
     measured_cores: u32,
 }
@@ -452,7 +459,8 @@ fn dist_desc(v: DistMode) -> String {
 fn vsync_desc(v: VsyncMode) -> String {
     match v {
         VsyncMode::Auto => t!("accel.desc_vsync_auto"),
-        VsyncMode::On => t!("accel.desc_vsync_on"),
+        VsyncMode::Static => t!("accel.desc_vsync_static"),
+        VsyncMode::Half => t!("accel.desc_vsync_half"),
         VsyncMode::Off => t!("accel.desc_vsync_off"),
     }
     .into_owned()
@@ -603,6 +611,15 @@ impl App {
         }
     }
 
+    /// half 实测行：有值报预算，无值提示下次启动现测取半。
+    fn half_line(&self) -> String {
+        if self.cfg.render.measured_vsync_fps > 0 {
+            t!("vsync.half_measured", v = self.cfg.render.measured_vsync_fps).into_owned()
+        } else {
+            t!("vsync.half_unmeasured").into_owned()
+        }
+    }
+
     /// 渲染矩阵记忆行：全未测提示切 auto，否则报记忆值 + 校准时机型核数。
     fn render_measured_line(&self) -> String {
         let m = &self.cfg.render;
@@ -654,6 +671,10 @@ impl App {
         if dist_in_play && m.dist == DistMode::Auto && m.measured_dist == DistMode::Auto {
             return true;
         }
+        // half 自带 bench（冠军计时取半）：无记忆即待测。
+        if m.vsync == VsyncMode::Half && m.measured_vsync_fps == 0 {
+            return true;
+        }
         m.vsync == VsyncMode::Auto && m.measured_vsync == VsyncMode::Auto
     }
 
@@ -698,6 +719,7 @@ impl App {
             self.cfg.render.measured_workers = WorkersMode::Auto;
             self.cfg.render.measured_dist = DistMode::Auto;
             self.cfg.render.measured_vsync = VsyncMode::Auto;
+            self.cfg.render.measured_vsync_fps = 0;
             self.cfg.render.measured_cores = 0;
             self.cfg.play.measured_max_fps = 0;
         }
@@ -1000,7 +1022,8 @@ impl App {
                     }
                 }
                 ui.label(t!("accel.vsync"));
-                ui.horizontal(|ui| {
+                // 一行四个（窄窗自动换行保底，不断尾；与 dist 行同式）。
+                ui.horizontal_wrapped(|ui| {
                     for v in VsyncMode::ALL {
                         if self.option_button(ui, self.cfg.render.vsync == v, v.file_str()) {
                             self.cfg.render.vsync = v;
@@ -1008,17 +1031,33 @@ impl App {
                     }
                 });
                 ui.small(vsync_desc(self.cfg.render.vsync));
+                // half 实测行：有值报预算，无值提示下次启动现测取半 + 重测按钮。
+                if self.cfg.render.vsync == VsyncMode::Half {
+                    ui.horizontal(|ui| {
+                        ui.label(self.half_line());
+                        if egui_glass::GlassButton::new(t!("vsync.half_rebench"))
+                            .show(ui)
+                            .clicked()
+                        {
+                            // 清零并存盘：下次启动 half 会重测。
+                            self.cfg.render.measured_vsync_fps = 0;
+                            let p = self.path.clone();
+                            self.save_to(&p);
+                        }
+                    });
+                }
                 ui.add_space(10.0);
                 // 微调只摆本模式用得上的，整组无关直接隐藏：
                 // frames = 开机矩阵帧数（无待测 bench 则藏）；
                 // tile_rows 只跟 tile 切块有关（auto 保留待测，static/dynamic 藏）；
-                // vsync_fps 只在 vsync 非 off 时用（on 封顶 / auto 达标线，off 藏）。
+                // vsync_fps 只在 static 封顶 / auto 达标线时用（half 自带预算、off 不用，都藏）。
                 let dist_in_play = self.cfg.render.mode != RenderMode::Blt
                     && self.cfg.render.workers != WorkersMode::BspOnly;
                 let show_tile = dist_in_play
                     && (self.cfg.render.dist == DistMode::Auto
                         || self.cfg.render.dist == DistMode::Tile);
-                let show_vfps = self.cfg.render.vsync != VsyncMode::Off;
+                let show_vfps = self.cfg.render.vsync == VsyncMode::Auto
+                    || self.cfg.render.vsync == VsyncMode::Static;
                 let show_frames = self.render_bench_pending();
                 if show_frames || show_tile || show_vfps {
                     ui.label(t!("tune.heading"));
@@ -1078,10 +1117,12 @@ impl App {
                         .clicked()
                     {
                         // 清零记忆并存盘：任一 auto 下次启动重校准。
+                        // half 预算派生自矩阵计时，一并清零。
                         self.cfg.render.measured_render = RenderMode::Auto;
                         self.cfg.render.measured_workers = WorkersMode::Auto;
                         self.cfg.render.measured_dist = DistMode::Auto;
                         self.cfg.render.measured_vsync = VsyncMode::Auto;
+                        self.cfg.render.measured_vsync_fps = 0;
                         self.cfg.render.measured_cores = 0;
                         let p = self.path.clone();
                         self.save_to(&p);
@@ -1406,6 +1447,22 @@ mod schema_tests {
         assert_eq!(cfg.render.tune.frames, default_frames());
         assert_eq!(cfg.render.tune.tile_rows, default_tile_rows());
         assert_eq!(cfg.render.tune.vsync_fps, default_vsync_fps());
+    }
+
+    #[test]
+    fn vsync_half_roundtrip_and_on_alias() {
+        // 新档位：half 照读照写，预算回写不丢。
+        let text = "version = 1\n[accel]\nlevel = \"auto\"\n[render]\nmode = \"direct\"\nworkers = \"all\"\nvsync = \"half\"\n[play]\nfps = \"auto\"\n";
+        let mut cfg: FileConfig = toml::from_str(text).unwrap();
+        assert_eq!(cfg.render.vsync, VsyncMode::Half);
+        cfg.render.measured_vsync_fps = 42;
+        let back: FileConfig = toml::from_str(&toml::to_string(&cfg).unwrap()).unwrap();
+        assert_eq!(back.render.vsync, VsyncMode::Half);
+        assert_eq!(back.render.measured_vsync_fps, 42);
+        // 旧文件 `"on"` 按 static 照读（固件同 alias，不断旧配置）。
+        let old: FileConfig =
+            toml::from_str("[render]\nvsync = \"on\"\n").unwrap();
+        assert_eq!(old.render.vsync, VsyncMode::Static);
     }
 
     #[test]
