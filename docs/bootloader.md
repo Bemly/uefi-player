@@ -20,6 +20,9 @@
   无 tries 项跳过并 warning；有 `efi`/`uki` 进 chainload 队列，
   只有 `linux` 的列出但拒绝启动（内核直启超出 P1，见下）。
 - `chainload.rs`：序列照抄上游，路径解析自研——
+  BLS 的 `efi` 路径是 `/` 分隔（systemd 风格），入口先转 `\` 再用
+  （UEFI 文件 API 与 FilePath 节点都要反斜杠，不转直接 `INVALID_PARAMETER`，
+  QEMU 黑盒矩阵 `boot-chainload` 实测）。
   上游用 `resolve_path`（DevicePathFromText 文本往返 + `locate_device_path`）；
   QEMU 实测该调用触发 OVMF 调试版 `MemoryAllocationLib.c:821` ASSERT
   （分配失败）进 `CpuDeadLoop`（串口停在 `boot: resolving`，
@@ -47,7 +50,10 @@
 - P1 范围：只起 PE（`efi`/`uki`）。`linux` + `initrd` 内核直启、
   devicetree、`loader.conf timeout` 自动倒计时都不做（子菜单无自动项，如实报错/跳过）。
 
-## 验收（QEMU + 真机，待跑）
+## 验收（QEMU 黑盒矩阵 `boot-chainload`，已跑过）
 
-QEMU 下能列 BLS entry 并 chainload；sprout submodule `git status` 干净。
-QEMU 本仓暂无脚本，真机/U 盘实测见 `usb_reports/` 归档。
+QEMU 下能列 BLS entry 并 chainload（自举同一份 efi 换路径：locate ok →
+loading → starting image → 第二遍 cfg + 菜单）；sprout submodule `git status`
+干净。BLS 的 `efi` 路径是 `/` 分隔，入口先转 `\`（不转 `INVALID_PARAMETER`，
+实测结论，见上）。QEMU 线束见 `tools/qemu-matrix/`，真机/U 盘实测见
+`usb_reports/` 归档。

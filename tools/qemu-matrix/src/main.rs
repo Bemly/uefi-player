@@ -42,11 +42,11 @@ struct Case {
     name: String,
     config: String,
     #[serde(default)]
-    boot_expect: Vec<String>,
+    boot_expect: Vec<Expect>,
     #[serde(default)]
     keys: Vec<KeyStep>,
     #[serde(default)]
-    expect: Vec<String>,
+    expect: Vec<Expect>,
     forbid: Option<Vec<String>>,
     timeout_sec: Option<u64>,
     settle_sec: Option<u64>,
@@ -54,10 +54,43 @@ struct Case {
     needs_video: bool,
     #[serde(default)]
     needs_wallpaper: u32,
+    /// chainload 自举：镜像里再放一份 efi + 一条 BLS entry（单盘场景）。
+    #[serde(default)]
+    needs_chainload: bool,
     #[serde(default)]
     slow: bool,
     soak_sec: Option<u64>,
     artifact: Option<Artifact>,
+}
+
+/// 断言项：纯字串 = 出现一次即满足；`{pat,count}` = 出现次数达标
+///（chainload 这类"同一镜像起两次"的场景，靠计数区分第几轮）。
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum Expect {
+    Once(String),
+    Count { pat: String, count: usize },
+}
+
+impl Expect {
+    fn pat(&self) -> &str {
+        match self {
+            Expect::Once(p) => p,
+            Expect::Count { pat, .. } => pat,
+        }
+    }
+    fn satisfied(&self, data: &str) -> bool {
+        match self {
+            Expect::Once(p) => data.contains(p),
+            Expect::Count { pat, count } => data.matches(pat).count() >= *count,
+        }
+    }
+    fn describe(&self) -> String {
+        match self {
+            Expect::Once(p) => format!("{p:?}"),
+            Expect::Count { pat, count } => format!("{pat:?} x{count}"),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -65,10 +98,10 @@ struct KeyStep {
     send: String,
     #[serde(default = "default_wait")]
     wait_after: u64,
-    /// 发键前先等这些串口行（事件驱动，不靠睡；超时即 FAIL）。
-    /// 屏显-only 的界面没有标记，只能用 wait_after 估——这种 case 注明。
+    /// 发键前先等这些串口断言（事件驱动，不靠裸睡；超时即 FAIL）。
+    /// 屏显-only 且无标记的界面填空 + `wait_after` 估，case 里注明。
     #[serde(default)]
-    wait_for: Vec<String>,
+    wait_for: Vec<Expect>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -303,7 +336,12 @@ fn qemu_bin() -> Result<String, String> {
 }
 
 /// 等全部字面模式在串口出现；qemu 提前退出即失败。
-fn wait_patterns(path: &str, patterns: &[String], timeout: Duration, proc: &mut Child) -> (bool, Vec<String>, String) {
+fn wait_patterns(
+    path: &str,
+    patterns: &[Expect],
+    timeout: Duration,
+    proc: &mut Child,
+) -> (bool, Vec<String>, String) {
     let start = Instant::now();
     let mut data: String;
     loop {
@@ -316,14 +354,14 @@ fn wait_patterns(path: &str, patterns: &[String], timeout: Duration, proc: &mut 
             );
         }
         data = std::fs::read_to_string(path).unwrap_or_default();
-        if patterns.iter().all(|p| data.contains(p)) {
+        if patterns.iter().all(|p| p.satisfied(&data)) {
             return (true, vec![], data);
         }
         if start.elapsed() >= timeout {
             let missing: Vec<String> = patterns
                 .iter()
-                .filter(|p| !data.contains(*p))
-                .cloned()
+                .filter(|p| !p.satisfied(&data))
+                .map(|p| p.describe())
                 .collect();
             return (false, missing, data);
         }
@@ -425,7 +463,7 @@ fn run_case(case: &Case, glob: &Global, efi: &str, keep: bool, ovmf_default: &st
         return (false, "efi unreadable".into());
     }
     let mut files: Vec<(&str, Vec<u8>)> = vec![
-        ("EFI/BOOT/BOOTX64.EFI", efi_data),
+        ("EFI/BOOT/BOOTX64.EFI", efi_data.clone()),
         ("player.toml", case.config.trim_start_matches('\n').as_bytes().to_vec()),
     ];
     if case.needs_video {
@@ -440,6 +478,15 @@ fn run_case(case: &Case, glob: &Global, efi: &str, keep: bool, ovmf_default: &st
         files.push((
             Box::leak(format!("wallpaper/frame{i:04}.raw").into_boxed_str()),
             vec![0u8; 1920 * 1080 * 4],
+        ));
+    }
+    if case.needs_chainload {
+        // 被起镜像：同一份 efi 换个路径（单盘场景；跨盘本来就不支持，见 bootloader.md）。
+        let app2 = efi_data.clone();
+        files.push(("EFI/other/app.efi", app2));
+        files.push((
+            "loader/entries/test.conf",
+            b"title Self Chainload Test\nefi /EFI/other/app.efi\n".to_vec(),
         ));
     }
     let fstype = match make_fat_image(&image, 128) {

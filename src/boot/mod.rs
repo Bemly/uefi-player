@@ -25,6 +25,8 @@ const KEYS: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyz";
 pub fn run() -> Result {
     let mut screen = Screen::reacquire()?;
     let list = enumerate()?;
+    // 条目数标记（串口可断言）：QEMU 黑盒矩阵靠它同步按键（子菜单屏显-only）。
+    log::info!("boot: {} entries", list.entries.len());
     // B 过渡用壁纸预载集（和 A 同格式；缺片源/关开关即 None，跳过过渡）。
     let wp = wallpaper::load().unwrap_or(None);
     let tps = if wp.is_some() { calibrate_tps() } else { 1 };
@@ -124,6 +126,8 @@ fn boot_index(
                 Err(e) => {
                     let mut screen = Screen::reacquire()?;
                     screen.draw_str(&format!("boot failed: {:?}", e));
+                    // 屏显 + 串口双写：无头 QEMU 下屏显看不见（矩阵曾因此哑巴）。
+                    log::warn!("boot failed: {:?}", e);
                     pause_return(&mut screen);
                     Ok(screen)
                 }

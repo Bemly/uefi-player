@@ -274,6 +274,33 @@ keys = [{ send = "7", wait_after = 5 }]
 expect = ["AVX is "]
 forbid = ["panicked at", "CpuDeadLoop", "menu bg skipped"]
 
+# 引导 chainload：b 进子菜单（等计数标记）0 选第一项，被起镜像是同一份 efi
+# 换个路径（单盘场景）；成功 = 同一串口出现第二遍 cfg + 菜单就绪（计数断言）。
+[[case]]
+name = "boot-chainload"
+timeout_sec = 300
+needs_chainload = true
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+workers = "bsp_only"
+dist = "static"
+vsync = "off"
+[play]
+fps = "max"
+[wallpaper]
+enable = false
+"""
+boot_expect = ["cfg: version=1", "menu: ready"]
+keys = [
+  { send = "b", wait_after = 2 },
+  { send = "0", wait_for = ["boot: 1 entries"], wait_after = 5 },
+]
+expect = ["boot: starting image", { pat = "cfg: version=1", count = 2 }, { pat = "menu: ready", count = 2 }]
+
 # 慢：HW bench 落盘工件（默认跳过，--include-slow 才跑）。
 [[case]]
 name = "hwbench-artifact"

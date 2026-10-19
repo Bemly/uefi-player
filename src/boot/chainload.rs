@@ -53,6 +53,9 @@ pub fn chainload_efi(efi_path: &str, options: Option<&str>) -> Result {
             efi_path
         )));
     }
+    // BLS 路径是 `/` 分隔（systemd 风格）；UEFI 文件 API 与 FilePath 节点都要 `\`，
+    // 不转直接 INVALID_PARAMETER（QEMU 黑盒矩阵实测，见 matrix `boot-chainload`）。
+    let efi_path = efi_path.replace('/', "\\");
 
     let me = uefi::boot::image_handle();
 
@@ -63,7 +66,7 @@ pub fn chainload_efi(efi_path: &str, options: Option<&str>) -> Result {
         .device()
         .ok_or_else(|| NyaStatus::_Debug(String::from("boot: no self image device")))?;
     drop(loaded);
-    let efi_cstr = uefi::data_types::CString16::try_from(efi_path)
+    let efi_cstr = uefi::data_types::CString16::try_from(efi_path.as_str())
         .map_err(|_| NyaStatus::FromStrWithBufError)?;
     // 二进制拼目标路径（自身设备句柄的 DevicePath + 新 FilePath 节点，无文本往返）。
     // 注意不能从自身 LoadedImage::file_path 截根：fallback 启动时它可能就是
