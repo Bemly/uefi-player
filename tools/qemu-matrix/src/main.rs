@@ -61,6 +61,9 @@ struct Case {
     slow: bool,
     soak_sec: Option<u64>,
     artifact: Option<Artifact>,
+    /// 附加卷（第二盘及以后）：多卷自动发现的测试夹具，按顺序挂 hd2、hd3…。
+    #[serde(default)]
+    extra_volumes: Vec<ExtraVolume>,
 }
 
 /// 断言项：纯字串 = 出现一次即满足；`{pat,count}` = 出现次数达标
@@ -73,12 +76,6 @@ enum Expect {
 }
 
 impl Expect {
-    fn pat(&self) -> &str {
-        match self {
-            Expect::Once(p) => p,
-            Expect::Count { pat, .. } => pat,
-        }
-    }
     fn satisfied(&self, data: &str) -> bool {
         match self {
             Expect::Once(p) => data.contains(p),
@@ -109,6 +106,25 @@ struct Artifact {
     glob: String,
     #[serde(default)]
     contains: Vec<String>,
+}
+
+/// 附加卷（第二盘及以后）：多卷自动发现的测试夹具。
+/// 文件来源三选一：`text` 内联文本 / `zeros` 全零占位 / `efi = true` 拷被测 efi。
+#[derive(Debug, Deserialize)]
+struct ExtraFile {
+    path: String,
+    #[serde(default)]
+    text: Option<String>,
+    #[serde(default)]
+    zeros: Option<usize>,
+    #[serde(default)]
+    efi: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct ExtraVolume {
+    #[serde(default)]
+    files: Vec<ExtraFile>,
 }
 
 #[derive(Debug, Default)]
@@ -481,7 +497,7 @@ fn run_case(case: &Case, glob: &Global, efi: &str, keep: bool, ovmf_default: &st
         ));
     }
     if case.needs_chainload {
-        // 被起镜像：同一份 efi 换个路径（单盘场景；跨盘本来就不支持，见 bootloader.md）。
+        // 被起镜像：同一份 efi 换个路径（单盘场景；跨盘见 extra_volumes 的 case）。
         let app2 = efi_data.clone();
         files.push(("EFI/other/app.efi", app2));
         files.push((
@@ -495,6 +511,32 @@ fn run_case(case: &Case, glob: &Global, efi: &str, keep: bool, ovmf_default: &st
     };
     if let Err(e) = populate(fstype, &image, &files) {
         return (false, e);
+    }
+    // 附加卷（第二盘起）：多卷自动发现的测试夹具。
+    let mut extra_images = Vec::new();
+    for (vi, vol) in case.extra_volumes.iter().enumerate() {
+        let vimg = format!("{rundir}/usb{}.img", vi + 2);
+        let _ = std::fs::remove_file(&vimg);
+        let mut vfiles: Vec<(&str, Vec<u8>)> = Vec::new();
+        for f in &vol.files {
+            let leak: &str = Box::leak(f.path.clone().into_boxed_str());
+            if f.efi {
+                vfiles.push((leak, efi_data.clone()));
+            } else if let Some(t) = &f.text {
+                vfiles.push((leak, t.as_bytes().to_vec()));
+            } else if let Some(n) = f.zeros {
+                vfiles.push((leak, vec![0u8; n]));
+            } else {
+                return (false, format!("extra volume file {} has no source", f.path));
+            }
+        }
+        if let Err(e) = make_fat_image(&vimg, 128) {
+            return (false, e);
+        }
+        if let Err(e) = populate(fstype, &vimg, &vfiles) {
+            return (false, e);
+        }
+        extra_images.push(vimg);
     }
 
     // 2. 起 QEMU。
@@ -515,18 +557,31 @@ fn run_case(case: &Case, glob: &Global, efi: &str, keep: bool, ovmf_default: &st
         format!("file={image},format=raw,if=none,id=hd"),
         "-device".into(),
         "virtio-blk-pci,drive=hd".into(),
-        "-smp".into(),
-        glob.smp.unwrap_or(4).to_string(),
-        "-m".into(),
-        glob.mem_mb.unwrap_or(1024).to_string(),
-        "-display".into(),
-        "none".into(),
-        "-no-reboot".into(),
-        "-serial".into(),
-        format!("file:{serial}"),
-        "-monitor".into(),
-        format!("telnet:127.0.0.1:{port},server,nowait"),
     ];
+    // 附加卷挂 hd2、hd3…（多卷发现的测试夹具）。
+    for (i, vimg) in extra_images.iter().enumerate() {
+        let id = format!("hd{}", i + 2);
+        cmd.push("-drive".into());
+        cmd.push(format!("file={vimg},format=raw,if=none,id={id}"));
+        cmd.push("-device".into());
+        cmd.push(format!("virtio-blk-pci,drive={id}"));
+    }
+    cmd.extend(
+        [
+            "-smp".to_string(),
+            glob.smp.unwrap_or(4).to_string(),
+            "-m".into(),
+            glob.mem_mb.unwrap_or(1024).to_string(),
+            "-display".into(),
+            "none".into(),
+            "-no-reboot".into(),
+            "-serial".into(),
+            format!("file:{serial}"),
+            "-monitor".into(),
+            format!("telnet:127.0.0.1:{port},server,nowait"),
+        ]
+        .into_iter(),
+    );
     cmd.extend(pick_accel());
     println!("  {}", cmd.join(" "));
     let mut proc = match Command::new(&cmd[0])

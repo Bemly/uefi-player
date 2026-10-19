@@ -13,6 +13,7 @@
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
+use uefi::Handle;
 use uefi::cstr16;
 use uefi::data_types::CString16;
 
@@ -24,10 +25,27 @@ pub enum BootKind {
     Efi {
         path: String,
         options: Option<String>,
+        /// 所在卷（`None` = 本卷，老行为；`Some` = 自动发现的跨盘卷）。
+        volume: Option<Handle>,
     },
     Linux {
         kernel: String,
+        initrd: Vec<String>,
+        options: Option<String>,
+        devicetree: Option<String>,
+        /// 所在卷（`None` = 本卷；`Some` = 自动发现的跨盘卷）。
+        volume: Option<Handle>,
     },
+}
+
+impl BootKind {
+    /// 子菜单/串口用的种类名（与 `BootKind` 变体同义，矩阵断言靠它）。
+    pub fn kind_str(&self) -> &'static str {
+        match self {
+            BootKind::Efi { .. } => "efi",
+            BootKind::Linux { .. } => "linux",
+        }
+    }
 }
 
 pub struct BootEntry {
@@ -43,8 +61,164 @@ pub struct BootList {
     pub default_index: Option<usize>,
 }
 
-/// 枚举启动卷 `\loader\entries\*.conf`。缺目录/无有效项不报错，
-/// 返回空列表 + warning（子菜单如实展示，不 halt 回主菜单）。
+/// 本机架构（BLS `architecture` 键过滤用；缺键不断，老文件照进）。
+/// 上游按机器字长匹配，这里目标钉死 x86_64，只认 `x64`。
+const MACHINE_ARCH: &str = "x64";
+
+/// 单个 BLS conf 解析（`detect.rs` 复用；`volume` 为条目打卷标）。
+/// 成功返回条目，失败返回记进 warning 的串（调用方照展示，不 halt）。
+/// 偏离上游（有意，见 `detect.rs` 头注释）：`uki` 键按 PE 直接起
+/// （不读 `.uname` 区，标题取文件名；要全名请写 conf 标题）。
+fn parse_entry(
+    name: &str,
+    bytes: &[u8],
+    volume: Option<Handle>,
+) -> core::result::Result<BootEntry, String> {
+    use core::str::FromStr;
+    let parsed = edera_sprout_bls::BlsEntry::from_str(&String::from_utf8_lossy(bytes))
+        .map_err(|e| format!("{}: {:#}", name, e))?;
+    let stem = name
+        .strip_suffix(".conf")
+        .or_else(|| name.strip_suffix(".CONF"))
+        .unwrap_or(name);
+    let (id, counter) = edera_sprout_bls::BootCounter::parse(stem);
+    // boot counting 见光死：没 tries 的不进列表（上游非严格模式会照启，
+    // 这里如实跳过并 warning，不断整单）。
+    if parsed.is_bad() {
+        return Err(format!("{}: no tries left, skipped", name));
+    }
+    // arch 过滤：缺键放行，错架构跳过（x86_64 固件起不了 arm64 内核）。
+    if let Some(arch) = parsed.architecture.as_deref() {
+        if arch.to_ascii_lowercase() != MACHINE_ARCH {
+            return Err(format!("{}: architecture {:?} skipped", name, arch));
+        }
+    }
+    let title = parsed
+        .title
+        .clone()
+        .filter(|t| !t.is_empty())
+        .unwrap_or_else(|| String::from(id));
+    let options = edera_sprout_parsing::empty_is_none(parsed.options.clone());
+    if let Some(efi) = parsed.efi.clone().or_else(|| parsed.uki.clone()) {
+        Ok(BootEntry {
+            title,
+            file_name: String::from(name),
+            kind: BootKind::Efi {
+                path: efi,
+                options,
+                volume,
+            },
+            tries_left: counter.map(|c| c.tries_left),
+        })
+    } else if let Some(kernel) = parsed.linux.clone() {
+        Ok(BootEntry {
+            title,
+            file_name: String::from(name),
+            kind: BootKind::Linux {
+                kernel,
+                initrd: parsed.initrd.clone(),
+                options,
+                devicetree: parsed.devicetree.clone(),
+                volume,
+            },
+            tries_left: counter.map(|c| c.tries_left),
+        })
+    } else {
+        Err(format!("{}: no efi/uki/linux image, skipped", name))
+    }
+}
+
+/// 枚举给定卷 `\loader\entries\*.conf`（`volume` 为条目打卷标，
+/// `None` = 本卷）。缺目录/无有效项不报错，返回空列表 + warning。
+pub fn scan_volume(fs: &mut Fs, volume: Option<Handle>) -> (Vec<BootEntry>, Vec<String>) {
+    let mut warnings = Vec::new();
+    let mut entries = Vec::new();
+    let files = match fs.list_dir(cstr16!("loader\\entries")) {
+        Ok(files) => files,
+        Err(NyaStatus::Uefi(err)) if err.status() == uefi::Status::NOT_FOUND => {
+            warnings.push(String::from("no \\loader\\entries directory"));
+            Vec::new()
+        }
+        Err(e) => {
+            warnings.push(format!("entries list failed: {:?}", e));
+            Vec::new()
+        }
+    };
+    let mut names: Vec<String> = files
+        .into_iter()
+        .filter(|(_, is_dir)| !is_dir)
+        .map(|(name, _)| name)
+        .filter(|n| n.to_ascii_lowercase().ends_with(".conf"))
+        .collect();
+    names.sort();
+    for name in &names {
+        let path = format!("loader\\entries\\{}", name);
+        let cstr = match CString16::try_from(path.as_str()) {
+            Ok(c) => c,
+            Err(_) => {
+                warnings.push(format!("{}: bad file name", name));
+                continue;
+            }
+        };
+        let bytes = match fs.read_file(&cstr) {
+            Ok(b) => b,
+            Err(e) => {
+                warnings.push(format!("{}: {:?}", name, e));
+                continue;
+            }
+        };
+        match parse_entry(name, &bytes, volume) {
+            Ok(e) => entries.push(e),
+            Err(w) => warnings.push(w),
+        }
+    }
+    (entries, warnings)
+}
+
+/// 启动尝试即递减 tries（BLS boot counting）：`name+N-M.conf` 改写成
+/// `name+(N-1)-M.conf`（FAT 无 rename：读旧写新再删旧，用既有原语拼）。
+/// 无计数器不做；失败只记 warning，不挡启动（尝试本身已发生）。
+pub fn consume_try(fs: &mut Fs, entry: &BootEntry) -> Option<String> {
+    let left = entry.tries_left?;
+    let stem = entry
+        .file_name
+        .strip_suffix(".conf")
+        .or_else(|| entry.file_name.strip_suffix(".CONF"))
+        .unwrap_or(&entry.file_name);
+    let (id, counter) = edera_sprout_bls::BootCounter::parse(stem);
+    let counter = counter?;
+    let new_stem = counter.decremented().render(id);
+    let old_path =
+        match CString16::try_from(format!("loader\\entries\\{}", entry.file_name).as_str()) {
+            Ok(c) => c,
+            Err(_) => return Some(format!("{}: bad file name", entry.file_name)),
+        };
+    let new_path = match CString16::try_from(format!("loader\\entries\\{}.conf", new_stem).as_str())
+    {
+        Ok(c) => c,
+        Err(_) => return Some(format!("{}: bad counter name", entry.file_name)),
+    };
+    let bytes = match fs.read_file(&old_path) {
+        Ok(b) => b,
+        Err(e) => return Some(format!("{}: reread failed: {:?}", entry.file_name, e)),
+    };
+    // 先写新再删旧：中途断电至多留一对，启动项不丢（下次扫描重名去重见 mod）。
+    if fs.write_file(&new_path, &bytes).is_err() {
+        return Some(format!("{}: counter rewrite failed", entry.file_name));
+    }
+    if fs.delete(&old_path).is_err() {
+        return Some(format!("{}: old counter delete failed", entry.file_name));
+    }
+    log::warn!(
+        "boot: consumed try for {} ({} left)",
+        entry.file_name,
+        left.saturating_sub(1)
+    );
+    None
+}
+
+/// 枚举启动卷 `\loader\entries\*.conf` + 默认项匹配（只看本卷 conf）。
+/// 缺目录/无有效项不报错，返回空列表 + warning（子菜单如实展示，不 halt 回主菜单）。
 pub fn enumerate() -> Result<BootList> {
     let mut fs = Fs::new()?;
     let mut warnings = Vec::new();
@@ -81,81 +255,9 @@ pub fn enumerate() -> Result<BootList> {
         Err(e) => warnings.push(format!("sprout.toml: {:?}", e)),
     }
 
-    let mut entries = Vec::new();
-    let files = match fs.list_dir(cstr16!("loader\\entries")) {
-        Ok(files) => files,
-        Err(NyaStatus::Uefi(err)) if err.status() == uefi::Status::NOT_FOUND => {
-            warnings.push(String::from("no \\loader\\entries directory"));
-            Vec::new()
-        }
-        Err(e) => return Err(e),
-    };
-    let mut names: Vec<String> = files
-        .into_iter()
-        .filter(|(_, is_dir)| !is_dir)
-        .map(|(name, _)| name)
-        .filter(|n| n.to_ascii_lowercase().ends_with(".conf"))
-        .collect();
-    names.sort();
-
-    for name in &names {
-        let path = format!("loader\\entries\\{}", name);
-        let cstr = match CString16::try_from(path.as_str()) {
-            Ok(c) => c,
-            Err(_) => {
-                warnings.push(format!("{}: bad file name", name));
-                continue;
-            }
-        };
-        let bytes = match fs.read_file(&cstr) {
-            Ok(b) => b,
-            Err(e) => {
-                warnings.push(format!("{}: {:?}", name, e));
-                continue;
-            }
-        };
-        let parsed = match String::from_utf8_lossy(&bytes).parse::<edera_sprout_bls::BlsEntry>() {
-            Ok(p) => p,
-            Err(e) => {
-                warnings.push(format!("{}: {:#}", name, e));
-                continue;
-            }
-        };
-        let stem = name
-            .strip_suffix(".conf")
-            .or_else(|| name.strip_suffix(".CONF"))
-            .unwrap_or(name);
-        let (id, counter) = edera_sprout_bls::BootCounter::parse(stem);
-        // boot counting 见光死：没 tries 的不进列表（sprout 非严格模式会照启，
-        // 这里如实跳过并 warning，不断整单）。
-        if parsed.is_bad() {
-            warnings.push(format!("{}: no tries left, skipped", name));
-            continue;
-        }
-        let title = parsed
-            .title
-            .clone()
-            .filter(|t| !t.is_empty())
-            .unwrap_or_else(|| String::from(id));
-        let options = edera_sprout_parsing::empty_is_none(parsed.options.clone());
-        if let Some(efi) = parsed.efi.clone().or_else(|| parsed.uki.clone()) {
-            entries.push(BootEntry {
-                title,
-                file_name: String::from(name),
-                kind: BootKind::Efi { path: efi, options },
-                tries_left: counter.map(|c| c.tries_left),
-            });
-        } else if let Some(kernel) = parsed.linux.clone() {
-            entries.push(BootEntry {
-                title,
-                file_name: String::from(name),
-                kind: BootKind::Linux { kernel },
-                tries_left: counter.map(|c| c.tries_left),
-            });
-        } else {
-            warnings.push(format!("{}: no efi/uki/linux image, skipped", name));
-        }
-    }
+    // 本卷 BLS（默认项只看本卷；其它卷的由 `detect.rs` 追加，无默认）。
+    let (entries, mut scan_warnings) = scan_volume(&mut fs, None);
+    warnings.append(&mut scan_warnings);
 
     let default_index = default_pattern
         .as_deref()

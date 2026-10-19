@@ -337,6 +337,23 @@ struct PlayConfig {
     measured_max_fps: u32,
 }
 
+/// `[boot]`：多卷自动发现开关（与固件 `BootConfig` 同构；全 `true` = 默认全开）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+struct BootConfig {
+    auto: bool,
+    windows: bool,
+    linux: bool,
+    shell: bool,
+    uki: bool,
+}
+
+impl Default for BootConfig {
+    fn default() -> Self {
+        Self { auto: true, windows: true, linux: true, shell: true, uki: true }
+    }
+}
+
 /// `[wallpaper]`：与固件 `WallpaperConfig` 同构。无校准记忆，纯开关。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -378,6 +395,7 @@ struct FileConfig {
     render: RenderConfig,
     play: PlayConfig,
     wallpaper: WallpaperConfig,
+    boot: BootConfig,
 }
 
 impl Default for FileConfig {
@@ -388,6 +406,7 @@ impl Default for FileConfig {
             render: RenderConfig::default(),
             play: PlayConfig::default(),
             wallpaper: WallpaperConfig::default(),
+            boot: BootConfig::default(),
         }
     }
 }
@@ -399,6 +418,7 @@ enum Page {
     File,
     Accel,
     Wallpaper,
+    Boot,
     Summary,
 }
 
@@ -964,6 +984,21 @@ impl App {
         b.show(ui).clicked()
     }
 
+    /// 开/关行（两颗玻璃按钮）：返回用户点选后的值，调用方写回。
+    /// 纯为了借用简单（直接在循环里拿 `&mut` 字段会和 `option_button` 的 `&self` 打架）。
+    fn switch_row(&mut self, ui: &mut egui::Ui, cur: bool, on: &str, off: &str) -> bool {
+        let mut next = cur;
+        ui.horizontal(|ui| {
+            if self.option_button(ui, cur, on) {
+                next = true;
+            }
+            if self.option_button(ui, !cur, off) {
+                next = false;
+            }
+        });
+        next
+    }
+
     /// 实时背景的页面层：只留一句提示做折射燃料。`live.run` 会让它跑两遍
     /// （可见 + 离屏），所以这里禁止任何写状态、禁止放玻璃件、
     /// 禁止放可交互控件——只许纯文本。
@@ -1311,6 +1346,34 @@ impl App {
                 ui.small(t!("wallpaper.preload_hint"));
                 }
             }
+            Page::Boot => {
+                ui.heading(t!("boot.heading"));
+                ui.small(t!("boot.hint"));
+                ui.add_space(4.0);
+                ui.label(t!("boot.auto"));
+                let auto = self.switch_row(ui, self.cfg.boot.auto, &t!("boot.on"), &t!("boot.off"));
+                self.cfg.boot.auto = auto;
+                ui.small(t!("boot.auto_desc"));
+                // 总开关关时细项不可选，整组隐藏（壁纸页同式）。
+                if self.cfg.boot.auto {
+                    ui.add_space(10.0);
+                    ui.label(t!("boot.windows"));
+                    let v = self.switch_row(ui, self.cfg.boot.windows, &t!("boot.on"), &t!("boot.off"));
+                    self.cfg.boot.windows = v;
+                    ui.add_space(4.0);
+                    ui.label(t!("boot.linux"));
+                    let v = self.switch_row(ui, self.cfg.boot.linux, &t!("boot.on"), &t!("boot.off"));
+                    self.cfg.boot.linux = v;
+                    ui.add_space(4.0);
+                    ui.label(t!("boot.shell"));
+                    let v = self.switch_row(ui, self.cfg.boot.shell, &t!("boot.on"), &t!("boot.off"));
+                    self.cfg.boot.shell = v;
+                    ui.add_space(4.0);
+                    ui.label(t!("boot.uki"));
+                    let v = self.switch_row(ui, self.cfg.boot.uki, &t!("boot.on"), &t!("boot.off"));
+                    self.cfg.boot.uki = v;
+                }
+            }
             Page::Summary => {
                 ui.heading(t!("sum.heading"));
                 ui.small(t!("sum.hint"));
@@ -1339,6 +1402,20 @@ impl App {
                 ));
                 ui.label(t!("sum.play", v = self.play_text()));
                 ui.label(self.measured_line());
+                ui.label(t!(
+                    "sum.boot",
+                    v = if self.cfg.boot.auto {
+                        format!(
+                            "auto win:{} lin:{} sh:{} uki:{}",
+                            self.cfg.boot.windows as u8,
+                            self.cfg.boot.linux as u8,
+                            self.cfg.boot.shell as u8,
+                            self.cfg.boot.uki as u8,
+                        )
+                    } else {
+                        String::from("off")
+                    }
+                ));
                 ui.label(t!("sum.version", v = self.cfg.version));
                 ui.label(t!("sum.file", v = self.path.clone()));
                 ui.add_space(8.0);
@@ -1365,6 +1442,7 @@ impl eframe::App for App {
                     ui.selectable_value(&mut self.page, Page::File, t!("nav.file"));
                     ui.selectable_value(&mut self.page, Page::Accel, t!("nav.accel"));
                     ui.selectable_value(&mut self.page, Page::Wallpaper, t!("nav.wallpaper"));
+                    ui.selectable_value(&mut self.page, Page::Boot, t!("nav.boot"));
                     ui.selectable_value(&mut self.page, Page::Summary, t!("nav.summary"));
                     if ui.button(t!("toolbar.open")).clicked() {
                         act = Action::Open;
@@ -1439,6 +1517,7 @@ impl eframe::App for App {
                     self.nav_button(ui, Page::File, t!("nav.file").into_owned());
                     self.nav_button(ui, Page::Accel, t!("nav.accel").into_owned());
                     self.nav_button(ui, Page::Wallpaper, t!("nav.wallpaper").into_owned());
+                    self.nav_button(ui, Page::Boot, t!("nav.boot").into_owned());
                     self.nav_button(ui, Page::Summary, t!("nav.summary").into_owned());
                     ui.add_space(8.0);
                     ui.small(t!("sum.accel", v = self.cfg.accel.level.file_str()));
@@ -1640,13 +1719,20 @@ mod blackbox_matrix {
                                         fps: String::from("60"),
                                         measured_max_fps: 120,
                                     },
-                                    wallpaper: WallpaperConfig {
-                                        enable: true,
-                                        fps: 20,
-                                        frames: 30,
-                                        preload: 4,
-                                    },
-                                };
+                                wallpaper: WallpaperConfig {
+                                    enable: true,
+                                    fps: 20,
+                                    frames: 30,
+                                    preload: 4,
+                                },
+                                boot: BootConfig {
+                                    auto: true,
+                                    windows: true,
+                                    linux: false,
+                                    shell: true,
+                                    uki: false,
+                                },
+                            };
                                 let text = toml::to_string(&cfg).unwrap();
                                 let back: FileConfig = toml::from_str(&text).unwrap();
                                 assert_eq!(back, cfg, "roundtrip {a:?}/{m:?}/{w:?}/{d:?}/{v:?}/{b:?}");
@@ -1690,6 +1776,36 @@ mod blackbox_matrix {
     fn compat_empty_matrix() {
         let cfg: FileConfig = toml::from_str("").unwrap();
         assert_eq!(cfg, FileConfig::default());
+    }
+
+    /// `[boot]` 缺表：老文件照读，自动发现全开（默认行为就是发现）。
+    #[test]
+    fn boot_compat_matrix() {
+        let text = "version = 1\n[accel]\nlevel = \"auto\"\n[render]\nmode = \"auto\"\n[play]\nfps = \"auto\"\n";
+        let cfg: FileConfig = toml::from_str(text).unwrap();
+        assert!(cfg.boot.auto);
+        assert!(cfg.boot.windows);
+        assert!(cfg.boot.linux);
+        assert!(cfg.boot.shell);
+        assert!(cfg.boot.uki);
+    }
+
+    /// `[boot]` 5 开关全笛卡尔回写（32 种）。
+    #[test]
+    fn boot_roundtrip_matrix() {
+        let mut n = 0;
+        for bits in 0..32u8 {
+            let mut cfg = FileConfig::default();
+            cfg.boot.auto = bits & 1 != 0;
+            cfg.boot.windows = bits & 2 != 0;
+            cfg.boot.linux = bits & 4 != 0;
+            cfg.boot.shell = bits & 8 != 0;
+            cfg.boot.uki = bits & 16 != 0;
+            let back: FileConfig = toml::from_str(&toml::to_string(&cfg).unwrap()).unwrap();
+            assert_eq!(back, cfg, "{bits:05b}");
+            n += 1;
+        }
+        assert_eq!(n, 32);
     }
 
     /// 读盘钳制矩阵：只有 B2V 能留，其余三项一律钳回 B2V（播放行为不变）。

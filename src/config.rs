@@ -33,6 +33,12 @@
 //! fps = 15                # 背景循环帧率（低帧即可）
 //! frames = 0              # B 过渡封顶帧数（0 = 全播预载集）
 //! preload = 8             # A/B 共用预载帧数上限（1080p BGRA ≈ 8MB/帧）
+//! [boot]
+//! auto = true             # 多卷自动发现总开关（关 = 只列本卷 BLS，老行为）
+//! windows = true          # 自动发现 Windows Boot Manager
+//! linux = true            # 自动发现 Linux 内核对（kernel + initramfs）
+//! shell = true            # 自动发现 UEFI Shell（shellx64.efi）
+//! uki = true              # 自动发现 EFI/Linux/*.efi（标题取文件名）
 //! ```
 
 use alloc::format;
@@ -346,6 +352,7 @@ pub struct Config {
     pub render: RenderConfig,
     pub play: PlayConfig,
     pub wallpaper: WallpaperConfig,
+    pub boot: BootConfig,
 }
 
 impl Default for Config {
@@ -356,6 +363,40 @@ impl Default for Config {
             render: RenderConfig::default(),
             play: PlayConfig::default(),
             wallpaper: WallpaperConfig::default(),
+            boot: BootConfig::default(),
+        }
+    }
+}
+
+/// `[boot]`：多卷自动发现开关（P1 全功能对齐）。本卷 BLS 永远列（不受开关影响，
+/// 老行为）；开关只管自动发现部分。缺键老配置按默认（全开）处理。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BootConfig {
+    #[serde(default = "default_true")]
+    pub auto: bool,
+    #[serde(default = "default_true")]
+    pub windows: bool,
+    #[serde(default = "default_true")]
+    pub linux: bool,
+    #[serde(default = "default_true")]
+    pub shell: bool,
+    #[serde(default = "default_true")]
+    pub uki: bool,
+}
+
+const fn default_true() -> bool {
+    true
+}
+
+impl Default for BootConfig {
+    fn default() -> Self {
+        Self {
+            auto: true,
+            windows: true,
+            linux: true,
+            shell: true,
+            uki: true,
         }
     }
 }
@@ -487,6 +528,12 @@ static WALLPAPER_ENABLE: AtomicU8 = AtomicU8::new(0);
 static WALLPAPER_FPS: AtomicU32 = AtomicU32::new(default_wallpaper_fps());
 static WALLPAPER_FRAMES: AtomicU32 = AtomicU32::new(0);
 static WALLPAPER_PRELOAD: AtomicU32 = AtomicU32::new(default_wallpaper_preload());
+/// `[boot]` 自动发现开关（5 个 u8，0/1）。
+static BOOT_AUTO: AtomicU8 = AtomicU8::new(1);
+static BOOT_WINDOWS: AtomicU8 = AtomicU8::new(1);
+static BOOT_LINUX: AtomicU8 = AtomicU8::new(1);
+static BOOT_SHELL: AtomicU8 = AtomicU8::new(1);
+static BOOT_UKI: AtomicU8 = AtomicU8::new(1);
 static TUNE_FRAMES: AtomicU32 = AtomicU32::new(default_frames());
 static TUNE_TILE_ROWS: AtomicU32 = AtomicU32::new(default_tile_rows());
 static TUNE_VSYNC_FPS: AtomicU32 = AtomicU32::new(default_vsync_fps());
@@ -543,8 +590,13 @@ pub fn load() -> Option<String> {
     WALLPAPER_FPS.store(cfg.wallpaper.fps.clamp(1, 60).max(1), Ordering::Relaxed);
     WALLPAPER_FRAMES.store(cfg.wallpaper.frames, Ordering::Relaxed);
     WALLPAPER_PRELOAD.store(cfg.wallpaper.preload.clamp(1, 32).max(1), Ordering::Relaxed);
+    BOOT_AUTO.store(cfg.boot.auto as u8, Ordering::Relaxed);
+    BOOT_WINDOWS.store(cfg.boot.windows as u8, Ordering::Relaxed);
+    BOOT_LINUX.store(cfg.boot.linux as u8, Ordering::Relaxed);
+    BOOT_SHELL.store(cfg.boot.shell as u8, Ordering::Relaxed);
+    BOOT_UKI.store(cfg.boot.uki as u8, Ordering::Relaxed);
     log::info!(
-        "cfg: version={} accel.level={:?} render.mode={:?} workers={:?} dist={:?} vsync={:?} blt_op={:?} tune.frames={} measured(render={:?} workers={:?} dist={:?} vsync={:?} vhalf={} cores={}) play.fps={} measured_max_fps={}",
+        "cfg: version={} accel.level={:?} render.mode={:?} workers={:?} dist={:?} vsync={:?} blt_op={:?} tune.frames={} measured(render={:?} workers={:?} dist={:?} vsync={:?} vhalf={} cores={}) play.fps={} measured_max_fps={} boot(auto={} win={} lin={} sh={} uki={})",
         cfg.version,
         cfg.accel.level,
         cfg.render.mode,
@@ -561,6 +613,11 @@ pub fn load() -> Option<String> {
         cfg.render.measured_cores,
         cfg.play.fps,
         cfg.play.measured_max_fps,
+        cfg.boot.auto,
+        cfg.boot.windows,
+        cfg.boot.linux,
+        cfg.boot.shell,
+        cfg.boot.uki,
     );
     warn
 }
@@ -808,6 +865,27 @@ pub fn wallpaper_frames() -> u32 {
 /// 预载帧数上限（1-32，已钳制；单帧约 8MB，内存兜底）。
 pub fn wallpaper_preload() -> u32 {
     WALLPAPER_PRELOAD.load(Ordering::Relaxed).max(1)
+}
+
+/// `[boot]` 自动发现总开关（关 = 只列本卷 BLS，老行为）。
+pub fn boot_auto() -> bool {
+    BOOT_AUTO.load(Ordering::Relaxed) != 0
+}
+/// 自动发现 Windows Boot Manager。
+pub fn boot_windows() -> bool {
+    BOOT_WINDOWS.load(Ordering::Relaxed) != 0
+}
+/// 自动发现 Linux 内核对。
+pub fn boot_linux() -> bool {
+    BOOT_LINUX.load(Ordering::Relaxed) != 0
+}
+/// 自动发现 UEFI Shell。
+pub fn boot_shell() -> bool {
+    BOOT_SHELL.load(Ordering::Relaxed) != 0
+}
+/// 自动发现 UKI（`EFI/Linux/*.efi`）。
+pub fn boot_uki() -> bool {
+    BOOT_UKI.load(Ordering::Relaxed) != 0
 }
 
 /// 是否有 auto 维度尚未校准（任一 auto 无记忆即 true，首启必 true）。

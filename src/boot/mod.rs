@@ -1,12 +1,14 @@
-//! BLS 引导子菜单（P1）：枚举 `loader/entries`，选 PE 项 chainload。
+//! BLS 引导子菜单（P1，全功能对齐中）：枚举本卷 `loader/entries` +
+//! 多卷自动发现（BLS/UKI/Windows/Linux/Shell，见 `detect.rs`），选 PE 项
+//! chainload，选 Linux 项直启（kernel + initrd + options + devicetree）。
 //!
 //! - `Entry::Exclusive`：handoff 前必须释放 GOP 独占，否则下个镜像打不开 GOP。
 //!   这与路线图 P1 原文“Shared 形态”有偏离——Shared 借屏不释放，handover 会楔死，
 //!   故用 Exclusive（菜单负责 drop/重建），特此说明。
-//! - Linux 内核直启不在 P1 范围：列出来但拒绝启动（`entries.rs`），如实报错。
 //! - P4-B：选 PE 项后、chainload 前播 N 帧壁纸过渡（全屏，开时才播）。
 
 pub mod chainload;
+pub mod detect;
 pub mod entries;
 
 use alloc::format;
@@ -24,9 +26,20 @@ const KEYS: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyz";
 
 pub fn run() -> Result {
     let mut screen = Screen::reacquire()?;
-    let list = enumerate()?;
-    // 条目数标记（串口可断言）：QEMU 黑盒矩阵靠它同步按键（子菜单屏显-only）。
-    log::info!("boot: {} entries", list.entries.len());
+    let mut list = enumerate()?;
+    // 多卷自动发现（`[boot] auto` 总开关；关 = 只列本卷 BLS，老行为）。
+    if crate::config::boot_auto() {
+        let (detected, mut warnings) = detect::detect();
+        list.warnings.append(&mut warnings);
+        detect::append_unique(&mut list, detected);
+    }
+    // 条目数 + 明细标记（串口可断言）：QEMU 黑盒矩阵靠它同步按键 + 断言种类
+    //（子菜单屏显-only）。只打一次，`draw_boot_menu` 重画不再刷。
+    log::warn!("boot: {} entries", list.entries.len());
+    for (i, e) in list.entries.iter().enumerate() {
+        let key = if i < KEYS.len() { KEYS[i] as char } else { '?' };
+        log::warn!("boot: [{}] {} <{}>", key, e.title, e.kind.kind_str());
+    }
     // B 过渡用壁纸预载集（和 A 同格式；缺片源/关开关即 None，跳过过渡）。
     let wp = wallpaper::load().unwrap_or(None);
     let tps = if wp.is_some() { calibrate_tps() } else { 1 };
@@ -97,12 +110,45 @@ fn draw_boot_menu(screen: &mut Screen, list: &BootList) {
         ));
     }
     screen.draw_str("[q] back  [Enter] default");
-    screen.draw_str("*: linux direct boot unsupported in P1");
 }
 
 /// 值传递拿走 Screen：`drop` 即释放 GOP 独占，chainload 才能干净交权；
 /// 出错/镜像返回时重建一个交回，子菜单继续。
 fn boot_index(
+    screen: Screen,
+    list: &BootList,
+    wp: &Option<WallpaperSet>,
+    tps: u64,
+    i: usize,
+) -> Result<Screen> {
+    let entry = &list.entries[i];
+    log::warn!("boot: starting [{}] {}", entry.file_name, entry.title);
+    // boot counting：尝试即递减 tries（失败只记 warning，不挡启动）。
+    {
+        let mut fs = match crate::fs::Fs::open(volume_of(entry)) {
+            Ok(f) => f,
+            Err(e) => {
+                // 卷打不开：记一笔，继续启动（读文件时还会再报错，不丢信息）。
+                log::warn!("boot: counter fs open failed: {:?}", e);
+                return boot_entry(screen, list, wp, tps, i);
+            }
+        };
+        if let Some(w) = crate::boot::entries::consume_try(&mut fs, entry) {
+            log::warn!("boot: {}", w);
+        }
+    }
+    boot_entry(screen, list, wp, tps, i)
+}
+
+/// 卷选择：条目自带卷用条目的（跨盘），`None` 走本卷（老行为）。
+fn volume_of(entry: &crate::boot::entries::BootEntry) -> Option<uefi::Handle> {
+    match &entry.kind {
+        BootKind::Efi { volume, .. } => *volume,
+        BootKind::Linux { volume, .. } => *volume,
+    }
+}
+
+fn boot_entry(
     mut screen: Screen,
     list: &BootList,
     wp: &Option<WallpaperSet>,
@@ -110,19 +156,54 @@ fn boot_index(
     i: usize,
 ) -> Result<Screen> {
     let entry = &list.entries[i];
+    let volume = volume_of(entry);
     match &entry.kind {
-        BootKind::Linux { kernel } => {
-            screen.draw_str(&format!("unsupported: linux direct boot ({})", kernel));
-            pause_return(&mut screen);
-            Ok(screen)
+        BootKind::Linux {
+            kernel,
+            initrd,
+            options,
+            devicetree,
+            ..
+        } => {
+            // Linux 直启（P1 全功能对齐新增）：kernel + initrd 拼接 + options +
+            // devicetree，语义与上游 `actions/chainload.rs` 一致（initrd 经
+            // `LINUX_EFI_INITRD_MEDIA_GUID` 交接，stubble 占位 options）。
+            let saved = (
+                String::from(kernel),
+                initrd.clone(),
+                options.clone(),
+                devicetree.clone(),
+            );
+            drop(screen);
+            match chainload::chainload_linux(
+                &saved.0,
+                &saved.1,
+                saved.2.as_deref(),
+                saved.3.as_deref(),
+                volume,
+            ) {
+                Err(e) => {
+                    let mut screen = Screen::reacquire()?;
+                    screen.draw_str(&format!("boot failed: {:?}", e));
+                    log::warn!("boot failed: {:?}", e);
+                    pause_return(&mut screen);
+                    Ok(screen)
+                }
+                Ok(()) => {
+                    let mut screen = Screen::reacquire()?;
+                    screen.draw_str("entry returned, back to boot menu.");
+                    pause_return(&mut screen);
+                    Ok(screen)
+                }
+            }
         }
-        BootKind::Efi { path, options } => {
+        BootKind::Efi { path, options, .. } => {
             // P4-B：chainload 前播 N 帧过渡（分辨率不对/无片源则跳过，不挡引导）。
             play_transition(&mut screen, wp, tps);
             let saved = (String::from(path), options.clone());
             // GOP 独占必须留在这里，不能带过 handoff。
             drop(screen);
-            match chainload_efi(&saved.0, saved.1.as_deref()) {
+            match chainload_efi(&saved.0, saved.1.as_deref(), volume) {
                 Err(e) => {
                     let mut screen = Screen::reacquire()?;
                     screen.draw_str(&format!("boot failed: {:?}", e));

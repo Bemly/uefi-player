@@ -16,12 +16,21 @@
 - [x] `docs/wallpaper.md`：双模式动态壁纸设计
 - [x] `docs/config.md`：`player.toml` 完整 reference（由 `config.rs` 头注释升格）
 
-## P1 引导（基于 sprout 扩展）
+## P1 引导（基于 sprout 扩展 → 全功能对齐，用户拍板）
 
 - 新增 `src/boot/`，调用 `edera-sprout-config` 解析 + `edera-sprout-bls`
-  枚举 + `edera-sprout-eficore` chainload（`boot` bin 不依赖）。
+  枚举 + `edera-sprout-eficore` chainload（`boot` 是 bin，不可依赖）。
 - `registry.rs` 加 boot entry，与现有 `run_menu` 合流（`Shared` 形态）。
 - 验收：QEMU 下能列 BLS entry 并 chainload，sprout submodule 零修改。
+- 全功能对齐清单（`src/boot/` 自研，UI/配置保持本仓，见 AGENTS）：
+  - [x] 本卷 BLS 枚举 + PE chainload（`entries.rs` + `chainload.rs`，QEMU 矩阵已验证）
+  - [x] 跨盘 chainload（目标卷设备句柄拼路径 + 跨卷读；`boot-chainload`/`boot-windows-crossvol` 已验证）
+  - [x] 多卷自动发现（`detect.rs`：逐卷 BLS/UKI/Linux 内核对/Windows/Shell）
+  - [x] Linux 直启（kernel + initrd 拼接 + options + devicetree，经
+    `eficore::media_loader` 交接；QEMU 只验发现列出，不真起内核）
+  - [x] BLS 全字段透传（options/多 initrd 拼接/`devicetree` 键/`arch` 过滤/`uki` 键）
+  - [x] boot counting 消费（启动尝试即递减 tries，失败 warn 不挡）
+  - [x] `[boot]` 配置 + GUI 开关页 + QEMU 矩阵覆盖（第二卷假 Windows/BLS/Linux）
 
 ## P2 SIMD 矩阵转正
 

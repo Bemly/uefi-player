@@ -324,3 +324,130 @@ boot_expect = ["cfg: version=1", "menu: ready"]
 keys = [{ send = "8", wait_after = 10 }]
 expect = ["-- bench done --"]
 artifact = { glob = "HWBENCH*.TXT", contains = ["ticks"] }
+
+# --- 多卷自动发现（第二盘挂 hd2，见 extra_volumes） ---
+
+# Windows 跨盘 chainload：第二盘只有 bootmgfw（就是我们的 efi 改名），
+# 按 0 直接交权，第二遍 cfg + 菜单证明跨盘 DevicePath + 跨盘读都通了。
+[[case]]
+name = "boot-windows-crossvol"
+timeout_sec = 300
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+workers = "bsp_only"
+dist = "static"
+vsync = "off"
+[play]
+fps = "max"
+[wallpaper]
+enable = false
+"""
+boot_expect = ["cfg: version=1", "menu: ready"]
+keys = [
+  { send = "b", wait_after = 2 },
+  { send = "0", wait_for = ["boot: 1 entries"], wait_after = 5 },
+]
+expect = ["boot: starting image", { pat = "cfg: version=1", count = 2 }, { pat = "menu: ready", count = 2 }]
+
+[[case.extra_volumes]]
+  [[case.extra_volumes.files]]
+  path = "EFI/Microsoft/Boot/bootmgfw.efi"
+  efi = true
+
+# 第二卷 BLS：other.conf 指第二卷自己的 app.efi，跨盘 chainload。
+[[case]]
+name = "boot-bls-secondvol"
+timeout_sec = 300
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+workers = "bsp_only"
+dist = "static"
+vsync = "off"
+[play]
+fps = "max"
+[wallpaper]
+enable = false
+"""
+boot_expect = ["cfg: version=1", "menu: ready"]
+keys = [
+  { send = "b", wait_after = 2 },
+  { send = "0", wait_for = ["boot: 1 entries"], wait_after = 5 },
+]
+expect = ["boot: starting image", { pat = "cfg: version=1", count = 2 }, { pat = "menu: ready", count = 2 }]
+
+[[case.extra_volumes]]
+  [[case.extra_volumes.files]]
+  path = "EFI/other/app.efi"
+  efi = true
+  [[case.extra_volumes.files]]
+  path = "loader/entries/other.conf"
+  text = "title Second Volume Entry\nefi /EFI/other/app.efi\n"
+
+# Linux 内核对发现：只验列出来（标题 + <linux> 标记进串口），不真起
+#（假内核不是有效 PE，起了也是 INVALID_IMAGE，不浪费时间）。
+[[case]]
+name = "boot-linux-detect"
+timeout_sec = 180
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+workers = "bsp_only"
+dist = "static"
+vsync = "off"
+[play]
+fps = "max"
+[wallpaper]
+enable = false
+"""
+boot_expect = ["cfg: version=1", "menu: ready"]
+keys = [{ send = "b", wait_after = 2 }]
+expect = ["boot: 1 entries", "vmlinuz-test", "<linux>"]
+
+[[case.extra_volumes]]
+  [[case.extra_volumes.files]]
+  path = "boot/vmlinuz-test"
+  zeros = 65536
+  [[case.extra_volumes.files]]
+  path = "boot/initramfs-test.img"
+  zeros = 65536
+
+# UEFI Shell 发现 + chainload（shellx64.efi 就是我们的 efi，起了算数）。
+[[case]]
+name = "boot-shell"
+timeout_sec = 300
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+workers = "bsp_only"
+dist = "static"
+vsync = "off"
+[play]
+fps = "max"
+[wallpaper]
+enable = false
+"""
+boot_expect = ["cfg: version=1", "menu: ready"]
+keys = [
+  { send = "b", wait_after = 2 },
+  { send = "0", wait_for = ["boot: 1 entries"], wait_after = 5 },
+]
+expect = ["boot: starting image", { pat = "cfg: version=1", count = 2 }, { pat = "menu: ready", count = 2 }]
+
+[[case.extra_volumes]]
+  [[case.extra_volumes.files]]
+  path = "EFI/shellx64.efi"
+  efi = true

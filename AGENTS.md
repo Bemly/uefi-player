@@ -9,6 +9,21 @@
 x86 引导加载器（基于 sprout 扩展）+ SIMD 加速矩阵 + UEFI 播放器 + 引导动态壁纸。
 详见 `docs/roadmap.md`，`docs/` 下的设计文档是唯一口径。
 
+### sprout 全功能对齐（用户拍板，长期方向）
+
+目标是**引导能力**与 sprout 持平，不是搬它的 UI/配置体系：
+
+- 对齐清单（`src/boot/` 自研实现，`third_party/sprout` 只读、不 fork、不改）：
+  多卷自动发现（BLS/UKI/Linux 内核对/Windows/UEFI Shell）+ PE chainload +
+  Linux 直启（kernel + initrd 拼接 + options + devicetree）+ 跨盘 chainload +
+  BLS 全字段透传（options/多 initrd/devicetree/arch 过滤）+ boot counting 消费。
+- 不搬：sprout 的菜单/phase/extractor/driver/SBAT/交互配置语言。
+  本仓交互层保持自己的（`player.toml` + config-gui + 我们的菜单），
+  sprout 只当"上游实现参考"读（读它学思路，同 chainload 惯例），
+  需要上游能力先看 4 个 lib 有没有，没有才在 `src/` 自研。
+- macOS 自动发现不在 sprout 内也不做（要 bless/APFS，超出 UEFI 范围）。
+- UKI 标题取文件名（不解析 `.uname` 区，省一次全读；要全名请写 BLS conf）。
+
 ## 目录
 
 - `src/`：UEFI 固件侧，`no_std`，`main/menu/graphics/video/fs/config/error` + `diag/*`。

@@ -43,6 +43,13 @@ enable = false          # 菜单背景 + 引导过渡总开关
 fps = 15                # 背景循环帧率（1-60，已钳制）
 frames = 0              # B 过渡封顶帧数（0 = 全播预载集）
 preload = 8             # 预载帧数上限（1-32；1080p BGRA 单帧约 8MB）
+
+[boot]
+auto = true             # 多卷自动发现总开关（关 = 只列本卷 BLS，老行为）
+windows = true          # 自动发现 Windows Boot Manager
+linux = true            # 自动发现 Linux 内核对（kernel + initramfs）
+shell = true            # 自动发现 UEFI Shell（shellx64.efi）
+uki = true              # 自动发现 EFI/Linux/*.efi（标题取文件名）
 ```
 
 ## 生效规则速查

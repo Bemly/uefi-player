@@ -1,10 +1,10 @@
+use crate::error::{NyaStatus, Result};
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 use uefi::boot::{get_image_file_system, image_handle};
-use uefi::{CStr16, Status};
 use uefi::proto::media::file::{Directory, File, FileAttribute, FileInfo, FileMode, RegularFile};
-use crate::error::{NyaStatus, Result};
+use uefi::{CStr16, Handle, Status};
 
 
 pub struct Fs {
@@ -16,6 +16,21 @@ impl Fs {
         Ok(Self {
             root_dir: get_image_file_system(image_handle())?.open_volume()?
         })
+    }
+
+    /// 打开任意卷（多卷自动发现用；`None` 即本卷，同 `new`）。
+    /// 卷句柄来自 `find_handles::<SimpleFileSystem>`，打开失败调用方跳过该卷。
+    pub fn open(handle: Option<Handle>) -> Result<Self> {
+        match handle {
+            None => Self::new(),
+            Some(h) => {
+                use uefi::proto::media::fs::SimpleFileSystem;
+                let mut sfs = uefi::boot::open_protocol_exclusive::<SimpleFileSystem>(h)?;
+                Ok(Self {
+                    root_dir: sfs.open_volume()?,
+                })
+            }
+        }
     }
 
     // 没有方法重载 没有可选参数 没有默认形参值！草了
@@ -59,6 +74,15 @@ impl Fs {
         let mut file = self.create_file(path)?;
         file.write(data).map_err(|e| e.status())?;
         file.flush()?;
+        Ok(())
+    }
+
+    /// 删除文件（BLS boot counting 改名用：读旧写新再删旧）。
+    /// 注意：必须用可写模式打开才能删（见 `write_file` 血泪注释）。
+    #[inline]
+    pub fn delete(&mut self, path: &CStr16) -> Result {
+        let old = self.open_file_attr(path, FileMode::ReadWrite, FileAttribute::empty())?;
+        let _ = old.delete();
         Ok(())
     }
 

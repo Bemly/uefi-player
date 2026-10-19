@@ -40,7 +40,8 @@ cargo run --manifest-path tools/qemu-matrix/Cargo.toml --target "$(rustc -vV | s
   重画都会 `flush_keys`，早到的键会被当陈旧输入吃掉；屏显-only 且无线可断言的
   界面才用 `wait_after` 估，case 里注明。
 - 新增串口日志时想想矩阵能不能用上：凡是黑盒要同步的界面切换，都补一行
-  `log::` 标记（如 `menu: ready` / `menu: back from {key}` / `boot: no entries`）。
+  `log::` 标记（如 `menu: ready` / `menu: back from {key}` / `boot: N entries` /
+  `boot: [k] title <kind>`）。
 - `forbid` 是全局红线（panic/死循环/空解码/AP 启动失败），任一出现即 FAIL；
   `expect` 必须在超时前全部在串口出现；`soak_sec` 用于播放类 case（不断言画面，
   只看 N 秒内无红线——QEMU 里断言不了撕裂，只保活）。
@@ -51,3 +52,5 @@ cargo run --manifest-path tools/qemu-matrix/Cargo.toml --target "$(rustc -vV | s
 1. 有新配置项/新路径 → 至少加一个 `matrix.toml` case（config 内联 + expect 串口行）。
 2. 有新串口日志 → 老 case 的 `expect` 能用就复用，不硬造新 case。
 3. 慢 case（>5min）标 `slow = true`，默认跳过，`--include-slow` 才跑。
+4. 多卷场景用 `extra_volumes`（第二盘起挂 hd2、hd3…）：`{path, text|zeros|efi}` 三选一
+   组文件；跨盘 chainload 的被起项直接用 `efi = true`（我们的 efi 改名）。
