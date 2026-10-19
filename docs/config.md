@@ -17,8 +17,8 @@ workers = "auto"        # auto | bsp_only | all（只对 direct 有效；Blt 恒
 dist    = "auto"        # auto | static | tile | dynamic（多核分工；只对 direct+all 有效）
 vsync   = "auto"        # auto | static | half | off（软件帧预算；旧 "on" 按 static 照读）
 blt_op  = "buffer_to_video"  # buffer_to_video | video_to_video | video_fill | video_to_blt_buffer
-# 只有 buffer_to_video 能上屏播视频（单发整推 + 混合整推都用它）；
-# 其余三项只在矩阵里单发出数（引擎能力对照，不参选），Blt 不在测时跳过。
+# 只有 buffer_to_video 能上屏播视频（单发整推 + 混合整推都用它；GUI 只放行这一项，
+# 其余置灰展示不删）；其余三项只在矩阵里单发出数（引擎能力对照，不参选），Blt 不在测时跳过。
 # 首启校准记忆（固件回写，GUI 只读展示；"auto"/0 = 未测，下次启动必测）：
 measured_render  = "auto"  # "direct" | "blt"
 measured_workers = "auto"  # "bsp_only" | "all"

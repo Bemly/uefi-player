@@ -694,7 +694,13 @@ impl App {
     fn load_path(&mut self, path: String) {
         match std::fs::read_to_string(&path) {
             Ok(text) => match toml::from_str::<FileConfig>(&text) {
-                Ok(cfg) => {
+                Ok(mut cfg) => {
+                    // Blt 三个非上屏操作 GUI 置灰不可选：旧/手写文件的残留值钳回 B2V
+                    // （播放行为无变化——固件上屏路本来就只认 B2V；手写值想出引擎数
+                    // 的改完别点保存，或固件侧照读，见 player.md）。
+                    if cfg.render.blt_op != BltOpKind::BufferToVideo {
+                        cfg.render.blt_op = BltOpKind::BufferToVideo;
+                    }
                     let msg = t!(
                         "status.loaded",
                         path = path.clone(),
@@ -998,10 +1004,26 @@ impl App {
                 if self.cfg.render.mode == RenderMode::Blt {
                     ui.label(t!("accel.blt_op"));
                     // 一行四个（窄窗自动换行保底，不断尾）。
+                    // 只有 BufferToVideo 能上屏播视频，其余三项置灰展示、不删：
+                    // 库内件无禁用态（`GlassButton::show` 写死 `Sense::click`，
+                    // 自绘不跟随禁用样式），手动灰字 + `add_enabled_ui(false)` 关交互。
                     ui.horizontal_wrapped(|ui| {
                         for v in BltOpKind::ALL {
-                            if self.option_button(ui, self.cfg.render.blt_op == v, v.file_str()) {
-                                self.cfg.render.blt_op = v;
+                            if v == BltOpKind::BufferToVideo {
+                                if self.option_button(ui, self.cfg.render.blt_op == v, v.file_str())
+                                {
+                                    self.cfg.render.blt_op = v;
+                                }
+                            } else {
+                                ui.add_enabled_ui(false, |ui| {
+                                    egui_glass::GlassButton::new(format!(
+                                        "{} {}",
+                                        Self::marker(false),
+                                        v.file_str()
+                                    ))
+                                    .text_color(egui::Color32::GRAY)
+                                    .show(ui);
+                                });
                             }
                         }
                     });
