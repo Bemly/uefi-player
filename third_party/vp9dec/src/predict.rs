@@ -478,9 +478,11 @@ fn block_inter_predict(
     // `max_val = (1<<bit_depth)-1`. Width 4 (the `4x4`/`4x8` partitions) dispatches to the
     // 128-bit-wide `block_inter_predict_avx2_w4`; widths 8/16/32/64 to the 256-bit
     // `block_inter_predict_avx2`.
-    // VENDOR(uefi-player): AVX2 dispatch needs `std` (see simd.rs); without it
-    // this block is compiled out and `block_inter_predict_scalar` below always runs.
-    #[cfg(all(feature = "std", target_arch = "x86_64"))]
+    // VENDOR(uefi-player): AVX2 dispatch needs x86_64 (see simd.rs
+    // `avx2_enabled`: `[accel]` switch + firmware CPUID/XCR0 gate under
+    // no_std); off-arch this block is compiled out and
+    // `block_inter_predict_scalar` below always runs.
+    #[cfg(target_arch = "x86_64")]
     {
         let last_x = ref_plane.width as i64 - 1;
         let last_y = ref_plane.height as i64 - 1;

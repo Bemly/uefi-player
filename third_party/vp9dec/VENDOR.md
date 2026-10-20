@@ -1,4 +1,4 @@
-# Vendored `vp9dec` — no_std port (scalar)
+# Vendored `vp9dec` — no_std port (scalar + AVX2 SIMD)
 
 - 上游：https://github.com/ChanyaVRC/vp9dec ，版本 **0.1.1**
   （crates.io 2026-07-26，MIT，`LICENSE` 见本目录）。
@@ -15,12 +15,32 @@
 
 1. 加 `std` 特性（默认开，行为与上游完全一致）；
    关掉即 `#![no_std]` + `alloc`（`extern crate alloc` + 按文件 `use alloc::…`）。
-2. 口径：无 std 时线程并行恒走顺序路、AVX2 恒走标量（上游官方 315/315
-   门控本来就双跑这两条路，bit-exact，丢速度不丢正确性）。
-3. `simd` 留 std-only：内核模块 + 重导出整体
-   `#[cfg(feature = "std")]`，分发点（predict/loop_filter/residual）
-   沿上游自己的 `not(target_arch)` 惯用形状补 `not(all(std, x86_64))` 分支；
-   no_std 侧 `avx2_enabled()` 恒 false。`simd`+无 `std` 组合**未移植**。
+2. 口径：无 std 时线程并行恒走顺序路（上游官方 315/315
+   门控本来就双跑这两条路，bit-exact，丢速度不丢正确性）；
+   AVX2 在 std 与 no_std 下都可用（见下条），不再恒走标量。
+3. `simd` 已 port 到 no_std（2026-10-21 落地）：内核模块 + 重导出整体改
+   `#[cfg(target_arch = "x86_64")]`（内核是纯 `core::arch::x86_64` 整数内在，
+   零依赖，std/no_std 通吃）；分发点（predict/loop_filter/residual）门控
+   同步收窄为 arch-only。
+   - `avx2_enabled()`：std 侧沿用上游语义（`VP9DEC_NO_SIMD` + 
+     `is_x86_feature_detected!("avx2")`，OnceLock 缓存）再与
+     `[accel]` 开关取与；no_std 侧 = 开关 × 固件 CPUID/XCR0 门
+     （`ensure_xsave_enabled` 语义 + `check_avx_support` 门 +
+     AVX2 硬件位，`AtomicU8` 三态缓存；env 恒读未设置，h264-common knob 主义）。
+   - `[accel]` 单比特开关（`simd::set_simd_allowed`，默认开）是固件
+     `config::copy_width()` 的接收端：`scalar`→关、其余→开；
+     显式超硬件由固件 `resolve_accel` 钳住，这里只做 min(配置,硬件)
+     （开关=配置半，`avx2_enabled` 硬件门=硬件半）。不读第二遍 player.toml。
+   - UEFI 纪律（根 AGENTS.md + docs/simd.md AVC 节）：AVX2 跑前必过
+     CR4.OSXSAVE+XCR0 门；no_std UEFI 目标首探时幂等自开 XSAVE
+     （`simd.rs::ensure_xsave_enabled`，固件同名函数的语义镜像，
+     跨 crate 调不到——防 OVMF CR4.OSXSAVE=0 下 XGETBV `#UD`；
+     固件开机 `resolve_accel` + 首解前各保一次，这里是轮子自保第三道）；
+     host no_std 只读不写 CR4/XCR0（用户态写必 `#GP`）。
+     内核审计：整数向量-only（无浮点向量可报），plain load/store
+     （无 nt、无需 sfence/对齐门控）——见各内核文件头。
+   - 线程两 driver 仍 std-only（见下条），no_std 固件是单线程顺序解码 +
+     SIMD 内核，行为与官方 sweep 的 SIMD 臂一致。
 4. 线程两 driver（tile `decode_tiles_parallel`、loop_filter
    `wavefront_filter_planes`）`#[cfg(feature = "std")]`；
    no_std 侧 tile 取 `available_tile_workers() == 1`、
@@ -45,6 +65,13 @@
 - 像素校验和**只加 Y 平面**（抄 h265 `hevc_probe` 教训：host 拼帧输出别把色度
   加进去，固件侧只加 Y，设计时先对口径）。
 - 8-bit 先行（`PlaneData::U8`）；10/12-bit `U16` 路径固件用不上，先不验。
+- SIMD 落地回归（2026-10-21，host，harness 在 `/tmp/vp9check` 未进仓）：
+  自制 8 段（libvpx-vp9 编码：p0 320x240/640x480/720p/176x144/tiles、
+  p2 10-bit 420、p3 444 10-bit）：SIMD == 标量（knob）== `VP9DEC_NO_SIMD=1`
+  == ffmpeg `extractplanes=y -f md5`，三路全等；
+  上游官方向量 12 段复用（resize/SVC/tiles-fp/奇尺寸/subpel/
+  show-existing/droppable/p1-422/p2-10bit/p2-12bit/p3-444）：
+  SIMD 与标量逐帧 md5 全等，且逐帧等于官方 `.ivf.md5`（YUV 拼接口径）。
 
 ## 本仓约定豁免
 

@@ -530,18 +530,19 @@ impl TileDecoder {
         // `simd/transform.rs`). Only WHT (lossless) transforms into `dequant` and takes the
         // scalar loop. The SIMD paths are bit-exact against it for conformant streams (spec
         // §8.7.1.1's stored-value bounds).
-        // VENDOR(uefi-player): AVX2 dispatch needs `std` (see simd.rs); without
-        // it `fused` is false and the scalar `inverse_transform_block` always runs.
-        #[cfg(all(feature = "std", target_arch = "x86_64"))]
+        // VENDOR(uefi-player): AVX2 dispatch needs x86_64 (see simd.rs
+        // `avx2_enabled`); off-arch `fused` is false and the scalar
+        // `inverse_transform_block` always runs.
+        #[cfg(target_arch = "x86_64")]
         let fused = !self.lossless && crate::simd::avx2_enabled();
-        #[cfg(not(all(feature = "std", target_arch = "x86_64")))]
+        #[cfg(not(target_arch = "x86_64"))]
         let fused = false;
 
         {
             let _t = crate::bench_timing::StageTimer::start(
                 crate::bench_timing::Stage::InverseTransform,
             );
-            #[cfg(all(feature = "std", target_arch = "x86_64"))]
+            #[cfg(target_arch = "x86_64")]
             if fused {
                 let pw = self.planes[plane].width;
                 // The kernels index the raw buffer directly, so translate the absolute column
@@ -611,7 +612,7 @@ impl TileDecoder {
             } else {
                 inverse_transform_block(&mut dequant[..seg_eob], n, tx_type, self.lossless);
             }
-            #[cfg(not(all(feature = "std", target_arch = "x86_64")))]
+            #[cfg(not(target_arch = "x86_64"))]
             inverse_transform_block(&mut dequant[..seg_eob], n, tx_type, self.lossless);
         }
 

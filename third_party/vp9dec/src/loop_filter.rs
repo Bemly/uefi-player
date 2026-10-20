@@ -98,11 +98,12 @@ trait PlaneAccess {
     fn lf_set(&mut self, x: usize, y: usize, v: u16);
     /// Base pointer of the row-major buffer, for the AVX2 kernels (which index it raw rather than
     /// going through `lf_get`/`lf_set`); `lf_stride` is its row stride (`= width`).
-    // VENDOR(uefi-player): AVX2-only accessors, std-only (kernels are compiled out without it).
-    #[cfg(feature = "std")]
+    // VENDOR(uefi-player): AVX2-only accessors, x86_64-only (kernels are
+    // compiled out off-arch).
+    #[cfg(target_arch = "x86_64")]
     fn lf_base_ptr(&mut self) -> *mut u16;
-    // VENDOR(uefi-player): AVX2-only accessors, std-only (see above).
-    #[cfg(feature = "std")]
+    // VENDOR(uefi-player): AVX2-only accessors, x86_64-only (see above).
+    #[cfg(target_arch = "x86_64")]
     fn lf_stride(&self) -> usize;
 }
 
@@ -115,14 +116,14 @@ impl PlaneAccess for Plane {
     fn lf_set(&mut self, x: usize, y: usize, v: u16) {
         self.set(x, y, v);
     }
-    // VENDOR(uefi-player): AVX2-only accessors, std-only (see the trait).
-    #[cfg(feature = "std")]
+    // VENDOR(uefi-player): AVX2-only accessors, x86_64-only (see the trait).
+    #[cfg(target_arch = "x86_64")]
     #[inline]
     fn lf_base_ptr(&mut self) -> *mut u16 {
         self.as_mut_slice().as_mut_ptr()
     }
-    // VENDOR(uefi-player): AVX2-only accessors, std-only (see the trait).
-    #[cfg(feature = "std")]
+    // VENDOR(uefi-player): AVX2-only accessors, x86_64-only (see the trait).
+    #[cfg(target_arch = "x86_64")]
     #[inline]
     fn lf_stride(&self) -> usize {
         self.width
@@ -203,10 +204,13 @@ impl PlaneAccess for PlaneView {
             *self.ptr.add(self.offset(x, y)) = v;
         }
     }
+    // VENDOR(uefi-player): the trait declares these x86_64-only (see above).
+    #[cfg(target_arch = "x86_64")]
     #[inline]
     fn lf_base_ptr(&mut self) -> *mut u16 {
         self.ptr
     }
+    #[cfg(target_arch = "x86_64")]
     #[inline]
     fn lf_stride(&self) -> usize {
         self.stride
@@ -646,9 +650,10 @@ fn superblock_loop_filter<P: PlaneAccess>(
         // `superblock_loop_filter_edge_avx2` / `simd::loop_filter_vert8_avx2`). Both decide
         // WHICH positions filter and how strongly via the same `edge_position_params` the scalar
         // loop uses -- only the pixel arithmetic is vectorized.
-        // VENDOR(uefi-player): AVX2 dispatch needs `std` (see simd.rs); without
-        // it this block is compiled out and the scalar loop below always runs.
-        #[cfg(all(feature = "std", target_arch = "x86_64"))]
+        // VENDOR(uefi-player): AVX2 dispatch needs x86_64 (see simd.rs
+        // `avx2_enabled`); off-arch this block is compiled out and the scalar
+        // loop below always runs.
+        #[cfg(target_arch = "x86_64")]
         if crate::simd::avx2_enabled() {
             superblock_loop_filter_edge_avx2(
                 plane,
@@ -722,8 +727,8 @@ fn superblock_loop_filter<P: PlaneAccess>(
 /// kernel's per-lane `is_tx8`/`is_tx16` masks pick each lane's filter, mirroring
 /// `sample_filtering`'s three-way branch (see the current SIMD summary in
 /// `docs/implementation-notes.md`).
-// VENDOR(uefi-player): AVX2 dispatcher, std-only (see the call site above).
-#[cfg(all(feature = "std", target_arch = "x86_64"))]
+// VENDOR(uefi-player): AVX2 dispatcher, x86_64-only (see the call site above).
+#[cfg(target_arch = "x86_64")]
 #[allow(clippy::too_many_arguments)]
 fn superblock_loop_filter_edge_avx2<P: PlaneAccess>(
     plane: &mut P,
