@@ -20,6 +20,20 @@ rusty_h264-decoder = { version = "0.16", default-features = false, features = ["
 # 本仓 vendor 到 third_party/rusty_h265(+accel) 后自 port 标量路，
 # 见该目录 VENDOR.md；纯整数运算，连 libm 都不要；`simd` 未 port 用不得）。
 rusty_h265 = { path = "third_party/rusty_h265", default-features = false }
+# Theora 解码（ogg 片源用；pure-Rust，上游 0.0.12 尚无 no_std 分层，
+# 本仓 vendor 到 third_party/oxideav-theora 后自 port 标量 decoder-only，
+# 见该目录 VENDOR.md；纯标量整数 iDCT，无 SIMD 概念；`default-features = false`
+# 即无 std、无 encoder、无 oxideav-core 框架胶水（直接依赖会把 std-only 的
+# oxideav-core/serde_json/thiserror 拖进固件，故 vendor + framework 可选）；
+# Ogg 页拆帧不在箱内，固件侧手写 OggS 拆帧另立项）。
+oxideav-theora = { path = "third_party/oxideav-theora", default-features = false }
+# MPEG-2/MPEG-1 视频解码（DVD/广播 TS/MXF-IMX 片源用；pure-Rust clean-room，上游未发
+# crates.io 故 vendor 到 third_party/filmcraft-mpeg2v 后自 port 标量路，见该目录 VENDOR.md；
+# 本箱无 SIMD 概念（纯标量 f32 IDCT），`default-features = false` 即固件形；
+# IDCT 建表用 libm（本仓闭包经 rusty_h264-decoder 已有，复用零新增风险），
+# 查表一次化用 spin::Once（core::cell 不 Sync；MIT/MSRV1.38/零传递依赖的新叶子）；
+# 精度口径是容差制（max|Δ|≤4、PSNR≥58dB），非 bit-exact，校验和只取 Y 平面）。
+filmcraft-mpeg2v = { path = "third_party/filmcraft-mpeg2v", default-features = false }
 # VP9 解码（mp4/壁纸片源用；pure-Rust clean-room，上游 0.1.1 尚无 no_std 分层，
 # 本仓 vendor 到 third_party/vp9dec 后自 port 标量路，见该目录 VENDOR.md；
 # 零依赖、无 C/FFI、无全局分配器；`simd` 未 port 用不得，

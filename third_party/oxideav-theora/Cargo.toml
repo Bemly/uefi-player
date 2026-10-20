@@ -1,0 +1,43 @@
+[package]
+name = "oxideav-theora"
+version = "0.0.12"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT"
+repository = "https://github.com/OxideAV/oxideav-theora"
+authors = ["Mark Karpeles"]
+description = "Pure-Rust Theora video codec — orphan-rebuild scaffold pending clean-room re-implementation."
+
+readme = "README.upstream.md"
+homepage = "https://github.com/OxideAV/oxideav-theora"
+keywords = ["multimedia", "video", "theora", "codec", "pure-rust"]
+categories = ["multimedia::encoding", "multimedia::video"]
+
+# NOTE(uefi-player vendor): vendored from crates.io 0.0.12 + no_std port (scalar).
+# See VENDOR.md. `std` (default on) preserves upstream behavior exactly;
+# `default-features = false` is the firmware shape: no_std + alloc, decoder-only.
+# `framework` (default on) pulls the std-only `oxideav-core` glue
+# (TheoraDecoder/TheoraEncoder/register); firmware leaves it off.
+# `encoder` (default on) keeps FrameEncoder + rate control; it implies `std`
+# (its rate-model fit uses f64 `.ln()` — libm or a port is a follow-up).
+# Bad combos are impossible by construction: framework/encoder each imply std.
+
+[features]
+default = ["std", "framework", "encoder"]
+# Standard library. Off => `#![no_std]` + `alloc`; diagnostic prints become
+# no-ops and env knobs read as unset (no env use in this crate).
+std = []
+# oxideav-core integration (Decoder/Encoder traits, CodecRegistry).
+# Requires std: upstream oxideav-core is std-only (thiserror/serde_json/Read).
+framework = ["dep:oxideav-core", "std"]
+# Inter-frame encoder (FrameEncoder + RD/motion/rate-control machinery).
+# Requires std for now: RateModel::x uses f64 `.ln()`, which has no core
+# equivalent (a libm follow-up would unlock a no_std encoder).
+encoder = ["std"]
+
+[dependencies]
+oxideav-core = { version = "0.1", optional = true }
+
+[lib]
+name = "oxideav_theora"
+path = "src/lib.rs"
