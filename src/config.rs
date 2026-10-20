@@ -43,6 +43,8 @@
 //! uki = true              # 自动发现 EFI/Linux/*.efi（标题取 .uname 区，读不到用文件名）
 //! macos = true            # OpenCore 链式接力（EFI/OC/OpenCore.efi 存在即链）
 //! strict = false          # 严格模式：BLS 只认本卷 + XBOOTLDR 卷（systemd 严格模式)
+//! [async]
+//! executor = "all"        # 诊断项 a 跑哪条执行器线："all"（默认，都跑）| "nano" | "dynamic"
 //! ```
 
 use alloc::format;
@@ -220,6 +222,45 @@ impl DistMode {
     }
 }
 
+/// 异步执行器线（`uefi-async` 两条堆线，诊断项 `a` 跑哪条）：
+/// - `All`（默认）：nano + dynamic 都跑，各自断言；
+/// - `Nano`：只跑单核借用节点线（链表轮询，无跨核原语）；
+/// - `Dynamic`：只跑多核 work-stealing 线（spawn/cancel/retune + steal）。
+/// 只管诊断覆盖，不切生产调度（播片/壁纸仍是手写 MP，迁移另立项）。
+/// 缺键老配置按 `All` 照读。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum AsyncExecutor {
+    #[default]
+    All,
+    Nano,
+    Dynamic,
+}
+
+impl AsyncExecutor {
+    const fn as_u8(self) -> u8 {
+        match self {
+            Self::All => 0,
+            Self::Nano => 1,
+            Self::Dynamic => 2,
+        }
+    }
+    fn from_u8(v: u8) -> Self {
+        match v {
+            1 => Self::Nano,
+            2 => Self::Dynamic,
+            _ => Self::All,
+        }
+    }
+}
+
+/// `[async]`：目前只有诊断项消费（`async_exec` 按档跑线），缺表缺键全默认。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct AsyncConfig {
+    pub executor: AsyncExecutor,
+}
+
 /// 垂直同步（软件帧预算，GOP 无硬件 vsync）：`Static` = 按 `tune.vsync_fps`
 /// 固定封顶；`Half` = 开机实测冠军路最高帧率，取半稳定跑并回写
 /// `measured_vsync_fps`（下次启动复用）；`Auto` = 按 `tune.vsync_fps` 预算探测
@@ -357,6 +398,7 @@ pub struct Config {
     pub play: PlayConfig,
     pub wallpaper: WallpaperConfig,
     pub boot: BootConfig,
+    pub r#async: AsyncConfig,
 }
 
 impl Default for Config {
@@ -368,6 +410,7 @@ impl Default for Config {
             play: PlayConfig::default(),
             wallpaper: WallpaperConfig::default(),
             boot: BootConfig::default(),
+            r#async: AsyncConfig::default(),
         }
     }
 }
@@ -602,6 +645,8 @@ static BOOT_SHELL: AtomicU8 = AtomicU8::new(1);
 static BOOT_UKI: AtomicU8 = AtomicU8::new(1);
 static BOOT_MACOS: AtomicU8 = AtomicU8::new(1);
 static BOOT_STRICT: AtomicU8 = AtomicU8::new(0);
+/// `[async]` 执行器线（0 = all，1 = nano，2 = dynamic；只驱动诊断项 `a`）。
+static ASYNC_EXECUTOR: AtomicU8 = AtomicU8::new(0);
 static TUNE_FRAMES: AtomicU32 = AtomicU32::new(default_frames());
 static TUNE_TILE_ROWS: AtomicU32 = AtomicU32::new(default_tile_rows());
 static TUNE_VSYNC_FPS: AtomicU32 = AtomicU32::new(default_vsync_fps());
@@ -671,8 +716,9 @@ pub fn load() -> Option<String> {
     BOOT_UKI.store(cfg.boot.uki as u8, Ordering::Relaxed);
     BOOT_MACOS.store(cfg.boot.macos as u8, Ordering::Relaxed);
     BOOT_STRICT.store(cfg.boot.strict as u8, Ordering::Relaxed);
+    ASYNC_EXECUTOR.store(cfg.r#async.executor.as_u8(), Ordering::Relaxed);
     log::info!(
-        "cfg: version={} accel.level={:?} render.mode={:?} workers={:?} dist={:?} vsync={:?} blt_op={:?} tune.frames={} measured(render={:?} workers={:?} dist={:?} vsync={:?} vhalf={} cores={}) play.fps={} play.fmt={:?} measured_max_fps={} wallpaper.fmt={:?} boot(auto={} win={} lin={} sh={} uki={} mac={} strict={})",
+        "cfg: version={} accel.level={:?} render.mode={:?} workers={:?} dist={:?} vsync={:?} blt_op={:?} tune.frames={} measured(render={:?} workers={:?} dist={:?} vsync={:?} vhalf={} cores={}) play.fps={} play.fmt={:?} measured_max_fps={} wallpaper.fmt={:?} async.executor={:?} boot(auto={} win={} lin={} sh={} uki={} mac={} strict={})",
         cfg.version,
         cfg.accel.level,
         cfg.render.mode,
@@ -691,6 +737,7 @@ pub fn load() -> Option<String> {
         cfg.play.format,
         cfg.play.measured_max_fps,
         cfg.wallpaper.format,
+        cfg.r#async.executor,
         cfg.boot.auto,
         cfg.boot.windows,
         cfg.boot.linux,
@@ -982,6 +1029,11 @@ pub fn boot_macos() -> bool {
 /// 严格模式：BLS 只认本卷 + XBOOTLDR 卷（systemd 严格模式）。
 pub fn boot_strict() -> bool {
     BOOT_STRICT.load(Ordering::Relaxed) != 0
+}
+
+/// 诊断项 `a` 跑哪条执行器线（默认 all；只管诊断覆盖）。
+pub fn async_executor() -> AsyncExecutor {
+    AsyncExecutor::from_u8(ASYNC_EXECUTOR.load(Ordering::Relaxed))
 }
 
 /// 是否有 auto 维度尚未校准（任一 auto 无记忆即 true，首启必 true）。

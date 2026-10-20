@@ -55,6 +55,10 @@ shell = true            # 自动发现 UEFI Shell（shellx64.efi 三处候选）
 uki = true              # 自动发现 EFI/Linux/*.efi（读 .uname/.profile 建条目，读不到用文件名）
 macos = true            # OpenCore 链式接力（EFI/OC/OpenCore.efi 存在即链；不扫通用 BOOTX64.EFI）
 strict = false          # 严格模式：BLS 只认本卷 + XBOOTLDR 卷（默认全卷都认）
+
+[async]
+executor = "all"        # 诊断项 a 跑哪条执行器线：all（默认，都跑）| nano（单核线）| dynamic（多核线）
+                        # 只管诊断覆盖，不切生产调度（播片/壁纸仍是手写 MP，迁移另立项）
 ```
 
 ## 生效规则速查
@@ -79,3 +83,5 @@ strict = false          # 严格模式：BLS 只认本卷 + XBOOTLDR 卷（默�
   AP 永不碰 GOP；单核路走影子 + CPU 整推；Blt 单发路不变）。
   所选 `blt_op` 若非 `buffer_to_video`，矩阵里单发出数（引擎能力对照，不参选）。
 - `accel.level=auto`：探最高可用位宽；显式档位只管上限语义，实际搬运走位宽。
+- `async.executor`：只决定诊断项 `a` 跑 `nano`/`dynamic` 哪条线（`all` 都跑）；
+  缺表缺键按 `all` 照读；生产调度不受影响。

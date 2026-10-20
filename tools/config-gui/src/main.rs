@@ -385,6 +385,35 @@ impl Default for BootConfig {
     }
 }
 
+/// 异步执行器线（与固件 `AsyncExecutor` 同构；只驱动诊断项 `a` 跑哪条线，
+/// 不切生产调度）。缺键老配置按 `All` 照读。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum AsyncExecutor {
+    #[default]
+    All,
+    Nano,
+    Dynamic,
+}
+
+impl AsyncExecutor {
+    const ALL: [Self; 3] = [Self::All, Self::Nano, Self::Dynamic];
+    fn file_str(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::Nano => "nano",
+            Self::Dynamic => "dynamic",
+        }
+    }
+}
+
+/// `[async]`：与固件 `AsyncConfig` 同构。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+struct AsyncConfig {
+    executor: AsyncExecutor,
+}
+
 /// `[wallpaper]`：与固件 `WallpaperConfig` 同构。无校准记忆，纯开关。
 /// `format` 切片源：raw 读 `wallpaper/frameNNNN.raw`，qois 读 `wallpaper/wall.qois`。
 /// `popup_freeze`：选项弹窗时冻结壁纸（false 则行区继续播）。
@@ -440,6 +469,7 @@ struct FileConfig {
     play: PlayConfig,
     wallpaper: WallpaperConfig,
     boot: BootConfig,
+    r#async: AsyncConfig,
 }
 
 impl Default for FileConfig {
@@ -451,6 +481,7 @@ impl Default for FileConfig {
             play: PlayConfig::default(),
             wallpaper: WallpaperConfig::default(),
             boot: BootConfig::default(),
+            r#async: AsyncConfig::default(),
         }
     }
 }
@@ -525,6 +556,15 @@ fn dist_desc(v: DistMode) -> String {
         DistMode::Static => t!("accel.desc_dist_static"),
         DistMode::Tile => t!("accel.desc_dist_tile"),
         DistMode::Dynamic => t!("accel.desc_dist_dynamic"),
+    }
+    .into_owned()
+}
+
+fn async_desc(v: AsyncExecutor) -> String {
+    match v {
+        AsyncExecutor::All => t!("async.desc_all"),
+        AsyncExecutor::Nano => t!("async.desc_nano"),
+        AsyncExecutor::Dynamic => t!("async.desc_dynamic"),
     }
     .into_owned()
 }
@@ -1333,6 +1373,16 @@ impl App {
                 ui.label(t!("play.format"));
                 self.cfg.play.format = self.format_row(ui, self.cfg.play.format);
                 ui.small(t!("play.format_hint"));
+                ui.add_space(10.0);
+                ui.label(t!("async.executor"));
+                ui.horizontal(|ui| {
+                    for v in AsyncExecutor::ALL {
+                        if self.option_button(ui, self.cfg.r#async.executor == v, v.file_str()) {
+                            self.cfg.r#async.executor = v;
+                        }
+                    }
+                });
+                ui.small(async_desc(self.cfg.r#async.executor));
                 ui.horizontal(|ui| {
                     ui.label(self.measured_line());
                     if egui_glass::GlassButton::new(t!("play.rebench"))
@@ -1483,6 +1533,7 @@ impl App {
                     }
                 ));
                 ui.label(t!("sum.play", v = self.play_text()));
+                ui.label(t!("sum.async", v = self.cfg.r#async.executor.file_str()));
                 ui.label(self.measured_line());
                 ui.label(t!(
                     "sum.boot",
@@ -1768,7 +1819,7 @@ mod blackbox_matrix {
         m
     }
 
-    /// 全档位笛卡尔回写：9 accel × 3 render × 3 workers × 4 dist × 4 vsync × 4 blt，
+    /// 全档位笛卡尔回写：9 accel × 3 render × 3 workers × 4 dist × 4 vsync × 4 blt × 3 async，
     /// 序列化再解析必须逐字节等价（顺序/缺键都由 serde 保证，不许丢字段）。
     #[test]
     fn schema_roundtrip_matrix() {
@@ -1779,62 +1830,81 @@ mod blackbox_matrix {
                     for d in DistMode::ALL {
                         for v in VsyncMode::ALL {
                             for b in BltOpKind::ALL {
-                                let cfg = FileConfig {
-                                    version: 1,
-                                    accel: AccelConfig { level: a },
-                                    render: RenderConfig {
-                                        mode: m,
-                                        workers: w,
-                                        dist: d,
-                                        vsync: v,
-                                        blt_op: b,
-                                        tune: RenderTune {
-                                            frames: 7,
-                                            tile_rows: 100,
-                                            vsync_fps: 77,
-                                            buffers: 3,
-                                        },
-                                        measured_render: m,
-                                        measured_workers: w,
-                                        measured_dist: d,
-                                        measured_vsync: v,
-                                        measured_vsync_fps: 11,
-                                        measured_cores: 4,
-                                    },
-                                    play: PlayConfig {
-                                        fps: String::from("60"),
-                                        measured_max_fps: 120,
-                                        format: MediaFormat::Raw,
-                                    },
-                                wallpaper: WallpaperConfig {
-                                    enable: true,
-                                    fps: 20,
-                                    frames: 30,
-                                    preload: 4,
-                                    format: MediaFormat::Qois,
-                                    popup_freeze: true,
-                                },
-                    boot: BootConfig {
-                        auto: true,
-                        windows: true,
-                        linux: false,
-                        shell: true,
-                        uki: false,
-                        macos: true,
-                        strict: false,
-                    },
-                            };
-                                let text = toml::to_string(&cfg).unwrap();
-                                let back: FileConfig = toml::from_str(&text).unwrap();
-                                assert_eq!(back, cfg, "roundtrip {a:?}/{m:?}/{w:?}/{d:?}/{v:?}/{b:?}");
-                                n += 1;
+                                for e in AsyncExecutor::ALL {
+                                    roundtrip_one(a, m, w, d, v, b, e);
+                                    n += 1;
+                                }
                             }
                         }
                     }
                 }
             }
         }
-        assert_eq!(n, 9 * 3 * 3 * 4 * 4 * 4);
+        assert_eq!(n, 9 * 3 * 3 * 4 * 4 * 4 * 3);
+    }
+
+    /// 单组回写断言（从笛卡尔里抽出来：7 层嵌套塞不进 100 列）。
+    fn roundtrip_one(
+        a: AccelLevel,
+        m: RenderMode,
+        w: WorkersMode,
+        d: DistMode,
+        v: VsyncMode,
+        b: BltOpKind,
+        e: AsyncExecutor,
+    ) {
+        let cfg = FileConfig {
+            version: 1,
+            accel: AccelConfig { level: a },
+            render: RenderConfig {
+                mode: m,
+                workers: w,
+                dist: d,
+                vsync: v,
+                blt_op: b,
+                tune: RenderTune {
+                    frames: 7,
+                    tile_rows: 100,
+                    vsync_fps: 77,
+                    buffers: 3,
+                },
+                measured_render: m,
+                measured_workers: w,
+                measured_dist: d,
+                measured_vsync: v,
+                measured_vsync_fps: 11,
+                measured_cores: 4,
+            },
+            play: PlayConfig {
+                fps: String::from("60"),
+                measured_max_fps: 120,
+                format: MediaFormat::Raw,
+            },
+            wallpaper: WallpaperConfig {
+                enable: true,
+                fps: 20,
+                frames: 30,
+                preload: 4,
+                format: MediaFormat::Qois,
+                popup_freeze: true,
+            },
+            boot: BootConfig {
+                auto: true,
+                windows: true,
+                linux: false,
+                shell: true,
+                uki: false,
+                macos: true,
+                strict: false,
+            },
+            r#async: AsyncConfig { executor: e },
+        };
+        let text = toml::to_string(&cfg).unwrap();
+        let back: FileConfig = toml::from_str(&text).unwrap();
+        assert_eq!(
+            back, cfg,
+            "roundtrip {a:?}/{m:?}/{w:?}/{d:?}/{v:?}/{b:?}/{e:?}"
+        );
     }
 
     /// fps 三态字符串照读照写（非法值不断解析，语义由 `parse_fps` 兜底）。
@@ -1863,6 +1933,7 @@ mod blackbox_matrix {
         assert_eq!(cfg.render.blt_op, BltOpKind::BufferToVideo);
         assert_eq!(cfg.render.tune.buffers, default_buffers());
         assert_eq!(cfg.render.measured_vsync_fps, 0);
+        assert_eq!(cfg.r#async.executor, AsyncExecutor::All);
     }
 
     /// 片源格式双档位回写（play/wallpaper 各 qois/raw 四组合，不丢字段）。
@@ -1891,6 +1962,21 @@ mod blackbox_matrix {
                 assert_eq!(legacy.wallpaper.format, MediaFormat::Raw);
                 assert!(legacy.wallpaper.popup_freeze);
             }
+        }
+    }
+
+    /// 执行器线三档位回写（all/nano/dynamic，不丢字段；老文件缺键按 all 照读）。
+    #[test]
+    fn async_roundtrip_matrix() {
+        for ex in AsyncExecutor::ALL {
+            let mut cfg = FileConfig::default();
+            cfg.r#async.executor = ex;
+            let back: FileConfig = toml::from_str(&toml::to_string(&cfg).unwrap()).unwrap();
+            assert_eq!(back.r#async.executor, ex);
+            assert_eq!(back, cfg);
+            // 老文件缺键：执行器线按 all 照读（诊断项双线全跑）。
+            let legacy: FileConfig = toml::from_str("version = 1\n").unwrap();
+            assert_eq!(legacy.r#async.executor, AsyncExecutor::All);
         }
     }
 

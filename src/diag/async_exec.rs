@@ -147,10 +147,24 @@ fn dynamic_smoke() -> core::result::Result<(), NyaStatus> {
 
 pub fn run(screen: &mut Screen) -> Result {
     emit!(screen, "=== uefi-async smoke (nano + dynamic) ===");
-    nano_smoke()?;
-    emit!(screen, "async-exec: nano ok (join/timeout/timer/pacer)");
-    dynamic_smoke()?;
-    emit!(screen, "async-exec: dynamic ok (spawn/cancel/retune)");
+    match crate::config::async_executor() {
+        crate::config::AsyncExecutor::Nano => {
+            emit!(screen, "async-exec: skip dynamic (executor=nano)");
+            nano_smoke()?;
+            emit!(screen, "async-exec: nano ok (join/timeout/timer/pacer)");
+        }
+        crate::config::AsyncExecutor::Dynamic => {
+            emit!(screen, "async-exec: skip nano (executor=dynamic)");
+            dynamic_smoke()?;
+            emit!(screen, "async-exec: dynamic ok (spawn/cancel/retune)");
+        }
+        crate::config::AsyncExecutor::All => {
+            nano_smoke()?;
+            emit!(screen, "async-exec: nano ok (join/timeout/timer/pacer)");
+            dynamic_smoke()?;
+            emit!(screen, "async-exec: dynamic ok (spawn/cancel/retune)");
+        }
+    }
     emit!(screen, "async-exec: PASS");
     Ok(())
 }

@@ -309,6 +309,61 @@ keys = [
 ]
 expect = ["async-exec: nano ok", "async-exec: dynamic ok", "async-exec: PASS"]
 
+# 执行器线单档：nano 只跑单核线（无 dynamic 行），dynamic 只跑多核线。
+[[case]]
+name = "async-exec-nano"
+timeout_sec = 240
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+workers = "bsp_only"
+dist = "static"
+vsync = "off"
+[play]
+fps = "max"
+[wallpaper]
+enable = false
+[async]
+executor = "nano"
+"""
+boot_expect = ["cfg: version=1", "idle: ready"]
+keys = [
+  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
+  { send = "p", wait_after = 3 },
+  { send = "a", wait_for = ["menu: ready"], wait_after = 8 },
+]
+expect = ["async-exec: nano ok", "async-exec: PASS"]
+
+[[case]]
+name = "async-exec-dynamic"
+timeout_sec = 240
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+workers = "bsp_only"
+dist = "static"
+vsync = "off"
+[play]
+fps = "max"
+[wallpaper]
+enable = false
+[async]
+executor = "dynamic"
+"""
+boot_expect = ["cfg: version=1", "idle: ready"]
+keys = [
+  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
+  { send = "p", wait_after = 3 },
+  { send = "a", wait_for = ["menu: ready"], wait_after = 8 },
+]
+expect = ["async-exec: dynamic ok", "async-exec: PASS"]
+
 # uefi-input2 交互探测：进菜单按 b（等键 10s），矩阵发 z，
 # Ex 协议必须回显键码 + 修饰/锁定状态，最后 PASS。
 [[case]]
