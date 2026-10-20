@@ -1,0 +1,22 @@
+[package]
+name = "h263-rs-yuv"
+version = "0.1.0"
+authors = ["Mike Welsh <mwelsh@gmail.com>"]
+edition = "2018"
+license = "MIT OR Apache-2.0"
+
+# NOTE(uefi-player vendor): vendored from ruffle-rs/h263-rs + no_std port (scalar).
+# See ../VENDOR.md. `std` (default on) preserves upstream behavior exactly
+# (wide SIMD color conversion); `default-features = false` is the firmware
+# shape: no_std + alloc with a scalar twin of the conversion kernel.
+# `simd` without `std` is NOT supported (same doctrine as rusty_h265).
+
+[features]
+default = ["std"]
+# Wide SIMD conversion kernel. Off => scalar twin; `bytemuck` stays on in both
+# shapes (zero default features, core-only slicing casts).
+std = ["wide/std"]
+
+[dependencies]
+wide = { version = "1.7.1", default-features = false, optional = true }
+bytemuck = { version = "1.13.1", default-features = false }

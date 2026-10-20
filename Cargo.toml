@@ -39,6 +39,14 @@ filmcraft-mpeg2v = { path = "third_party/filmcraft-mpeg2v", default-features = f
 # 零依赖、无 C/FFI、无全局分配器；`simd` 未 port 用不得，
 # 线程并行（tile/loop_filter）恒走顺序路；输出 Y/U/V 三平面行优先）。
 vp9dec = { path = "third_party/vp9dec", default-features = false }
+# H.263 解码（FLV Sorenson Spark/壁纸片源用；pure-Rust，上游未发 crates.io，
+# 本仓 vendor 到 third_party/h263-rs 后自 port 标量路，见该目录 VENDOR.md；
+# default-features=false 即纯标量可用（`simd` 未 port 用不得）；
+# 帧输出 planar YUV（DecodedPicture::as_yuv）+ RGBA（yuv420_to_rgba），校验和
+# 口径先定死为 md5(Y 平面)+md5(RGBA 输出)，QEMU h263-probe 与 diag 项后继再接。
+h263-rs = { path = "third_party/h263-rs/h263", default-features = false }
+h263-rs-yuv = { path = "third_party/h263-rs/yuv", default-features = false }
+h263-rs-deblock = { path = "third_party/h263-rs/deblock", default-features = false }
 # 图像处理类
 qoicoubeh = { version = "0.5.0", default-features = false, features = ["alloc"] }
 u8g2-fonts = { version = "0.8.0", features = ["embedded_graphics_textstyle"] }

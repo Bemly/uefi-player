@@ -1,0 +1,23 @@
+[package]
+name = "h263-rs"
+version = "0.1.0"
+authors = ["Mike Welsh <mwelsh@gmail.com>"]
+edition = "2018"
+license = "MIT OR Apache-2.0"
+
+# NOTE(uefi-player vendor): vendored from ruffle-rs/h263-rs + no_std port (scalar).
+# See ../VENDOR.md. `std` (default on) preserves upstream behavior exactly;
+# `default-features = false` is the firmware shape: no_std + alloc.
+
+[features]
+default = ["std"]
+# Standard library. Off => `#![no_std]` + `alloc`; the byte-source bound falls
+# back to a vendored minimal trait (slices only) and the `std::io` error
+# variant becomes `UnexpectedEof`. There are no env knobs / diagnostic prints
+# in this crate, so nothing else changes behavior.
+std = ["thiserror/std", "num-traits/std"]
+
+[dependencies]
+bitflags = "2.4.0"
+thiserror = { version = "2.0.3", default-features = false }
+num-traits = { version = "0.2.16", default-features = false }
