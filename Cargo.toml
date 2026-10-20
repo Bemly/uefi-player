@@ -7,6 +7,10 @@ edition = "2024"
 # 视频解码类
 less-avc = { version = "0.1.5", default-features = false }
 shiguredo_mp4 = { version = "2026.5.0", default-features = false }
+# H.264 解码（mp4/壁纸片源用；pure-Rust，no_std 经 `alloc` + `libm`，见 diag/avc_probe.rs 头注释轮子结论；
+# 不开上游 `global-alloc`：它会装轮子自带的进程全局分配器，与 uefi 的 `#[global_allocator]` 撞车，
+# 上游文档明示自带分配器的下游用 `default-features = false`）
+rusty_h264-decoder = { version = "0.16", default-features = false, features = ["libm"] }
 # 图像处理类
 qoicoubeh = { version = "0.5.0", default-features = false, features = ["alloc"] }
 u8g2-fonts = { version = "0.8.0", features = ["embedded_graphics_textstyle"] }

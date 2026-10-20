@@ -664,6 +664,33 @@ keys = [
 ]
 expect = ["input2: key=", "input2: PASS"]
 
+# AVC 解码探针：内嵌 baseline 小样片在固件里实解，帧数/几何/校验和 + PASS 全走串口。
+# 按键 `c`（菜单诊断项；弹窗侧 p/f/s/r/q 已占，c 只在纯播放器菜单里有效）。
+[[case]]
+name = "avc-probe"
+timeout_sec = 240
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+workers = "bsp_only"
+dist = "static"
+vsync = "off"
+[play]
+fps = "max"
+[wallpaper]
+enable = false
+"""
+boot_expect = ["cfg: version=1", "idle: ready"]
+keys = [
+  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
+  { send = "p", wait_after = 3 },
+  { send = "c", wait_for = ["menu: ready"], wait_after = 5 },
+]
+expect = ["avc: decoded 4 frames", "avc: PASS"]
+
 # 弹窗导航：开弹窗 → q 回壁纸 → 再开（open 第二遍 = 待机循环没卡死）。
 [[case]]
 name = "boot-menu"

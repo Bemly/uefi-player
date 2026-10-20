@@ -10,8 +10,8 @@
 #[cfg(target_arch = "x86_64")]
 use crate::diag::hw_bench;
 use crate::diag::{
-    async_exec, avx_checker, fw_collect, get_cpu_info, get_multi_monitor, get_smbios, input2_probe,
-    mp_service, multi_core_draw, use_embedded_graphics_gop,
+    async_exec, avc_probe, avx_checker, fw_collect, get_cpu_info, get_multi_monitor, get_smbios,
+    input2_probe, mp_service, multi_core_draw, use_embedded_graphics_gop,
 };
 use crate::error::Result;
 use crate::graphics::Screen;
@@ -104,6 +104,13 @@ pub const ITEMS: &[Item] = &[
         name: "Input2 probe",
         desc: "uefi-input2 Ex key + shift state",
         run: Entry::Shared(input2_probe::run),
+        fatal_on_error: false,
+    },
+    Item {
+        key: 'c',
+        name: "AVC decode",
+        desc: "rusty_h264 baseline probe",
+        run: Entry::Shared(avc_probe::run),
         fatal_on_error: false,
     },
     #[cfg(target_arch = "x86_64")]

@@ -10,6 +10,7 @@ pub mod common;
 pub mod registry;
 
 pub mod async_exec;
+pub mod avc_probe;
 pub mod avx_checker;
 pub mod fw_collect;
 pub mod get_cpu_info;
