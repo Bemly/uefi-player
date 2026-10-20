@@ -28,6 +28,8 @@
 //! [play]
 //! fps = "auto"            # "auto" | "max" | "1".."240"
 //! format = "qois"         # 片源格式："qois"（1080p/video.qois）| "raw"（1080p/frameNNNN.raw）
+//! pipeline = "clip"       # 播放管线："clip"（预解码现路）| "staged" | "zero_copy" | "stream"
+//!                         # | "single" | "legacy_blt" | "legacy_direct" | "legacy_u64"（老实现手动切）
 //! measured_max_fps = 0    # 固件实测后回写，GUI 只读展示
 //! [wallpaper]
 //! enable = false          # 菜单背景 + 引导过渡总开关（默认关）
@@ -601,6 +603,57 @@ fn default_fps() -> String {
     String::from("auto")
 }
 
+/// 播放管线（`[play] pipeline`，手动切换播放实现）：
+/// - `Clip`（默认）：`Clip` 全量预解码 + 现行三路/执行器后端（`schedule.backend` 生效）；
+/// - `Staged`：流式三段解码（QOI→Raw→Blt，旧 `draw_all_mem` 循环）；
+/// - `ZeroCopy`：流式零拷贝解码（直解进 Blt 缓冲 + R/B 交换，旧 `draw_all_mem_zero_copy` 循环）；
+/// - `Stream`：真文件流式（边读边解，旧 `draw` 循环，不全量进内存）；
+/// - `Single`：单帧反复（旧 `draw_once` 循环，每帧重读文件，仅对照）；
+/// - `LegacyBlt`/`LegacyDirect`/`LegacyU64`：`Clip` 预解码 + 老上传循环
+///   （Blt 整推 / BSP 直写 / u64 步进直写，不走 render 矩阵与执行器后端）。
+/// 非 `Clip` 管线只读 qois 片源（`format = "raw"` 时 warn 回落 `Clip`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PlayPipeline {
+    #[default]
+    Clip,
+    Staged,
+    ZeroCopy,
+    Stream,
+    Single,
+    LegacyBlt,
+    LegacyDirect,
+    LegacyU64,
+}
+
+impl PlayPipeline {
+    const fn as_u8(self) -> u8 {
+        match self {
+            Self::Clip => 0,
+            Self::Staged => 1,
+            Self::ZeroCopy => 2,
+            Self::Stream => 3,
+            Self::Single => 4,
+            Self::LegacyBlt => 5,
+            Self::LegacyDirect => 6,
+            Self::LegacyU64 => 7,
+        }
+    }
+
+    fn from_u8(v: u8) -> Self {
+        match v {
+            1 => Self::Staged,
+            2 => Self::ZeroCopy,
+            3 => Self::Stream,
+            4 => Self::Single,
+            5 => Self::LegacyBlt,
+            6 => Self::LegacyDirect,
+            7 => Self::LegacyU64,
+            _ => Self::Clip,
+        }
+    }
+}
+
 /// 播放帧率开关（GUI 滑杆：最左 auto / 中间 1-240 / 最右 max）。
 /// - `Auto`：首启实测最大播放帧率并回写，按 `min(视频帧率, 实测*3/4)` 跑；
 /// - `Max`：不限速；
@@ -626,6 +679,7 @@ pub fn parse_fps(s: &str) -> FpsPolicy {
 /// `[play]`：`fps` 是字符串（三态没法用纯数字表达），`measured_max_fps`
 /// 只由固件实测回写（0 = 未测），GUI 只读展示。`format` 切片源：
 /// `qois`（默认，`1080p/video.qois`）/ `raw`（`1080p/frameNNNN.raw` 序列）。
+/// `pipeline` 切播放实现（默认 `clip`，老文件缺键照读；非 clip 只读 qois）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PlayConfig {
@@ -636,6 +690,9 @@ pub struct PlayConfig {
     /// 片源格式（默认 qois，老文件照读）。
     #[serde(default = "default_play_format")]
     pub format: MediaFormat,
+    /// 播放管线（默认 clip，老文件照读）。
+    #[serde(default)]
+    pub pipeline: PlayPipeline,
 }
 
 impl Default for PlayConfig {
@@ -644,6 +701,7 @@ impl Default for PlayConfig {
             fps: default_fps(),
             measured_max_fps: 0,
             format: MediaFormat::Qois,
+            pipeline: PlayPipeline::Clip,
         }
     }
 }
@@ -736,6 +794,8 @@ static PLAY_CAP: AtomicU32 = AtomicU32::new(0);
 static PLAY_MEASURED: AtomicU32 = AtomicU32::new(0);
 /// 片源格式（0 = qois，1 = raw；`[play]` 默认 qois，`[wallpaper]` 默认 raw）。
 static PLAY_FORMAT: AtomicU8 = AtomicU8::new(0);
+/// 播放管线（`PlayPipeline` 判别值；0 = clip 默认）。
+static PLAY_PIPELINE: AtomicU8 = AtomicU8::new(0);
 static WALLPAPER_FORMAT: AtomicU8 = AtomicU8::new(1);
 /// 0 = 未测，1 = direct，2 = blt（`mode = "auto"` 的矩阵结论，校准/记忆二选一写入）
 static RESOLVED_RENDER: AtomicU8 = AtomicU8::new(0);
@@ -788,6 +848,7 @@ pub fn load() -> Option<String> {
     }
     PLAY_MEASURED.store(cfg.play.measured_max_fps, Ordering::Relaxed);
     PLAY_FORMAT.store(cfg.play.format.as_u8(), Ordering::Relaxed);
+    PLAY_PIPELINE.store(cfg.play.pipeline.as_u8(), Ordering::Relaxed);
     WALLPAPER_FORMAT.store(cfg.wallpaper.format.as_u8(), Ordering::Relaxed);
     WALLPAPER_ENABLE.store(cfg.wallpaper.enable as u8, Ordering::Relaxed);
     WALLPAPER_FPS.store(cfg.wallpaper.fps.clamp(1, 60).max(1), Ordering::Relaxed);
@@ -1284,6 +1345,11 @@ pub fn measured_max_fps() -> u32 {
 /// 播片片源格式（默认 qois；raw 读 `1080p/frameNNNN.raw` 序列）。
 pub fn play_format() -> MediaFormat {
     MediaFormat::from_u8(PLAY_FORMAT.load(Ordering::Relaxed))
+}
+
+/// 播放管线（默认 clip；老文件缺键照读）。
+pub fn play_pipeline() -> PlayPipeline {
+    PlayPipeline::from_u8(PLAY_PIPELINE.load(Ordering::Relaxed))
 }
 
 /// 实测完把最大帧率写回 `\player.toml`（GUI 下次打开即见）。

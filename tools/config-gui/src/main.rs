@@ -355,9 +355,51 @@ fn default_wallpaper_format() -> MediaFormat {
     MediaFormat::Raw
 }
 
+/// `[play] pipeline`：播放实现手动切换（与固件 `PlayPipeline` 同构）。
+/// `Clip` = 预解码现路（默认）；其余 7 档是修复后的老实现循环，只读 qois。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum PlayPipeline {
+    #[default]
+    Clip,
+    Staged,
+    ZeroCopy,
+    Stream,
+    Single,
+    LegacyBlt,
+    LegacyDirect,
+    LegacyU64,
+}
+
+impl PlayPipeline {
+    const ALL: [Self; 8] = [
+        Self::Clip,
+        Self::Staged,
+        Self::ZeroCopy,
+        Self::Stream,
+        Self::Single,
+        Self::LegacyBlt,
+        Self::LegacyDirect,
+        Self::LegacyU64,
+    ];
+    fn file_str(self) -> &'static str {
+        match self {
+            Self::Clip => "clip",
+            Self::Staged => "staged",
+            Self::ZeroCopy => "zero_copy",
+            Self::Stream => "stream",
+            Self::Single => "single",
+            Self::LegacyBlt => "legacy_blt",
+            Self::LegacyDirect => "legacy_direct",
+            Self::LegacyU64 => "legacy_u64",
+        }
+    }
+}
+
 /// `[play]`：`fps` 是字符串（三态没法用纯数字表达），`measured_max_fps`
 /// 只由固件实测回写（0 = 未测），这里只读展示 + 重测清零。
 /// `format` 切片源：qois 读 `1080p/video.qois`，raw 读 `1080p/frameNNNN.raw`。
+/// `pipeline` 切播放实现：clip 是预解码现路（默认），其余 7 档是老实现循环。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 struct PlayConfig {
@@ -367,6 +409,8 @@ struct PlayConfig {
     measured_max_fps: u32,
     #[serde(default = "default_play_format")]
     format: MediaFormat,
+    #[serde(default)]
+    pipeline: PlayPipeline,
 }
 
 /// `[boot]`：多卷自动发现开关（与固件 `BootConfig` 同构；全 `true` = 默认全开）。
@@ -498,6 +542,7 @@ impl Default for PlayConfig {
             fps: default_fps(),
             measured_max_fps: 0,
             format: MediaFormat::Qois,
+            pipeline: PlayPipeline::Clip,
         }
     }
 }
@@ -1465,6 +1510,34 @@ impl App {
                 ui.label(t!("play.format"));
                 self.cfg.play.format = self.format_row(ui, self.cfg.play.format);
                 ui.small(t!("play.format_hint"));
+                ui.add_space(4.0);
+                ui.label(t!("play.pipeline"));
+                // 8 档两行：一行 clip 系（现路 + 三段流式），一行老上传循环。
+                ui.horizontal(|ui| {
+                    for v in [
+                        PlayPipeline::Clip,
+                        PlayPipeline::Staged,
+                        PlayPipeline::ZeroCopy,
+                        PlayPipeline::Stream,
+                    ] {
+                        if self.option_button(ui, self.cfg.play.pipeline == v, v.file_str()) {
+                            self.cfg.play.pipeline = v;
+                        }
+                    }
+                });
+                ui.horizontal(|ui| {
+                    for v in [
+                        PlayPipeline::Single,
+                        PlayPipeline::LegacyBlt,
+                        PlayPipeline::LegacyDirect,
+                        PlayPipeline::LegacyU64,
+                    ] {
+                        if self.option_button(ui, self.cfg.play.pipeline == v, v.file_str()) {
+                            self.cfg.play.pipeline = v;
+                        }
+                    }
+                });
+                ui.small(t!("play.pipeline_hint"));
                 ui.add_space(10.0);
                 ui.label(t!("async.executor"));
                 ui.horizontal(|ui| {
@@ -1981,6 +2054,7 @@ mod blackbox_matrix {
                 fps: String::from("60"),
                 measured_max_fps: 120,
                 format: MediaFormat::Raw,
+                pipeline: PlayPipeline::Clip,
             },
             wallpaper: WallpaperConfig {
                 enable: true,
@@ -2072,6 +2146,21 @@ mod blackbox_matrix {
                 assert!(legacy.wallpaper.popup_freeze);
             }
         }
+    }
+
+    /// 播放管线八档位回写（clip/staged/zero_copy/stream/single/legacy 三档，
+    /// 不丢字段；老文件缺键按 clip 照读，现路行为不变）。
+    #[test]
+    fn pipeline_roundtrip_matrix() {
+        for p in PlayPipeline::ALL {
+            let mut cfg = FileConfig::default();
+            cfg.play.pipeline = p;
+            let back: FileConfig = toml::from_str(&toml::to_string(&cfg).unwrap()).unwrap();
+            assert_eq!(back.play.pipeline, p);
+            assert_eq!(back, cfg);
+        }
+        let legacy: FileConfig = toml::from_str("version = 1\n[play]\nfps = \"max\"\n").unwrap();
+        assert_eq!(legacy.play.pipeline, PlayPipeline::Clip);
     }
 
     /// 执行器线三档位回写（all/nano/dynamic，不丢字段；老文件缺键按 all 照读）。

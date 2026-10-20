@@ -54,6 +54,24 @@
 （`measured_max_fps`，GUI 只读 + 重测清零）。`vsync` 开（static/half/auto 探测开）
 再叠生效预算帽（`effective_vsync_fps()`，static 取滑杆值，half 取实测取半）。
 
+## 播放管线（`[play] pipeline`，手动切换）
+
+`clip`（默认）：`Clip` 全量预解码 + 现行三路/执行器后端（上文全部）。
+其余 7 档是 `Clip` 之前的老实现（修复后进矩阵，可手动切对照）：
+
+- `staged`：`VideoMemory` 整文件进内存 + 逐帧三段解码（QOI→Raw→Blt）+ Blt 整推，
+  限速掉帧与现路同预算语义。
+- `zero_copy`：同上，省掉 Raw 中转（直解进 Blt 缓冲 + R/B 交换）。
+- `stream`：真文件流式（`read_frame_next` 边读边解 + 短读补齐），不全量进内存；
+  限速只自旋补齐，不丢帧。
+- `single`：`draw_once` 单帧反复（容器取首帧，纯 QOI 整解码），每帧重读文件，
+  零缓存下限对照。
+- `legacy_blt` / `legacy_direct` / `legacy_u64`：`Clip` 预解码 + 老上传循环
+  （Blt 整推 / BSP 直写 / u64 步进直写），无 OSD/多核/影子。
+
+老路无 OSD、无多核、无影子、无执行器后端；只读 qois（raw 回落 clip 并警告）。
+矩阵覆盖：`video-pipe-*` 7 case（path 标记 + soak 保活）。
+
 ## 真机错位问题（曾 TODO，现状态）
 
 - 现象：真机概率性 QOI 解码失败/数据错位，QEMU 不现。

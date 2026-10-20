@@ -339,6 +339,191 @@ keys = [
 expect = ["play: path=mp_draw", "sched.backend=Manual"]
 soak_sec = 15
 
+# 老播放管线（[play] pipeline 手动切换，修复后的老实现循环）：每档一个 case，
+# 内联配置 + 串口 path 标记 + soak 保活（不断言画面，只看无红线）。
+# 非 clip 只读 qois（needs_video 供片）；raw 回落 clip 不在此覆盖。
+[[case]]
+name = "video-pipe-staged"
+timeout_sec = 180
+needs_video = true
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+vsync = "off"
+[play]
+fps = "max"
+pipeline = "staged"
+[wallpaper]
+enable = false
+"""
+boot_expect = ["cfg: version=1", "idle: ready"]
+keys = [
+  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
+  { send = "p", wait_after = 3 },
+  { send = "0", wait_for = ["menu: ready"], wait_after = 5 },
+]
+expect = ["play: path=staged_loop"]
+soak_sec = 15
+
+[[case]]
+name = "video-pipe-zero-copy"
+timeout_sec = 180
+needs_video = true
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+vsync = "off"
+[play]
+fps = "max"
+pipeline = "zero_copy"
+[wallpaper]
+enable = false
+"""
+boot_expect = ["cfg: version=1", "idle: ready"]
+keys = [
+  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
+  { send = "p", wait_after = 3 },
+  { send = "0", wait_for = ["menu: ready"], wait_after = 5 },
+]
+expect = ["play: path=zero_copy_loop"]
+soak_sec = 15
+
+[[case]]
+name = "video-pipe-stream"
+timeout_sec = 180
+needs_video = true
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+vsync = "off"
+[play]
+fps = "max"
+pipeline = "stream"
+[wallpaper]
+enable = false
+"""
+boot_expect = ["cfg: version=1", "idle: ready"]
+keys = [
+  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
+  { send = "p", wait_after = 3 },
+  { send = "0", wait_for = ["menu: ready"], wait_after = 5 },
+]
+expect = ["play: path=stream_loop"]
+soak_sec = 15
+
+[[case]]
+name = "video-pipe-single"
+timeout_sec = 180
+needs_video = true
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+vsync = "off"
+[play]
+fps = "max"
+pipeline = "single"
+[wallpaper]
+enable = false
+"""
+boot_expect = ["cfg: version=1", "idle: ready"]
+keys = [
+  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
+  { send = "p", wait_after = 3 },
+  { send = "0", wait_for = ["menu: ready"], wait_after = 5 },
+]
+expect = ["play: path=single_loop"]
+soak_sec = 15
+
+[[case]]
+name = "video-pipe-legacy-blt"
+timeout_sec = 180
+needs_video = true
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+vsync = "off"
+[play]
+fps = "max"
+pipeline = "legacy_blt"
+[wallpaper]
+enable = false
+"""
+boot_expect = ["cfg: version=1", "idle: ready"]
+keys = [
+  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
+  { send = "p", wait_after = 3 },
+  { send = "0", wait_for = ["menu: ready"], wait_after = 5 },
+]
+expect = ["play: path=legacy_blt_loop"]
+soak_sec = 15
+
+[[case]]
+name = "video-pipe-legacy-direct"
+timeout_sec = 180
+needs_video = true
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+vsync = "off"
+[play]
+fps = "max"
+pipeline = "legacy_direct"
+[wallpaper]
+enable = false
+"""
+boot_expect = ["cfg: version=1", "idle: ready"]
+keys = [
+  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
+  { send = "p", wait_after = 3 },
+  { send = "0", wait_for = ["menu: ready"], wait_after = 5 },
+]
+expect = ["play: path=legacy_direct_loop"]
+soak_sec = 15
+
+[[case]]
+name = "video-pipe-legacy-u64"
+timeout_sec = 180
+needs_video = true
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+vsync = "off"
+[play]
+fps = "max"
+pipeline = "legacy_u64"
+[wallpaper]
+enable = false
+"""
+boot_expect = ["cfg: version=1", "idle: ready"]
+keys = [
+  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
+  { send = "p", wait_after = 3 },
+  { send = "0", wait_for = ["menu: ready"], wait_after = 5 },
+]
+expect = ["play: path=legacy_u64_loop"]
+soak_sec = 15
+
 # 诊断键：弹窗 → p 进纯播放器 → 1/4/7 各出数，q 回壁纸（pause_return 吞键）。
 [[case]]
 name = "diag-keys"

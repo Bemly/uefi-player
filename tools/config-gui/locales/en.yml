@@ -95,6 +95,8 @@ play.format_hint: "qois reads 1080p/video.qois; raw reads 1080p/frameNNNN.raw se
 play.measured: "Measured max: %{v} fps (saved)"
 play.unmeasured: "Not benched yet; switch to auto to test on next boot"
 play.rebench: "Re-bench"
+play.pipeline: "Play pipeline"
+play.pipeline_hint: "clip is the predecoded current path; the other 7 are fixed legacy loops (qois only, fall back to clip on raw)."
 async.executor: "Async executor line"
 async.desc_all: "All: diag runs nano + dynamic, each asserted."
 async.desc_nano: "Nano only: single-core borrowed nodes (list round-robin)."

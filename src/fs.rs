@@ -139,4 +139,37 @@ impl Fs {
 
         Ok(file_content)
     }
+
+    /// 流式读一帧（`u32le len + QOI`，旧 `stream` 管线边读边解用）。
+    /// 固件短读是常态：头和体都循环补齐，读满才算一帧；尾部不足直接结束，不 panic。
+    pub fn read_frame_next(&mut self, file: &mut RegularFile, buf: &mut Vec<u8>) -> Result<bool> {
+        // 读头
+        let mut qoi_size = [0u8; 4];
+        let mut got = 0;
+        while got < 4 {
+            let n = file.read(&mut qoi_size[got..])?;
+            if n == 0 {
+                return Ok(false);
+            }
+            got += n;
+        }
+        let qoi_size = u32::from_le_bytes(qoi_size) as usize;
+
+        // 扩容缓冲区
+        if buf.len() < qoi_size {
+            buf.resize(qoi_size, 0);
+        }
+
+        // 读满一帧
+        let mut done = 0;
+        while done < qoi_size {
+            let n = file.read(&mut buf[done..qoi_size])?;
+            if n == 0 {
+                return Ok(false);
+            }
+            done += n;
+        }
+
+        Ok(true)
+    }
 }

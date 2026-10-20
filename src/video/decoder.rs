@@ -4,6 +4,72 @@ use uefi::Status;
 use uefi::proto::console::gop::BltPixel;
 use uefi::proto::media::file::{File, FileInfo, RegularFile};
 
+/// 整文件进内存的流式帧源（旧 `staged`/`zero_copy` 管线用：`Clip` 预解码之前的形态，
+/// 内存换时间——文件全驻留，逐帧只解码不重复读盘）。
+pub struct VideoMemory {
+    pub data: Vec<u8>,
+    pub cursor: usize,
+}
+
+impl VideoMemory {
+    pub fn new(mut file: RegularFile) -> crate::error::Result<Self> {
+        let mut info_buf = vec![0u8; 128];
+        let info = loop {
+            match file.get_info::<FileInfo>(&mut info_buf) {
+                Ok(info) => break info,
+                Err(e) if e.status() == Status::BUFFER_TOO_SMALL => {
+                    if let Some(size) = *e.data() {
+                        info_buf.resize(size, 0)
+                    }
+                }
+                // 其他状态的Option均为None,这里拉平
+                Err(e) => Err(e.status())?,
+            }
+        };
+        let size = info.file_size() as usize;
+
+        // 一次性分配内存并读取
+        let mut buffer = vec![0u8; size];
+        file.read(&mut buffer)?;
+
+        Ok(Self {
+            data: buffer,
+            cursor: 0,
+        })
+    }
+
+    /// 取下一帧进 `qoi_buf`（`u32le len + QOI` 串接）。
+    /// 越界守卫：尾部不足 4 字节长度头、或长度超出剩余数据时直接结束（不 panic，
+    /// 调用方 `rewind` 循环）。
+    pub fn next_frame(&mut self, qoi_buf: &mut Vec<u8>) -> bool {
+        if self.cursor + 4 > self.data.len() {
+            return false;
+        }
+
+        let len_bytes = &self.data[self.cursor..self.cursor + 4];
+        let frame_len =
+            u32::from_le_bytes([len_bytes[0], len_bytes[1], len_bytes[2], len_bytes[3]]) as usize;
+
+        self.cursor += 4;
+        let end = self.cursor + frame_len;
+        // 长度超出剩余数据：文件截断，按结束处理（不 panic）。
+        if end > self.data.len() {
+            return false;
+        }
+
+        // 将这一帧的数据拷贝到 qoi_buf
+        qoi_buf.clear();
+        qoi_buf.extend_from_slice(&self.data[self.cursor..end]);
+
+        self.cursor = end;
+        true
+    }
+
+    pub fn rewind(&mut self) {
+        self.cursor = 0;
+    }
+}
+
 //////// 统一播放剪辑：预解码帧集（`Vec<Vec<BltPixel>>` + 游标）。
 //////// 片源双格式（`[play]/[wallpaper] format` 矩阵，见 `config::MediaFormat`）：
 //////// - qois：`u32le len + QOI` 串接文件，解码为 BGRA（播放器 P3 老路）；

@@ -95,6 +95,8 @@ play.format_hint: "qois 读 1080p/video.qois；raw 读 1080p/frameNNNN.raw 序�
 play.measured: "实测最大：%{v} fps（已存配置）"
 play.unmeasured: "尚未实测，切自动后下次启动测试"
 play.rebench: "重新测试"
+play.pipeline: "播放管线"
+play.pipeline_hint: "clip 是预解码现路；其余 7 档是修复后的老实现循环（只读 qois，raw 回落 clip）。"
 async.executor: "异步执行器线"
 async.desc_all: "全跑：诊断项跑 nano + dynamic，各自断言。"
 async.desc_nano: "只跑 nano：单核借用节点（链表轮询）。"

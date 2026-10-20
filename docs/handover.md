@@ -64,7 +64,7 @@ third_party/sprout 只读 submodule，只依赖 5 个 lib
      旧文件兼容、读盘/落盘钳制、`bench_pending`/`tune_visible` 表格断言。
      纯规则已抽成无 display 依赖的自由函数（`coerce_loaded/clamp_tune/
      bench_pending/tune_visible`），UI 只是薄调用——新规则先加表再接 UI。
-   - QEMU 侧 `tools/qemu-matrix/`（纯 Rust runner + `matrix.toml`，33 case 全绿）：
+   - QEMU 侧 `tools/qemu-matrix/`（纯 Rust runner + `matrix.toml`，40 case（video-dynamic 宿主吃紧时例外，见 §4））：
      每个 case 独立 FAT 镜像 + 独立 QEMU（pflash 挂 OVMF code，`-bios` 拒载
      3.5MB 非对齐文件），串口断言 + `sendkey` 按键（`wait_for` 事件驱动，
      `push_gen` 同款思想），`needs_video/wallpaper/extra_volumes/artifact/soak`齐全。
@@ -121,6 +121,9 @@ third_party/sprout 只读 submodule，只依赖 5 个 lib
 - **boot counting 递减**：逻辑已实现（启动尝试即真改名），`boot-counting`
   矩阵 case 已覆盖单次递减断言；"计数耗尽自动跳过"的端到端（两次启动）还没做，
   待排。
+- **video-dynamic 对宿主内存敏感**：QEMU 矩阵偶发 guest 内 OOM（`memory allocation of 56 bytes failed`，
+  紧随 `play: path=dynamic_draw`）或 hang 无 `alive round`。宿主内存吃紧（同时跑别的项目）时复现，
+  与固件改动无关（干净树同 FAIL）。红了先重跑该 case，宿主空闲重跑即过再定性。
 - **并行多核 tile 路读源问题（疑似）**：`video.rs` tile 分支用本核切片按全局行号
   取数，疑似错位/OOB——bench 路（共用源）是对的所以 HWBENCH 数字不受影响；
   没动手，等用户拍板再修（动了会改变现有 tile 行为）。

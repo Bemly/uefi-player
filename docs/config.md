@@ -37,6 +37,10 @@ buffers   = 0           # 后缓冲帧数（0-16；0 = 直写前台，>0 = 影�
 fps = "auto"            # auto | max | 1..240
                         # auto: 首启实测最大帧率并回写，按 min(视频帧率, 实测*3/4) 跑
 format = "qois"         # 片源格式：qois（1080p/video.qois）| raw（1080p/frameNNNN.raw）
+pipeline = "clip"       # 播放管线：clip（预解码现路，默认）| staged（流式三段）
+                        # | zero_copy（流式零拷贝）| stream（真文件流式）| single（单帧反复）
+                        # | legacy_blt / legacy_direct / legacy_u64（Clip + 老上传循环）
+                        # 非 clip 只读 qois（raw 时 warn 回落 clip）；老路无 OSD/多核/影子。
 measured_max_fps = 0    # 固件实测回写（0 = 未测）；GUI 只读展示
 
 [schedule]
@@ -98,5 +102,14 @@ executor = "all"        # 诊断项 a 跑哪条执行器线：all（默认，都
   BSP 独判掉帧/OSD，确定性与手写一致）。只直写前台：`render=blt`（Blt 引擎
   单线程）/ 无 MP / 单核回 nano 泵并警告；`tune.buffers>0`（影子环 v1 不支持）
   回 manual 并警告。缺 `[schedule]` 表的老文件继续认 `[render]` 旧键。
+- `play.pipeline=clip`（默认）：现行管线（`schedule.backend` 三后端生效）。
+  非 clip 走修复后的老实现循环（`render`/`schedule`/`workers`/`dist` 全忽略，
+  无 OSD/多核/影子，只读 qois，raw 回落 clip 并警告）：
+  `staged`（VideoMemory 整文件 + 三段解码 + Blt + 限速掉帧）/
+  `zero_copy`（直解进 Blt 缓冲 + R/B 交换 + 限速掉帧）/
+  `stream`（真文件流式边读边解 + 限速不限丢）/
+  `single`（每帧重读文件 + 单帧解码，仅对照）/
+  `legacy_blt`/`legacy_direct`/`legacy_u64`（Clip 预解码 + 老上传循环）。
+  缺键老文件按 `clip` 照读，现路行为不变。
 - `async.executor`：只决定诊断项 `a` 跑 `nano`/`dynamic` 哪条线（`all` 都跑）；
   缺表缺键按 `all` 照读；生产调度不受影响。
