@@ -14,6 +14,8 @@ src/menu.rs      纯播放器菜单（诊断 + 播片；`q` 回壁纸待机）
 src/graphics.rs  Screen（GOP 独占封装）：draw_str/upload_frame(+region)/bench 矩阵/asm 拷贝族
 src/video.rs     播放器：video_run → blt_loop（单线程 Blt）/ direct_loop（BSP 直写）
                  / mp_draw（全核并行）+ pace_or_drop/确定性掉帧 + OSD
+src/video/exec.rs  执行器后端（`[schedule] backend`）：nano_pump（单核泵）/
+                 dynamic_draw（分带 spawn + steal，BSP 独判）+ 回退门
 src/video/{decoder,buffer}.rs  VideoMemoryRaw 预解码（校验 + 计数 + 空集报错）
 src/boot/        P1：entries（BLS 枚举）+ chainload（eficore）+ mod（枚举 + 交权；UI 在 idle 弹窗）
 src/wallpaper.rs P4：序列位图预载 + 行区/全屏上屏

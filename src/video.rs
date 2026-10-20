@@ -20,6 +20,7 @@ use crate::video::ascii_font::FONT_8X16;
 pub mod buffer;
 pub mod decoder;
 pub mod ascii_font;
+pub mod exec;
 
 const VIDEO_W: usize = 1920;
 const VIDEO_H: usize = 1080;
@@ -28,7 +29,7 @@ const VIDEO_H: usize = 1080;
 const VIDEO_NATIVE_FPS: u32 = 120;
 
 #[inline(always)]
-fn rdtsc() -> u64 {
+pub(crate) fn rdtsc() -> u64 {
     unsafe { core::arch::x86_64::_rdtsc() }
 }
 
@@ -42,7 +43,7 @@ fn calibrate_tps() -> u64 {
 
 /// 限速 + 掉帧（P3，单线程路）：帧内耗时超预算先自旋补齐；迟到超出一整帧则
 /// 丢帧追赶（最多连丢 2 帧防雪崩）。记数只走串口（屏显不刷，不污染画面）。
-fn pace_or_drop(
+pub(crate) fn pace_or_drop(
     video: &mut Clip,
     target: Option<u32>,
     tps: u64,
@@ -92,6 +93,23 @@ pub fn video_run(screen: &mut Screen) -> Result {
     //   blt            → 单线程走 GOP Blt 引擎（workers 无意义）
     //   direct + bsp   → BSP 单核直写（MP 关闭或校准判单核更快）
     //   direct + all   → 原来的多核直写
+    // 调度后端（[schedule] backend）：manual 走下面三路；nano 是单核执行器泵
+    // （render 全 honoring）；dynamic 是多核 steal 泵（只直写前台，见 exec）。
+    match crate::config::schedule_backend() {
+        crate::config::ScheduleBackend::Nano => {
+            log::info!("play: path=nano_pump (single executor task; schedule workers/dist ignored)");
+            exec::nano_pump(screen, clip, VIDEO_W, VIDEO_H, target, tps)
+        }
+        crate::config::ScheduleBackend::Dynamic => {
+            exec::dynamic_draw(screen, clip, VIDEO_W, VIDEO_H, target, tps)
+        }
+        crate::config::ScheduleBackend::Manual => manual_run(screen, clip, target, tps),
+    }
+}
+
+/// 手写调度（`[schedule] backend=manual`，也是执行器后端的回退落点）：
+/// blt 单线程引擎 / direct BSP 单核直写 / direct 全核 `mp_draw`，`workers`/`dist` 生效。
+pub(crate) fn manual_run(screen: &mut Screen, clip: Clip, target: Option<u32>, tps: u64) -> Result {
     match crate::config::effective_render() {
         crate::config::RenderMode::Blt => {
             log::info!("play: path=blt_loop");
@@ -429,7 +447,7 @@ pub const OSD_ROWS: usize = 20;
 
 /// tile 行区搬运：逐行 `copy_block`（P2 位宽选路），OSD 行由调用方先钳掉。
 /// edition 2024：unsafe fn 体内显式 unsafe 块。
-unsafe fn copy_tile_rows(
+pub(crate) unsafe fn copy_tile_rows(
     dst_base: *mut u8,
     dst_stride: usize,
     src_frame: *const u8,

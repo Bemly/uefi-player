@@ -117,6 +117,8 @@ impl RenderMode {
 }
 
 /// 多核开关（与固件 `WorkersMode` 同构；Blt 路径恒单线程，忽略本项）。
+/// 固件侧已搬家到 `[schedule]`；`[render]` 下是 legacy 别名（老文件照读，
+/// 新文件 GUI 只写 `[schedule]`；见 `coerce_loaded` 迁移）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum WorkersMode {
@@ -139,6 +141,7 @@ impl WorkersMode {
 
 /// 多核分工（与固件 `DistMode` 同构；`Tile` = tile 自调度，`Static` = 固定分区，
 /// `Dynamic` = 按实测核速加权分行，播中逐轮重算）。
+/// 搬家说明同 `WorkersMode`（`[schedule] dist` 为准）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 enum DistMode {
@@ -407,6 +410,37 @@ impl AsyncExecutor {
     }
 }
 
+/// 调度后端（与固件 `ScheduleBackend` 同构）：manual 手写 MP 三路；
+/// nano 单核执行器泵（workers/dist 忽略）；dynamic 多核 steal 泵（只直写前台）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum ScheduleBackend {
+    #[default]
+    Manual,
+    Nano,
+    Dynamic,
+}
+
+impl ScheduleBackend {
+    const ALL: [Self; 3] = [Self::Manual, Self::Nano, Self::Dynamic];
+    fn file_str(self) -> &'static str {
+        match self {
+            Self::Manual => "manual",
+            Self::Nano => "nano",
+            Self::Dynamic => "dynamic",
+        }
+    }
+}
+
+/// `[schedule]`：与固件 `ScheduleConfig` 同构（手写调度独立成矩阵配置）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+struct ScheduleConfig {
+    backend: ScheduleBackend,
+    workers: WorkersMode,
+    dist: DistMode,
+}
+
 /// `[async]`：与固件 `AsyncConfig` 同构。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -469,6 +503,7 @@ struct FileConfig {
     play: PlayConfig,
     wallpaper: WallpaperConfig,
     boot: BootConfig,
+    schedule: ScheduleConfig,
     r#async: AsyncConfig,
 }
 
@@ -481,6 +516,7 @@ impl Default for FileConfig {
             play: PlayConfig::default(),
             wallpaper: WallpaperConfig::default(),
             boot: BootConfig::default(),
+            schedule: ScheduleConfig::default(),
             r#async: AsyncConfig::default(),
         }
     }
@@ -569,6 +605,15 @@ fn async_desc(v: AsyncExecutor) -> String {
     .into_owned()
 }
 
+fn sched_desc(v: ScheduleBackend) -> String {
+    match v {
+        ScheduleBackend::Manual => t!("sched.desc_manual"),
+        ScheduleBackend::Nano => t!("sched.desc_nano"),
+        ScheduleBackend::Dynamic => t!("sched.desc_dynamic"),
+    }
+    .into_owned()
+}
+
 fn vsync_desc(v: VsyncMode) -> String {
     match v {
         VsyncMode::Auto => t!("accel.desc_vsync_auto"),
@@ -592,7 +637,10 @@ struct TuneVisible {
 
 /// 开机矩阵待测（与固件 `config::needs_render_bench` 同逻辑 + half）：
 /// Blt 下 workers/dist 不参测，单核下 dist 不参测。
-fn bench_pending(m: &RenderConfig) -> bool {
+/// `workers`/`dist` 读 `[schedule]`（搬家后位置；`render` 下是 legacy 别名，
+/// `coerce_loaded` 已迁移，此处只认新位置）。
+fn bench_pending(cfg: &FileConfig) -> bool {
+    let (m, s) = (&cfg.render, &cfg.schedule);
     if m.mode == RenderMode::Auto && m.measured_render == RenderMode::Auto {
         return true;
     }
@@ -602,15 +650,15 @@ fn bench_pending(m: &RenderConfig) -> bool {
         RenderMode::Auto => m.measured_render == RenderMode::Blt,
     };
     if !render_is_blt
-        && m.workers == WorkersMode::Auto
+        && s.workers == WorkersMode::Auto
         && m.measured_workers == WorkersMode::Auto
     {
         return true;
     }
     let dist_in_play = !render_is_blt
-        && m.workers != WorkersMode::BspOnly
-        && !(m.workers == WorkersMode::Auto && m.measured_workers == WorkersMode::BspOnly);
-    if dist_in_play && m.dist == DistMode::Auto && m.measured_dist == DistMode::Auto {
+        && s.workers != WorkersMode::BspOnly
+        && !(s.workers == WorkersMode::Auto && m.measured_workers == WorkersMode::BspOnly);
+    if dist_in_play && s.dist == DistMode::Auto && m.measured_dist == DistMode::Auto {
         return true;
     }
     // half 自带 bench（冠军计时取半）：无记忆即待测。
@@ -633,11 +681,12 @@ fn bench_pending(m: &RenderConfig) -> bool {
 
 /// 微调区显隐：frames=矩阵有待测；tile=直写全核且分工沾 tile；
 /// vfps=static 封顶/auto 达标线；buf=非 Blt（Blt 已是单 push）。
-fn tune_visible(m: &RenderConfig) -> TuneVisible {
-    let dist_in_play = m.mode != RenderMode::Blt && m.workers != WorkersMode::BspOnly;
+fn tune_visible(cfg: &FileConfig) -> TuneVisible {
+    let (m, s) = (&cfg.render, &cfg.schedule);
+    let dist_in_play = m.mode != RenderMode::Blt && s.workers != WorkersMode::BspOnly;
     TuneVisible {
-        frames: bench_pending(m),
-        tile: dist_in_play && (m.dist == DistMode::Auto || m.dist == DistMode::Tile),
+        frames: bench_pending(cfg),
+        tile: dist_in_play && (s.dist == DistMode::Auto || s.dist == DistMode::Tile),
         vfps: m.vsync == VsyncMode::Auto || m.vsync == VsyncMode::Static,
         buf: m.mode != RenderMode::Blt,
     }
@@ -646,9 +695,17 @@ fn tune_visible(m: &RenderConfig) -> TuneVisible {
 /// 读盘钳制：Blt 三个非上屏操作 GUI 置灰不可选，残留值钳回 B2V
 /// （播放行为无变化——固件上屏路本来就只认 B2V；手写值想出引擎数
 /// 的改完别点保存，或固件侧照读，见 player.md）。
-fn coerce_loaded(mut cfg: FileConfig) -> FileConfig {
+/// `[schedule]` 缺表迁移：老文件 `[render]` 下的 workers/dist 搬到新位置，
+/// 原位置复位 Auto（下次存盘即新格式；固件侧同规则，见 `config::load`）。
+fn coerce_loaded(mut cfg: FileConfig, has_schedule: bool) -> FileConfig {
     if cfg.render.blt_op != BltOpKind::BufferToVideo {
         cfg.render.blt_op = BltOpKind::BufferToVideo;
+    }
+    if !has_schedule {
+        cfg.schedule.workers = cfg.render.workers;
+        cfg.schedule.dist = cfg.render.dist;
+        cfg.render.workers = WorkersMode::Auto;
+        cfg.render.dist = DistMode::Auto;
     }
     cfg
 }
@@ -864,7 +921,11 @@ impl App {
         match std::fs::read_to_string(&path) {
             Ok(text) => match toml::from_str::<FileConfig>(&text) {
                 Ok(cfg) => {
-                    let cfg = coerce_loaded(cfg);
+                    // 缺 `[schedule]` 表即老文件：`[render]` 旧键迁过来（见 coerce）。
+                    let has_schedule = toml::from_str::<toml::Table>(&text)
+                        .map(|t| t.contains_key("schedule"))
+                        .unwrap_or(false);
+                    let cfg = coerce_loaded(cfg, has_schedule);
                     let msg = t!(
                         "status.loaded",
                         path = path.clone(),
@@ -1206,30 +1267,44 @@ impl App {
                     ui.add_space(10.0);
                 }
                 // Blt 恒单线程：workers 整组不可选，直接隐藏（不摆开关也不留提示）。
-                if self.cfg.render.mode != RenderMode::Blt {
-                    ui.label(t!("accel.workers"));
-                    ui.horizontal(|ui| {
-                        for v in WorkersMode::ALL {
-                            if self.option_button(ui, self.cfg.render.workers == v, v.file_str()) {
-                                self.cfg.render.workers = v;
-                            }
+                // backend 行常摆（nano+blt 合法：单核泵走 Blt 引擎；manual/dist 才看 render）。
+                ui.label(t!("sched.backend"));
+                ui.horizontal(|ui| {
+                    for v in ScheduleBackend::ALL {
+                        if self.option_button(ui, self.cfg.schedule.backend == v, v.file_str()) {
+                            self.cfg.schedule.backend = v;
                         }
-                    });
-                    ui.small(workers_desc(self.cfg.render.workers));
-                    ui.add_space(10.0);
-                    // dist 只在直写 + 全核时有意义：单核下整组隐藏。
-                    if self.cfg.render.workers != WorkersMode::BspOnly {
-                        ui.label(t!("accel.dist"));
-                        // 一行四个（窄窗自动换行保底，不断尾；与 blt 行同式）。
-                        ui.horizontal_wrapped(|ui| {
-                            for v in DistMode::ALL {
-                                if self.option_button(ui, self.cfg.render.dist == v, v.file_str()) {
-                                    self.cfg.render.dist = v;
+                    }
+                });
+                ui.small(sched_desc(self.cfg.schedule.backend));
+                ui.add_space(10.0);
+                if self.cfg.render.mode != RenderMode::Blt {
+                    // manual 后端才用 workers/dist：执行器后端整组隐藏。
+                    if self.cfg.schedule.backend == ScheduleBackend::Manual {
+                        ui.label(t!("accel.workers"));
+                        ui.horizontal(|ui| {
+                            for v in WorkersMode::ALL {
+                                if self.option_button(ui, self.cfg.schedule.workers == v, v.file_str()) {
+                                    self.cfg.schedule.workers = v;
                                 }
                             }
                         });
-                        ui.small(dist_desc(self.cfg.render.dist));
+                        ui.small(workers_desc(self.cfg.schedule.workers));
                         ui.add_space(10.0);
+                        // dist 只在直写 + 全核时有意义：单核下整组隐藏。
+                        if self.cfg.schedule.workers != WorkersMode::BspOnly {
+                            ui.label(t!("accel.dist"));
+                            // 一行四个（窄窗自动换行保底，不断尾；与 blt 行同式）。
+                            ui.horizontal_wrapped(|ui| {
+                                for v in DistMode::ALL {
+                                    if self.option_button(ui, self.cfg.schedule.dist == v, v.file_str()) {
+                                        self.cfg.schedule.dist = v;
+                                    }
+                                }
+                            });
+                            ui.small(dist_desc(self.cfg.schedule.dist));
+                            ui.add_space(10.0);
+                        }
                     }
                 }
                 ui.label(t!("accel.vsync"));
@@ -1259,7 +1334,7 @@ impl App {
                 }
                 ui.add_space(10.0);
                 // 微调只摆本模式用得上的，整组无关直接隐藏（判定见 `tune_visible`）。
-                let vis = tune_visible(&self.cfg.render);
+                let vis = tune_visible(&self.cfg);
                 if vis.frames || vis.tile || vis.vfps || vis.buf {
                     ui.label(t!("tune.heading"));
                     ui.small(t!("tune.hint"));
@@ -1513,8 +1588,9 @@ impl App {
                 if self.cfg.render.mode == RenderMode::Blt {
                     ui.label(t!("sum.blt", v = self.cfg.render.blt_op.file_str()));
                 }
-                ui.label(t!("sum.workers", v = self.cfg.render.workers.file_str()));
-                ui.label(t!("sum.dist", v = self.cfg.render.dist.file_str()));
+                ui.label(t!("sum.workers", v = self.cfg.schedule.workers.file_str()));
+                ui.label(t!("sum.dist", v = self.cfg.schedule.dist.file_str()));
+                ui.label(t!("sum.backend", v = self.cfg.schedule.backend.file_str()));
                 ui.label(t!("sum.vsync", v = self.cfg.render.vsync.file_str()));
                 ui.label(self.render_measured_line());
                 ui.label(t!(
@@ -1810,16 +1886,16 @@ mod blackbox_matrix {
         workers: WorkersMode,
         dist: DistMode,
         vsync: VsyncMode,
-    ) -> RenderConfig {
-        let mut m = RenderConfig::default();
-        m.mode = mode;
-        m.workers = workers;
-        m.dist = dist;
-        m.vsync = vsync;
-        m
+    ) -> FileConfig {
+        let mut cfg = FileConfig::default();
+        cfg.render.mode = mode;
+        cfg.render.vsync = vsync;
+        cfg.schedule.workers = workers;
+        cfg.schedule.dist = dist;
+        cfg
     }
 
-    /// 全档位笛卡尔回写：9 accel × 3 render × 3 workers × 4 dist × 4 vsync × 4 blt × 3 async，
+    /// 全档位笛卡尔回写：9 accel × 3 render × 3 workers × 4 dist × 4 vsync × 4 blt × 3 async × 3 sched，
     /// 序列化再解析必须逐字节等价（顺序/缺键都由 serde 保证，不许丢字段）。
     #[test]
     fn schema_roundtrip_matrix() {
@@ -1831,8 +1907,10 @@ mod blackbox_matrix {
                         for v in VsyncMode::ALL {
                             for b in BltOpKind::ALL {
                                 for e in AsyncExecutor::ALL {
-                                    roundtrip_one(a, m, w, d, v, b, e);
-                                    n += 1;
+                                    for s in ScheduleBackend::ALL {
+                                        roundtrip_one(a, m, w, d, v, b, e, s);
+                                        n += 1;
+                                    }
                                 }
                             }
                         }
@@ -1840,10 +1918,12 @@ mod blackbox_matrix {
                 }
             }
         }
-        assert_eq!(n, 9 * 3 * 3 * 4 * 4 * 4 * 3);
+        assert_eq!(n, 9 * 3 * 3 * 4 * 4 * 4 * 3 * 3);
     }
 
-    /// 单组回写断言（从笛卡尔里抽出来：7 层嵌套塞不进 100 列）。
+    /// 单组回写断言（从笛卡尔里抽出来：8 层嵌套塞不进 100 列）。
+    /// `workers`/`dist` 走新位置 `[schedule]`（`render` 下留 legacy 默认，
+    /// 缺表迁移另见 `schedule_roundtrip_matrix`）。
     fn roundtrip_one(
         a: AccelLevel,
         m: RenderMode,
@@ -1852,14 +1932,15 @@ mod blackbox_matrix {
         v: VsyncMode,
         b: BltOpKind,
         e: AsyncExecutor,
+        s: ScheduleBackend,
     ) {
         let cfg = FileConfig {
             version: 1,
             accel: AccelConfig { level: a },
             render: RenderConfig {
                 mode: m,
-                workers: w,
-                dist: d,
+                workers: WorkersMode::Auto,
+                dist: DistMode::Auto,
                 vsync: v,
                 blt_op: b,
                 tune: RenderTune {
@@ -1898,12 +1979,13 @@ mod blackbox_matrix {
                 strict: false,
             },
             r#async: AsyncConfig { executor: e },
+            schedule: ScheduleConfig { backend: s, workers: w, dist: d },
         };
         let text = toml::to_string(&cfg).unwrap();
         let back: FileConfig = toml::from_str(&text).unwrap();
         assert_eq!(
             back, cfg,
-            "roundtrip {a:?}/{m:?}/{w:?}/{d:?}/{v:?}/{b:?}/{e:?}"
+            "roundtrip {a:?}/{m:?}/{w:?}/{d:?}/{v:?}/{b:?}/{e:?}/{s:?}"
         );
     }
 
@@ -2032,7 +2114,8 @@ mod blackbox_matrix {
         ] {
             let text = format!("[render]\nblt_op = \"{input}\"\n");
             let cfg: FileConfig = toml::from_str(&text).unwrap();
-            assert_eq!(coerce_loaded(cfg).render.blt_op, expected, "{input}");
+            // 该文本无 `[schedule]` 表（has_schedule=false，走缺表迁移，不影响 blt 断言）。
+            assert_eq!(coerce_loaded(cfg, false).render.blt_op, expected, "{input}");
         }
     }
 
@@ -2052,7 +2135,7 @@ mod blackbox_matrix {
     #[test]
     fn bench_pending_matrix() {
         // 基线：全 auto 无记忆 → 必测。
-        assert!(bench_pending(&RenderConfig::default()));
+        assert!(bench_pending(&FileConfig::default()));
         // 全显式（Direct/BspOnly/Static/Off）→ 跳过。
         let mut m = rc(RenderMode::Direct, WorkersMode::BspOnly, DistMode::Static, VsyncMode::Off);
         assert!(!bench_pending(&m));
@@ -2060,13 +2143,13 @@ mod blackbox_matrix {
         m = rc(RenderMode::Direct, WorkersMode::Auto, DistMode::Auto, VsyncMode::Off);
         assert!(bench_pending(&m));
         // workers 已记忆 BspOnly → dist 不参测 → 跳过。
-        m.measured_workers = WorkersMode::BspOnly;
+        m.render.measured_workers = WorkersMode::BspOnly;
         assert!(!bench_pending(&m));
         // Direct + 全核 + dist auto 无记忆 → 测 dist。
         m = rc(RenderMode::Direct, WorkersMode::All, DistMode::Auto, VsyncMode::Off);
         assert!(bench_pending(&m));
         // dist 已记忆 → 跳过。
-        m.measured_dist = DistMode::Static;
+        m.render.measured_dist = DistMode::Static;
         assert!(!bench_pending(&m));
         // Blt 定死：workers/dist 不参测（auto 也白搭）。
         m = rc(RenderMode::Blt, WorkersMode::Auto, DistMode::Auto, VsyncMode::Off);
@@ -2075,42 +2158,42 @@ mod blackbox_matrix {
         m = rc(RenderMode::Auto, WorkersMode::Auto, DistMode::Auto, VsyncMode::Off);
         assert!(bench_pending(&m));
         // mode auto 已记忆 Direct + workers auto 无记忆 → 测 workers。
-        m.measured_render = RenderMode::Direct;
+        m.render.measured_render = RenderMode::Direct;
         assert!(bench_pending(&m));
         // mode auto 已记忆 Blt + workers auto 无记忆 → workers 被忽略 → 跳过。
-        m.measured_render = RenderMode::Blt;
+        m.render.measured_render = RenderMode::Blt;
         assert!(!bench_pending(&m));
         // vsync auto 无记忆 → 测（其余全显式）。
         m = rc(RenderMode::Direct, WorkersMode::BspOnly, DistMode::Static, VsyncMode::Auto);
         assert!(bench_pending(&m));
         // vsync auto 已记忆 → 跳过。
-        m.measured_vsync = VsyncMode::Static;
+        m.render.measured_vsync = VsyncMode::Static;
         assert!(!bench_pending(&m));
         // half 无记忆 → 必测（其余全显式）。
         m = rc(RenderMode::Direct, WorkersMode::BspOnly, DistMode::Static, VsyncMode::Half);
         assert!(bench_pending(&m));
         // half 已记忆 → 跳过。
-        m.measured_vsync_fps = 45;
+        m.render.measured_vsync_fps = 45;
         assert!(!bench_pending(&m));
         // 显式 half + dist auto 无记忆（全核）→ dist 照测。
         m = rc(RenderMode::Direct, WorkersMode::All, DistMode::Auto, VsyncMode::Half);
-        m.measured_vsync_fps = 45;
+        m.render.measured_vsync_fps = 45;
         assert!(bench_pending(&m));
         // Blt 引擎对照：Blt 在测 + 选中非 B2V → 必测（只出数）。
         m = rc(RenderMode::Blt, WorkersMode::BspOnly, DistMode::Static, VsyncMode::Off);
-        m.blt_op = BltOpKind::VideoToBltBuffer;
+        m.render.blt_op = BltOpKind::VideoToBltBuffer;
         assert!(bench_pending(&m));
         // 同上但选中 B2V → B2V 格本就覆盖，无额外待测。
-        m.blt_op = BltOpKind::BufferToVideo;
+        m.render.blt_op = BltOpKind::BufferToVideo;
         assert!(!bench_pending(&m));
         // Blt 不在测（Direct 定死）→ 选中啥都不测 op 格。
         m = rc(RenderMode::Direct, WorkersMode::BspOnly, DistMode::Static, VsyncMode::Off);
-        m.blt_op = BltOpKind::VideoFill;
+        m.render.blt_op = BltOpKind::VideoFill;
         assert!(!bench_pending(&m));
         // mode auto 已记忆 Blt + 选中非 B2V → Blt 在测 → 测 op 格。
         m = rc(RenderMode::Auto, WorkersMode::BspOnly, DistMode::Static, VsyncMode::Off);
-        m.measured_render = RenderMode::Blt;
-        m.blt_op = BltOpKind::VideoFill;
+        m.render.measured_render = RenderMode::Blt;
+        m.render.blt_op = BltOpKind::VideoFill;
         assert!(bench_pending(&m));
     }
 
@@ -2119,7 +2202,7 @@ mod blackbox_matrix {
     fn tune_visible_matrix() {
         // 全 auto 无记忆：全摆。
         assert_eq!(
-            tune_visible(&RenderConfig::default()),
+            tune_visible(&FileConfig::default()),
             TuneVisible { frames: true, tile: true, vfps: true, buf: true }
         );
         // Blt 定死：只剩 vfps（auto）+ frames（render auto 无记忆）。
@@ -2143,7 +2226,7 @@ mod blackbox_matrix {
         ] {
             let mut m = rc(RenderMode::Direct, WorkersMode::All, d, VsyncMode::Off);
             // dist 无记忆会点亮 frames，先给记忆压住，只看 tile。
-            m.measured_dist = DistMode::Static;
+            m.render.measured_dist = DistMode::Static;
             assert_eq!(
                 tune_visible(&m),
                 TuneVisible { frames: false, tile, vfps: false, buf: true },
@@ -2164,8 +2247,8 @@ mod blackbox_matrix {
                 v,
             );
             // 无关记忆先压住（auto 无记忆会点亮 frames，half 无记忆同理），只看 vfps。
-            m.measured_vsync = VsyncMode::Static;
-            m.measured_vsync_fps = 45;
+            m.render.measured_vsync = VsyncMode::Static;
+            m.render.measured_vsync_fps = 45;
             let vis = tune_visible(&m);
             assert_eq!(vis.vfps, vfps, "{v:?}");
             assert!(!vis.frames && !vis.tile && vis.buf, "{v:?}");
@@ -2173,6 +2256,47 @@ mod blackbox_matrix {
         // half 无记忆 → frames 亮（自带 bench）。
         let m = rc(RenderMode::Direct, WorkersMode::BspOnly, DistMode::Static, VsyncMode::Half);
         assert!(tune_visible(&m).frames);
+    }
+
+    /// `[schedule]` 三档位回写 + 缺表迁移：36 组合不断字段；
+    /// 老文件（`[render]` 旧键、无 `[schedule]` 表）迁到新位置，原位置复位。
+    #[test]
+    fn schedule_roundtrip_matrix() {
+        for b in ScheduleBackend::ALL {
+            for w in WorkersMode::ALL {
+                for d in DistMode::ALL {
+                    let mut cfg = FileConfig::default();
+                    cfg.schedule.backend = b;
+                    cfg.schedule.workers = w;
+                    cfg.schedule.dist = d;
+                    let back: FileConfig =
+                        toml::from_str(&toml::to_string(&cfg).unwrap()).unwrap();
+                    assert_eq!(back.schedule.backend, b);
+                    assert_eq!(back.schedule.workers, w);
+                    assert_eq!(back.schedule.dist, d);
+                    assert_eq!(back, cfg);
+                }
+            }
+        }
+        // 老文件：`[render]` 旧键 + 无 `[schedule]` 表 → 迁到新位置。
+        let old: FileConfig = toml::from_str(
+            "version = 1\n[render]\nmode = \"direct\"\nworkers = \"all\"\ndist = \"tile\"\n",
+        )
+        .unwrap();
+        assert_eq!(old.render.workers, WorkersMode::All);
+        let moved = coerce_loaded(old, false);
+        assert_eq!(moved.schedule.workers, WorkersMode::All);
+        assert_eq!(moved.schedule.dist, DistMode::Tile);
+        assert_eq!(moved.render.workers, WorkersMode::Auto);
+        assert_eq!(moved.render.dist, DistMode::Auto);
+        // 新文件：`[schedule]` 表在场 → `[render]` 残留不动（固件侧同规则）。
+        let new: FileConfig = toml::from_str(
+            "version = 1\n[render]\nworkers = \"all\"\n[schedule]\nbackend = \"nano\"\n",
+        )
+        .unwrap();
+        let kept = coerce_loaded(new, true);
+        assert_eq!(kept.schedule.backend, ScheduleBackend::Nano);
+        assert_eq!(kept.render.workers, WorkersMode::All);
     }
 }
 

@@ -252,6 +252,93 @@ keys = [
 expect = ["play: path=direct_loop"]
 soak_sec = 15
 
+# 调度后端 nano：单核执行器泵走渲染路径（direct 单核），workers/dist 忽略。
+[[case]]
+name = "video-nano"
+timeout_sec = 180
+needs_video = true
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+vsync = "off"
+[play]
+fps = "max"
+[wallpaper]
+enable = false
+[schedule]
+backend = "nano"
+"""
+boot_expect = ["cfg: version=1", "idle: ready"]
+keys = [
+  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
+  { send = "p", wait_after = 3 },
+  { send = "0", wait_for = ["menu: ready"], wait_after = 5 },
+]
+expect = ["play: path=nano_pump"]
+soak_sec = 15
+
+# 调度后端 dynamic：多核 steal 泵直写前台（Blt/影子/单核会回退，本矩阵直给合法组合）。
+[[case]]
+name = "video-dynamic"
+timeout_sec = 180
+needs_video = true
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+vsync = "off"
+[play]
+fps = "max"
+[wallpaper]
+enable = false
+[schedule]
+backend = "dynamic"
+"""
+boot_expect = ["cfg: version=1", "idle: ready"]
+keys = [
+  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
+  { send = "p", wait_after = 3 },
+  { send = "0", wait_for = ["menu: ready"], wait_after = 5 },
+]
+expect = ["play: path=dynamic_draw", "play: alive round="]
+soak_sec = 20
+
+# 调度新位置行为证明：[schedule] backend=manual + workers/dist 生效，
+# 与旧 `[render]` 位置同语义（本用例直达 mp_draw；旧位置由其余 20+ case 覆盖）。
+[[case]]
+name = "video-manual-sched"
+timeout_sec = 180
+needs_video = true
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+vsync = "off"
+[play]
+fps = "max"
+[wallpaper]
+enable = false
+[schedule]
+backend = "manual"
+workers = "all"
+dist = "static"
+"""
+boot_expect = ["cfg: version=1", "idle: ready"]
+keys = [
+  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
+  { send = "p", wait_after = 3 },
+  { send = "0", wait_for = ["menu: ready"], wait_after = 5 },
+]
+expect = ["play: path=mp_draw", "sched.backend=Manual"]
+soak_sec = 15
+
 # 诊断键：弹窗 → p 进纯播放器 → 1/4/7 各出数，q 回壁纸（pause_return 吞键）。
 [[case]]
 name = "diag-keys"

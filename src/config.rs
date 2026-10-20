@@ -43,6 +43,12 @@
 //! uki = true              # 自动发现 EFI/Linux/*.efi（标题取 .uname 区，读不到用文件名）
 //! macos = true            # OpenCore 链式接力（EFI/OC/OpenCore.efi 存在即链）
 //! strict = false          # 严格模式：BLS 只认本卷 + XBOOTLDR 卷（systemd 严格模式)
+//! [schedule]
+//! backend = "manual"      # 调度后端："manual"（手写 MP，workers/dist 生效）
+//!                         # | "nano"（单核执行器泵，workers/dist 忽略）
+//!                         # | "dynamic"（多核 steal 泵，只直写前台；见 fallbacks）
+//! workers = "auto"        # manual 后端多核开关（auto | bsp_only | all）
+//! dist = "auto"           # manual 后端分工（auto | static | tile | dynamic）
 //! [async]
 //! executor = "all"        # 诊断项 a 跑哪条执行器线："all"（默认，都跑）| "nano" | "dynamic"
 //! ```
@@ -137,6 +143,9 @@ impl RenderMode {
 
 /// 多核开关：`Auto` = 校准矩阵实测（BSP 单核直写 vs 全核并行），只在
 /// `render.mode` 允许直写时有意义（Blt 路径恒单线程，忽略本项）。
+///
+/// 新位置是 `[schedule] workers`；这里是 legacy 别名：`[schedule]` 表存在即忽略，
+/// 缺表老文件继续认这里的值（一次性，不写回）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkersMode {
@@ -193,6 +202,8 @@ impl CopyWidth {
 /// 顺带把 OSD 行区划出 tile，AP 不再盖 OSD 字）；`Dynamic` = 按实测核速加权分行
 /// （快核多拿；校准时 probe 定权计时，播放时每轮按各核上一轮耗时重算，无 tile 游标开销）。
 /// `Auto` = 同机实测三选一。
+///
+/// 新位置是 `[schedule] dist`；这里是 legacy 别名（规则同 `WorkersMode`）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum DistMode {
@@ -259,6 +270,51 @@ impl AsyncExecutor {
 #[serde(default)]
 pub struct AsyncConfig {
     pub executor: AsyncExecutor,
+}
+
+/// 调度后端（`[schedule] backend`，生产路径走哪套调度）：
+/// - `Manual`（默认）：手写 MP（`mp_draw` 常驻 AP + 世代同步；`blt/direct_loop`
+///   单核泵），`workers`/`dist` 生效，行为与搬家前逐行一致；
+/// - `Nano`：单核执行器泵（一个永不结束的 pump task：取帧 → `upload_frame` →
+///   限速/掉帧），`render` 全 honoring（blt/direct/影子都走），`workers`/`dist` 忽略；
+/// - `Dynamic`：多核 steal 泵（按核分带，BSP 每帧 spawn，AP steal；BSP 独判掉帧，
+///   确定性与手写一致）：只直写前台。`render=blt`（Blt 引擎单线程）/ 无 MP /
+///   `tune.buffers>0`（影子环 v1 不支持）时 warn + 回退（前两者回 nano，后者回 manual）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ScheduleBackend {
+    #[default]
+    Manual,
+    Nano,
+    Dynamic,
+}
+
+impl ScheduleBackend {
+    const fn as_u8(self) -> u8 {
+        match self {
+            Self::Manual => 0,
+            Self::Nano => 1,
+            Self::Dynamic => 2,
+        }
+    }
+    fn from_u8(v: u8) -> Self {
+        match v {
+            1 => Self::Nano,
+            2 => Self::Dynamic,
+            _ => Self::Manual,
+        }
+    }
+}
+
+/// `[schedule]`：手写调度独立成矩阵配置（P2.5）。`workers`/`dist` 从 `[render]`
+/// 搬家至此；缺表老文件继续认 `[render]` 旧键（`load` 一次性 fallback + 警告，
+/// 不写回）。`measured_*` 记忆仍在 `[render]`（校准维度未变）。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct ScheduleConfig {
+    pub backend: ScheduleBackend,
+    pub workers: WorkersMode,
+    pub dist: DistMode,
 }
 
 /// 垂直同步（软件帧预算，GOP 无硬件 vsync）：`Static` = 按 `tune.vsync_fps`
@@ -365,7 +421,9 @@ impl Default for RenderTune {
 #[serde(default)]
 pub struct RenderConfig {
     pub mode: RenderMode,
+    /// legacy 别名（见 `WorkersMode`）：`[schedule]` 表存在即忽略。
     pub workers: WorkersMode,
+    /// legacy 别名（见 `DistMode`）：`[schedule]` 表存在即忽略。
     pub dist: DistMode,
     pub vsync: VsyncMode,
     pub blt_op: BltOpKind,
@@ -398,6 +456,7 @@ pub struct Config {
     pub play: PlayConfig,
     pub wallpaper: WallpaperConfig,
     pub boot: BootConfig,
+    pub schedule: ScheduleConfig,
     pub r#async: AsyncConfig,
 }
 
@@ -410,6 +469,7 @@ impl Default for Config {
             play: PlayConfig::default(),
             wallpaper: WallpaperConfig::default(),
             boot: BootConfig::default(),
+            schedule: ScheduleConfig::default(),
             r#async: AsyncConfig::default(),
         }
     }
@@ -590,28 +650,45 @@ impl Default for PlayConfig {
     }
 }
 
-/// 解析结果：配置 + 可选的屏显警告（文件不存在不算错，返回 None）。
-pub fn parse() -> (Config, Option<String>) {
+/// 解析结果：配置 + 可选的屏显警告（文件不存在不算错，返回 None）
+/// + `[schedule]` 表是否存在（`workers`/`dist` 搬家后的新老位置裁决用）。
+pub fn parse() -> (Config, Option<String>, bool) {
     let mut fs = match Fs::new() {
         Ok(f) => f,
-        Err(e) => return (Config::default(), Some(format!("cfg: open volume failed: {:?}", e))),
+        Err(e) => {
+            return (
+                Config::default(),
+                Some(format!("cfg: open volume failed: {:?}", e)),
+                false,
+            );
+        }
     };
 
     let bytes = match fs.read_file(cstr16!("player.toml")) {
         Ok(b) => b,
         // 没有配置文件是正常情况：静默用默认。
         Err(NyaStatus::Uefi(err)) if err.status() == uefi::Status::NOT_FOUND => {
-            return (Config::default(), None)
+            return (Config::default(), None, false);
         }
-        Err(e) => return (Config::default(), Some(format!("cfg: read failed: {:?}", e))),
+        Err(e) => {
+            return (
+                Config::default(),
+                Some(format!("cfg: read failed: {:?}", e)),
+                false,
+            );
+        }
     };
 
     let text = String::from_utf8_lossy(&bytes);
+    let has_schedule = toml::from_str::<toml::Table>(&text)
+        .map(|t| t.contains_key("schedule"))
+        .unwrap_or(false);
     match toml::from_str::<Config>(&text) {
-        Ok(cfg) => (cfg, None),
+        Ok(cfg) => (cfg, None, has_schedule),
         Err(e) => (
             Config::default(),
             Some(format!("cfg: parse error: {} -- using defaults", e)),
+            false,
         ),
     }
 }
@@ -645,6 +722,8 @@ static BOOT_SHELL: AtomicU8 = AtomicU8::new(1);
 static BOOT_UKI: AtomicU8 = AtomicU8::new(1);
 static BOOT_MACOS: AtomicU8 = AtomicU8::new(1);
 static BOOT_STRICT: AtomicU8 = AtomicU8::new(0);
+/// `[schedule]` 调度后端（0 = manual，1 = nano，2 = dynamic）。
+static SCHED_BACKEND: AtomicU8 = AtomicU8::new(0);
 /// `[async]` 执行器线（0 = all，1 = nano，2 = dynamic；只驱动诊断项 `a`）。
 static ASYNC_EXECUTOR: AtomicU8 = AtomicU8::new(0);
 static TUNE_FRAMES: AtomicU32 = AtomicU32::new(default_frames());
@@ -676,11 +755,19 @@ static MAX_ACCEL: AtomicU8 = AtomicU8::new(0);
 
 /// 开机读一次；返回需要屏显的警告行。
 pub fn load() -> Option<String> {
-    let (cfg, warn) = parse();
+    let (cfg, warn, has_schedule) = parse();
     ACCEL.store(cfg.accel.level.as_u8(), Ordering::Relaxed);
     RENDER.store(cfg.render.mode.as_u8(), Ordering::Relaxed);
-    WORKERS.store(cfg.render.workers.as_u8(), Ordering::Relaxed);
-    DIST.store(cfg.render.dist.as_u8(), Ordering::Relaxed);
+    // workers/dist 搬家裁决：`[schedule]` 表存在用新位置，否则认 `[render]` 旧键
+    // （缺表老文件；显式旧键给一行警告后照读，不写回）。
+    let (workers, dist) = if has_schedule {
+        (cfg.schedule.workers, cfg.schedule.dist)
+    } else {
+        (cfg.render.workers, cfg.render.dist)
+    };
+    WORKERS.store(workers.as_u8(), Ordering::Relaxed);
+    DIST.store(dist.as_u8(), Ordering::Relaxed);
+    SCHED_BACKEND.store(cfg.schedule.backend.as_u8(), Ordering::Relaxed);
     VSYNC.store(cfg.render.vsync.as_u8(), Ordering::Relaxed);
     MEASURED_RENDER.store(cfg.render.measured_render.as_u8(), Ordering::Relaxed);
     MEASURED_WORKERS.store(cfg.render.measured_workers.as_u8(), Ordering::Relaxed);
@@ -718,12 +805,13 @@ pub fn load() -> Option<String> {
     BOOT_STRICT.store(cfg.boot.strict as u8, Ordering::Relaxed);
     ASYNC_EXECUTOR.store(cfg.r#async.executor.as_u8(), Ordering::Relaxed);
     log::info!(
-        "cfg: version={} accel.level={:?} render.mode={:?} workers={:?} dist={:?} vsync={:?} blt_op={:?} tune.frames={} measured(render={:?} workers={:?} dist={:?} vsync={:?} vhalf={} cores={}) play.fps={} play.fmt={:?} measured_max_fps={} wallpaper.fmt={:?} async.executor={:?} boot(auto={} win={} lin={} sh={} uki={} mac={} strict={})",
+        "cfg: version={} accel.level={:?} render.mode={:?} sched.backend={:?} workers={:?} dist={:?} vsync={:?} blt_op={:?} tune.frames={} measured(render={:?} workers={:?} dist={:?} vsync={:?} vhalf={} cores={}) play.fps={} play.fmt={:?} measured_max_fps={} wallpaper.fmt={:?} async.executor={:?} boot(auto={} win={} lin={} sh={} uki={} mac={} strict={})",
         cfg.version,
         cfg.accel.level,
         cfg.render.mode,
-        cfg.render.workers,
-        cfg.render.dist,
+        cfg.schedule.backend,
+        workers,
+        dist,
         cfg.render.vsync,
         cfg.render.blt_op,
         cfg.render.tune.frames,
@@ -746,6 +834,14 @@ pub fn load() -> Option<String> {
         cfg.boot.macos,
         cfg.boot.strict,
     );
+    // 缺表老文件显式写了旧键：认旧值 + 提示搬家（不写回，下次 GUI 存盘即正）。
+    if !has_schedule
+        && (cfg.render.workers != WorkersMode::Auto || cfg.render.dist != DistMode::Auto)
+    {
+        return Some(String::from(
+            "cfg: [render] workers/dist moved to [schedule], honored this boot",
+        ));
+    }
     warn
 }
 
@@ -755,6 +851,11 @@ pub fn accel_level() -> AccelLevel {
 
 pub fn render_mode() -> RenderMode {
     RenderMode::from_u8(RENDER.load(Ordering::Relaxed))
+}
+
+/// 调度后端（默认 manual；nano/dynamic 走执行器泵，见 `video::exec`）。
+pub fn schedule_backend() -> ScheduleBackend {
+    ScheduleBackend::from_u8(SCHED_BACKEND.load(Ordering::Relaxed))
 }
 
 pub fn blt_op() -> BltOpKind {

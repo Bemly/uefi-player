@@ -13,12 +13,12 @@ level = "auto"          # auto | scalar | sse2 | ssse3 | sse41 | sse42 | avx | a
 
 [render]
 mode    = "auto"        # auto | direct | blt
-workers = "auto"        # auto | bsp_only | all（只对 direct 有效；Blt 恒单线程）
-dist    = "auto"        # auto | static | tile | dynamic（多核分工；只对 direct+all 有效）
 vsync   = "auto"        # auto | static | half | off（软件帧预算；旧 "on" 按 static 照读）
 blt_op  = "buffer_to_video"  # buffer_to_video | video_to_video | video_fill | video_to_blt_buffer
 # 只有 buffer_to_video 能上屏播视频（单发整推 + 混合整推都用它；GUI 只放行这一项，
 # 其余置灰展示不删）；其余三项只在矩阵里单发出数（引擎能力对照，不参选），Blt 不在测时跳过。
+# workers/dist 已搬家到 [schedule]（下）；残留旧键永久兼容（缺 [schedule] 表时照读，
+# [schedule] 在场则忽略；GUI 存盘即新格式）。
 # 首启校准记忆（固件回写，GUI 只读展示；"auto"/0 = 未测，下次启动必测）：
 measured_render  = "auto"  # "direct" | "blt"
 measured_workers = "auto"  # "bsp_only" | "all"
@@ -38,6 +38,13 @@ fps = "auto"            # auto | max | 1..240
                         # auto: 首启实测最大帧率并回写，按 min(视频帧率, 实测*3/4) 跑
 format = "qois"         # 片源格式：qois（1080p/video.qois）| raw（1080p/frameNNNN.raw）
 measured_max_fps = 0    # 固件实测回写（0 = 未测）；GUI 只读展示
+
+[schedule]
+backend = "manual"      # 调度后端：manual（手写 MP 三路，workers/dist 生效）
+                        # | nano（单核执行器泵走渲染路径，workers/dist 忽略）
+                        # | dynamic（多核 steal 泵，只直写前台；见下回退）
+workers = "auto"        # manual 后端多核开关：auto | bsp_only | all（只对 direct 有效）
+dist = "auto"           # manual 后端分工：auto | static | tile | dynamic（只对 direct+all 有效）
 
 [wallpaper]
 enable = false          # 菜单背景 + 引导过渡总开关
@@ -83,5 +90,13 @@ executor = "all"        # 诊断项 a 跑哪条执行器线：all（默认，都
   AP 永不碰 GOP；单核路走影子 + CPU 整推；Blt 单发路不变）。
   所选 `blt_op` 若非 `buffer_to_video`，矩阵里单发出数（引擎能力对照，不参选）。
 - `accel.level=auto`：探最高可用位宽；显式档位只管上限语义，实际搬运走位宽。
+- `schedule.backend=manual`：旧三路（blt 单线程引擎 / direct BSP 单核直写 /
+  direct 全核 `mp_draw` 常驻 AP + 世代同步），`workers`/`dist` 按直写/全核门控生效。
+- `schedule.backend=nano`：单核执行器泵（取帧→上屏→限速/掉帧一帧一调度），
+  `render`/影子/vsync 全 honoring，`workers`/`dist` 忽略。
+- `schedule.backend=dynamic`：多核 steal 泵（按核分带，BSP 每帧 spawn，AP steal，
+  BSP 独判掉帧/OSD，确定性与手写一致）。只直写前台：`render=blt`（Blt 引擎
+  单线程）/ 无 MP / 单核回 nano 泵并警告；`tune.buffers>0`（影子环 v1 不支持）
+  回 manual 并警告。缺 `[schedule]` 表的老文件继续认 `[render]` 旧键。
 - `async.executor`：只决定诊断项 `a` 跑 `nano`/`dynamic` 哪条线（`all` 都跑）；
   缺表缺键按 `all` 照读；生产调度不受影响。
