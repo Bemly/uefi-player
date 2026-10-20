@@ -62,7 +62,10 @@ pub fn get_multi_monitor(screen: &mut Screen) -> Result {
                 for mode in gop.modes() {
                     lines.push(info2str(&format!("query {:?}", h), *mode.info()));
                 }
-                lines.push(info2str(&format!("current {:?}", h), gop.current_mode_info()));
+                lines.push(info2str(
+                    &format!("current {:?}", h),
+                    gop.current_mode_info(),
+                ));
             }
         }
     }

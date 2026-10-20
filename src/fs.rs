@@ -6,7 +6,6 @@ use uefi::boot::{get_image_file_system, image_handle};
 use uefi::proto::media::file::{Directory, File, FileAttribute, FileInfo, FileMode, RegularFile};
 use uefi::{CStr16, Handle, Status};
 
-
 pub struct Fs {
     pub root_dir: Directory,
 }
@@ -14,7 +13,7 @@ pub struct Fs {
 impl Fs {
     pub fn new() -> Result<Self> {
         Ok(Self {
-            root_dir: get_image_file_system(image_handle())?.open_volume()?
+            root_dir: get_image_file_system(image_handle())?.open_volume()?,
         })
     }
 
@@ -47,7 +46,12 @@ impl Fs {
     }
 
     #[inline]
-    pub fn open_file_attr(&mut self, path: &CStr16, mode: FileMode, attr: FileAttribute) -> Result<RegularFile> {
+    pub fn open_file_attr(
+        &mut self,
+        path: &CStr16,
+        mode: FileMode,
+        attr: FileAttribute,
+    ) -> Result<RegularFile> {
         self.root_dir
             .open(path, mode, attr)?
             .into_regular_file()
@@ -74,15 +78,6 @@ impl Fs {
         let mut file = self.create_file(path)?;
         file.write(data).map_err(|e| e.status())?;
         file.flush()?;
-        Ok(())
-    }
-
-    /// 删除文件（BLS boot counting 改名用：读旧写新再删旧）。
-    /// 注意：必须用可写模式打开才能删（见 `write_file` 血泪注释）。
-    #[inline]
-    pub fn delete(&mut self, path: &CStr16) -> Result {
-        let old = self.open_file_attr(path, FileMode::ReadWrite, FileAttribute::empty())?;
-        let _ = old.delete();
         Ok(())
     }
 
@@ -128,10 +123,11 @@ impl Fs {
         let info = loop {
             match file.get_info::<FileInfo>(&mut info_buf) {
                 Ok(info) => break info,
-                Err(e) if e.status() == Status::BUFFER_TOO_SMALL =>
+                Err(e) if e.status() == Status::BUFFER_TOO_SMALL => {
                     if let Some(size) = *e.data() {
                         info_buf.resize(size, 0)
-                    },
+                    }
+                }
                 // 其他状态的Option均为None,这里拉平
                 Err(e) => Err(e.status())?,
             }
@@ -143,24 +139,4 @@ impl Fs {
 
         Ok(file_content)
     }
-
-    pub fn read_frame_next(&mut self, file: &mut RegularFile, buf: &mut Vec<u8>) -> Result<bool> {
-        // 读头
-        let mut qoi_size = [0u8; 4];
-        if file.read(&mut qoi_size)? < 4 {
-            return Ok(false);
-        }
-        let qoi_size = u32::from_le_bytes(qoi_size) as usize;
-
-        // 扩容缓冲区
-        if buf.len() < qoi_size {
-            buf.resize(qoi_size, 0);
-        }
-
-        // 写入一帧
-        file.read(&mut buf[..qoi_size])?;
-
-        Ok(true)
-    }
 }
-

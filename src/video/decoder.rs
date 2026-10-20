@@ -1,71 +1,8 @@
 use alloc::vec;
 use alloc::vec::Vec;
+use uefi::Status;
 use uefi::proto::console::gop::BltPixel;
 use uefi::proto::media::file::{File, FileInfo, RegularFile};
-use uefi::Status;
-
-///////// 全部写入内存
-pub struct VideoMemory {
-    pub data: Vec<u8>,
-    pub cursor: usize,
-}
-
-impl VideoMemory {
-    pub fn new(mut file: RegularFile) -> crate::error::Result<Self> {
-        let mut info_buf = vec![0u8; 128];
-        let info = loop {
-            match file.get_info::<FileInfo>(&mut info_buf) {
-                Ok(info) => break info,
-                Err(e) if e.status() == Status::BUFFER_TOO_SMALL =>
-                    if let Some(size) = *e.data() {
-                        info_buf.resize(size, 0)
-                    },
-                // 其他状态的Option均为None,这里拉平
-                Err(e) => Err(e.status())?,
-            }
-        };
-        let size = info.file_size() as usize;
-
-        // 一次性分配内存并读取
-        let mut buffer = vec![0u8; size];
-        file.read(&mut buffer)?;
-
-        Ok(Self {
-            data: buffer,
-            cursor: 0,
-        })
-    }
-
-    /// 模仿之前的 read_frame_next，但改为从内存切片
-    pub fn next_frame(&mut self, qoi_buf: &mut Vec<u8>) -> bool {
-        // 越界守卫：尾部不足 4 字节长度头时直接结束（此前直切会 panic）。
-        if self.cursor + 4 > self.data.len() {
-            return false;
-        }
-
-        // 假设你的每帧 QOI 数据前面有 4 字节长度信息（这是常见的拼接方式）
-        let len_bytes = &self.data[self.cursor..self.cursor + 4];
-        let frame_len = u32::from_le_bytes([len_bytes[0], len_bytes[1], len_bytes[2], len_bytes[3]]) as usize;
-
-        self.cursor += 4;
-        let end = self.cursor + frame_len;
-        // 长度超出剩余数据：文件截断，按结束处理（不 panic）。
-        if end > self.data.len() {
-            return false;
-        }
-
-        // 将这一帧的数据拷贝到 qoi_buf
-        qoi_buf.clear();
-        qoi_buf.extend_from_slice(&self.data[self.cursor..end]);
-
-        self.cursor = end;
-        true
-    }
-
-    pub fn rewind(&mut self) {
-        self.cursor = 0;
-    }
-}
 
 //////// 统一播放剪辑：预解码帧集（`Vec<Vec<BltPixel>>` + 游标）。
 //////// 片源双格式（`[play]/[wallpaper] format` 矩阵，见 `config::MediaFormat`）：
@@ -175,10 +112,20 @@ impl Clip {
             )));
         }
         if skipped > 0 {
-            log::warn!("{}: predecoded {} frames, skipped {} bad", tag, frames.len(), skipped);
+            log::warn!(
+                "{}: predecoded {} frames, skipped {} bad",
+                tag,
+                frames.len(),
+                skipped
+            );
         }
 
-        Ok(Self { w, h, frames, cursor: 0 })
+        Ok(Self {
+            w,
+            h,
+            frames,
+            cursor: 0,
+        })
     }
 
     /// 整文件读入后解码（`video.qois` / `wall.qois`）。
@@ -210,7 +157,8 @@ impl Clip {
         frame_bytes: usize,
         tag: &str,
     ) -> crate::error::Result<Self> {
-        let cdir = uefi::CString16::try_from(dir).map_err(|_| crate::error::NyaStatus::FromStrWithBufError)?;
+        let cdir = uefi::CString16::try_from(dir)
+            .map_err(|_| crate::error::NyaStatus::FromStrWithBufError)?;
         let entries = match fs.list_dir(&cdir) {
             Ok(e) => e,
             Err(crate::error::NyaStatus::Uefi(err)) if err.status() == uefi::Status::NOT_FOUND => {
@@ -218,7 +166,7 @@ impl Clip {
                     "{}: no {} directory",
                     tag,
                     dir
-                )))
+                )));
             }
             Err(e) => {
                 log::warn!("{}: list failed: {:?}", tag, e);
@@ -277,7 +225,12 @@ impl Clip {
             log::warn!("{}: skipped {} bad frame(s)", tag, skipped);
         }
         // raw 帧几何定值（1920x1080，见调用方 `frame_bytes`）。
-        Ok(Self { w: 1920, h: 1080, frames, cursor: 0 })
+        Ok(Self {
+            w: 1920,
+            h: 1080,
+            frames,
+            cursor: 0,
+        })
     }
 
     /// 极致性能：直接返回当前帧的像素引用，完全无拷贝，无解码。

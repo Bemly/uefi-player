@@ -14,8 +14,8 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
-use core::arch::x86_64::{__cpuid, __cpuid_count, _xgetbv};
 use core::arch::asm;
+use core::arch::x86_64::{__cpuid, __cpuid_count, _xgetbv};
 use core::time::Duration;
 
 use uefi::boot::{self, get_handle_for_protocol, open_protocol_exclusive};
@@ -146,11 +146,7 @@ fn print_group(
 }
 
 fn yn(b: bool) -> &'static str {
-    if b {
-        "YES"
-    } else {
-        "no"
-    }
+    if b { "YES" } else { "no" }
 }
 
 // ---------- 功能实测 ----------
@@ -317,63 +313,145 @@ pub fn run(screen: &mut Screen) -> Result {
         report,
         screen,
         "xsave: firmware OSXSAVE={} | now={} (tool sets CR4.OSXSAVE+XCR0 when firmware left it off)",
-        match fw_osxsave { Some(true) => "on", Some(false) => "off", None => "unk" },
-        if crate::diag::common::osxsave_on() { "on" } else { "off" }
+        match fw_osxsave {
+            Some(true) => "on",
+            Some(false) => "off",
+            None => "unk",
+        },
+        if crate::diag::common::osxsave_on() {
+            "on"
+        } else {
+            "off"
+        }
     );
 
     // ---- SIMD 支持度（全指令集矩阵） ----
     let f = cpuid_simd();
     tline!(report, screen, "-- SIMD cpuid --");
     print_group(
-        &mut report, screen, "leaf1 ECX", true, f.leaf1_ecx,
+        &mut report,
+        screen,
+        "leaf1 ECX",
+        true,
+        f.leaf1_ecx,
         &[
-            (0, "SSE3"), (1, "PCLMULQDQ"), (9, "SSSE3"), (12, "FMA"),
-            (13, "CMPXCHG16B"), (19, "SSE4.1"), (20, "SSE4.2"), (22, "MOVBE"),
-            (23, "POPCNT"), (25, "AES-NI"), (26, "XSAVE"), (27, "OSXSAVE"),
-            (28, "AVX"), (29, "F16C"), (30, "RDRAND"),
+            (0, "SSE3"),
+            (1, "PCLMULQDQ"),
+            (9, "SSSE3"),
+            (12, "FMA"),
+            (13, "CMPXCHG16B"),
+            (19, "SSE4.1"),
+            (20, "SSE4.2"),
+            (22, "MOVBE"),
+            (23, "POPCNT"),
+            (25, "AES-NI"),
+            (26, "XSAVE"),
+            (27, "OSXSAVE"),
+            (28, "AVX"),
+            (29, "F16C"),
+            (30, "RDRAND"),
         ],
     );
     print_group(
-        &mut report, screen, "leaf1 EDX", true, f.leaf1_edx,
+        &mut report,
+        screen,
+        "leaf1 EDX",
+        true,
+        f.leaf1_edx,
         &[(23, "MMX"), (24, "FXSR"), (25, "SSE"), (26, "SSE2")],
     );
     print_group(
-        &mut report, screen, "leaf7 EBX", f.has_leaf7, f.leaf7_ebx,
+        &mut report,
+        screen,
+        "leaf7 EBX",
+        f.has_leaf7,
+        f.leaf7_ebx,
         &[
-            (0, "FSGSBASE"), (3, "BMI1"), (5, "AVX2"), (8, "BMI2"),
-            (16, "AVX512F"), (17, "AVX512DQ"), (18, "RDSEED"), (19, "ADX"),
-            (20, "SMAP"), (21, "AVX512IFMA"), (23, "CLFLUSHOPT"),
-            (26, "AVX512PF"), (27, "AVX512ER"), (28, "AVX512CD"),
-            (29, "SHA"), (30, "AVX512BW"), (31, "AVX512VL"),
+            (0, "FSGSBASE"),
+            (3, "BMI1"),
+            (5, "AVX2"),
+            (8, "BMI2"),
+            (16, "AVX512F"),
+            (17, "AVX512DQ"),
+            (18, "RDSEED"),
+            (19, "ADX"),
+            (20, "SMAP"),
+            (21, "AVX512IFMA"),
+            (23, "CLFLUSHOPT"),
+            (26, "AVX512PF"),
+            (27, "AVX512ER"),
+            (28, "AVX512CD"),
+            (29, "SHA"),
+            (30, "AVX512BW"),
+            (31, "AVX512VL"),
         ],
     );
     print_group(
-        &mut report, screen, "leaf7 ECX", f.has_leaf7, f.leaf7_ecx,
+        &mut report,
+        screen,
+        "leaf7 ECX",
+        f.has_leaf7,
+        f.leaf7_ecx,
         &[
-            (1, "AVX512VBMI"), (8, "GFNI"), (9, "VAES"),
-            (10, "VPCLMULQDQ"), (11, "AVX512VNNI"), (12, "AVX512BITALG"),
+            (1, "AVX512VBMI"),
+            (8, "GFNI"),
+            (9, "VAES"),
+            (10, "VPCLMULQDQ"),
+            (11, "AVX512VNNI"),
+            (12, "AVX512BITALG"),
             (14, "AVX512VPOPCNTDQ"),
         ],
     );
     print_group(
-        &mut report, screen, "leaf7 EDX", f.has_leaf7, f.leaf7_edx,
+        &mut report,
+        screen,
+        "leaf7 EDX",
+        f.has_leaf7,
+        f.leaf7_edx,
         &[
-            (2, "AVX5124VNNIW"), (3, "AVX5124FMAPS"), (8, "AVX512VP2INTERSECT"),
-            (22, "AMX-BF16"), (23, "AVX512-FP16"), (24, "AMX-TILE"),
+            (2, "AVX5124VNNIW"),
+            (3, "AVX5124FMAPS"),
+            (8, "AVX512VP2INTERSECT"),
+            (22, "AMX-BF16"),
+            (23, "AVX512-FP16"),
+            (24, "AMX-TILE"),
             (25, "AMX-INT8"),
         ],
     );
     print_group(
-        &mut report, screen, "leaf7.1 EAX", f.has_leaf7s1, f.leaf7s1_eax,
+        &mut report,
+        screen,
+        "leaf7.1 EAX",
+        f.has_leaf7s1,
+        f.leaf7s1_eax,
         &[(4, "AVX-VNNI"), (5, "AVX512-BF16"), (23, "AVX-IFMA")],
     );
     print_group(
-        &mut report, screen, "ext 80000001h ECX", f.has_ext, f.ext_ecx,
-        &[(5, "LZCNT"), (6, "SSE4a"), (8, "PREFETCHW"), (16, "FMA4"), (21, "TBM")],
+        &mut report,
+        screen,
+        "ext 80000001h ECX",
+        f.has_ext,
+        f.ext_ecx,
+        &[
+            (5, "LZCNT"),
+            (6, "SSE4a"),
+            (8, "PREFETCHW"),
+            (16, "FMA4"),
+            (21, "TBM"),
+        ],
     );
     print_group(
-        &mut report, screen, "ext 80000001h EDX", f.has_ext, f.ext_edx,
-        &[(22, "MMXEXT"), (25, "FFXSR"), (30, "3DNOWEXT"), (31, "3DNOW")],
+        &mut report,
+        screen,
+        "ext 80000001h EDX",
+        f.has_ext,
+        f.ext_edx,
+        &[
+            (22, "MMXEXT"),
+            (25, "FFXSR"),
+            (30, "3DNOWEXT"),
+            (31, "3DNOW"),
+        ],
     );
 
     // XCR0：只有 OSXSAVE 开了才敢读，否则 #UD。
@@ -421,15 +499,33 @@ pub fn run(screen: &mut Screen) -> Result {
     );
     if check_avx_support() && f.avx2_hw {
         let ok = unsafe { avx2_int_add_test(rdtsc() as u32) };
-        tline!(report, screen, "  AVX2 int add : {}", if ok { "PASS" } else { "FAIL" });
+        tline!(
+            report,
+            screen,
+            "  AVX2 int add : {}",
+            if ok { "PASS" } else { "FAIL" }
+        );
     } else {
-        tline!(report, screen, "  AVX2 int add : SKIP (need AVX+XCR0+AVX2-hw)");
+        tline!(
+            report,
+            screen,
+            "  AVX2 int add : SKIP (need AVX+XCR0+AVX2-hw)"
+        );
     }
     if avx512_usable {
         let ok = unsafe { avx512_int_add_test(rdtsc() as u32) };
-        tline!(report, screen, "  AVX512 int add: {}", if ok { "PASS" } else { "FAIL" });
+        tline!(
+            report,
+            screen,
+            "  AVX512 int add: {}",
+            if ok { "PASS" } else { "FAIL" }
+        );
     } else {
-        tline!(report, screen, "  AVX512 int add: SKIP (need AVX512F+XCR0-ZMM)");
+        tline!(
+            report,
+            screen,
+            "  AVX512 int add: SKIP (need AVX512F+XCR0-ZMM)"
+        );
     }
 
     // ---- 基准 ----

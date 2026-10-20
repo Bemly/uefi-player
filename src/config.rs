@@ -35,12 +35,13 @@
 //! fps = 15                # 背景循环帧率（低帧即可）
 //! frames = 0              # B 过渡封顶帧数（0 = 全播预载集）
 //! preload = 8             # A/B 共用预载帧数上限（1080p BGRA ≈ 8MB/帧）
+//! popup_freeze = true     # 选项弹窗时冻结壁纸（false 则行区继续播）
 //! [boot]
 //! auto = true             # 多卷自动发现总开关（关 = 只列本卷 BLS，老行为）
 //! windows = true          # 自动发现 Windows Boot Manager
 //! linux = true            # 自动发现 Linux 内核对（kernel + initrd)
 //! shell = true            # 自动发现 UEFI Shell（shellx64.efi）
-//! uki = true              # 自动发现 EFI/Linux/*.efi（标题取 .uname 区，读不到用文件名）
+//! uki = true              # 自动发现 EFI/Linux/*.efi（读全套 profile，一 profile 一条目，读不到用文件名）
 //! macos = true            # OpenCore 链式接力（EFI/OC/OpenCore.efi 存在即链）
 //! strict = false          # 严格模式：BLS 只认本卷 + XBOOTLDR 卷（systemd 严格模式)
 //! [schedule]
@@ -62,9 +63,6 @@ use uefi::cstr16;
 
 use crate::error::NyaStatus;
 use crate::fs::Fs;
-
-/// 配置文件名（启动卷根目录）。
-pub const CONFIG_PATH: &str = "player.toml";
 
 /// 指令集加速档位。`Auto` = 运行时探 CPUID/XCR0 取最高可用。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]

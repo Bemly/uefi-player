@@ -20,7 +20,8 @@ use uefi::data_types::CString16;
 use crate::error::{NyaStatus, Result};
 use crate::fs::Fs;
 
-/// 可 chainload 的项（`efi`/`uki` 都是 PE，直接起），Linux 内核直启超出 P1 范围。
+/// 可 chainload 的项（`efi`/`uki` 都是 PE，直接起；`linux` 走内核直启，
+/// kernel + initrd + options + devicetree，见 `chainload::chainload_linux`）。
 pub enum BootKind {
     Efi {
         path: String,
@@ -71,8 +72,8 @@ const MACHINE_ARCH: &str = "x64";
 
 /// 单个 BLS conf 解析（`detect.rs` 复用；`volume` 为条目打卷标）。
 /// 成功返回条目，失败返回记进 warning 的串（调用方照展示，不 halt）。
-/// 偏离上游（有意，见 `detect.rs` 头注释）：`uki` 键按 PE 直接起
-/// （不读 `.uname` 区，标题取文件名；要全名请写 conf 标题）。
+/// 偏离上游（有意）：BLS conf 里 `uki` 键按 PE 直接起（本卷 conf 标题即条目标题，
+/// 无标题用文件名；自动发现的 UKI 走 `detect.rs` 全套 profile 展开）。
 fn parse_entry(
     name: &str,
     bytes: &[u8],

@@ -36,7 +36,11 @@ fn cpu_info_by_mp(screen: &mut Screen) -> Result {
     let counts = mp_services.get_number_of_processors()?;
 
     emit!(screen, "Total number of logic processors: {}", counts.total); // 总逻辑处理器数
-    emit!(screen, "Number of currently enabled processors: {}", counts.enabled); //当前启用的处理器数
+    emit!(
+        screen,
+        "Number of currently enabled processors: {}",
+        counts.enabled
+    ); //当前启用的处理器数
 
     // 遍历并获取每个处理器的详细信息 (ProcessorInformation)
     for i in 0..counts.total {

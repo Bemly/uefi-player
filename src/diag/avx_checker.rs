@@ -12,8 +12,16 @@ pub fn run(screen: &mut Screen) -> Result {
     emit!(
         screen,
         "XSAVE: firmware OSXSAVE={} | now={}",
-        match fw { Some(true) => "on", Some(false) => "off", None => "unk" },
-        if crate::diag::common::osxsave_on() { "on" } else { "off" }
+        match fw {
+            Some(true) => "on",
+            Some(false) => "off",
+            None => "unk",
+        },
+        if crate::diag::common::osxsave_on() {
+            "on"
+        } else {
+            "off"
+        }
     );
     if check_avx_support() {
         // 此时可以安全使用 AVX 指令

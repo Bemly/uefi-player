@@ -7,12 +7,12 @@
 //!   菜单会在运行前 `drop(Screen)` 释放独占，跑完重建。目前只有
 //!   embedded-graphics 中文演示是这种形态。
 
+#[cfg(target_arch = "x86_64")]
+use crate::diag::hw_bench;
 use crate::diag::{
     async_exec, avx_checker, fw_collect, get_cpu_info, get_multi_monitor, get_smbios, input2_probe,
     mp_service, multi_core_draw, use_embedded_graphics_gop,
 };
-#[cfg(target_arch = "x86_64")]
-use crate::diag::hw_bench;
 use crate::error::Result;
 use crate::graphics::Screen;
 use crate::video::video_run;

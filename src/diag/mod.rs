@@ -11,6 +11,7 @@ pub mod registry;
 
 pub mod async_exec;
 pub mod avx_checker;
+pub mod fw_collect;
 pub mod get_cpu_info;
 pub mod get_multi_monitor;
 pub mod get_smbios;
@@ -18,11 +19,10 @@ pub mod input2_probe;
 pub mod mp_service;
 pub mod multi_core_draw;
 pub mod use_embedded_graphics_gop;
-pub mod fw_collect;
 
-#[cfg(target_arch = "x86_64")]
-pub mod hw_bench;
 #[cfg(target_arch = "x86_64")]
 pub mod gop_bench;
 #[cfg(target_arch = "x86_64")]
 pub mod gop_simd;
+#[cfg(target_arch = "x86_64")]
+pub mod hw_bench;

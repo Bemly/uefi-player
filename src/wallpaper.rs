@@ -34,7 +34,9 @@ pub fn load() -> Result<Option<Clip>> {
     let mut fs = Fs::new()?;
     let want = config::wallpaper_preload().max(1) as usize;
     let clip = match config::wallpaper_format() {
-        MediaFormat::Raw => Clip::from_raw_dir(&mut fs, "wallpaper", want, FRAME_BYTES, "wallpaper"),
+        MediaFormat::Raw => {
+            Clip::from_raw_dir(&mut fs, "wallpaper", want, FRAME_BYTES, "wallpaper")
+        }
         MediaFormat::Qois => {
             let file = match fs.open_file(cstr16!("wallpaper\\wall.qois")) {
                 Ok(f) => f,

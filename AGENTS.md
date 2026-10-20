@@ -23,11 +23,12 @@ x86 引导加载器（基于 sprout 扩展）+ SIMD 加速矩阵 + UEFI 播放�
 - 不搬：sprout 的菜单/phase/extractor/driver/SBAT/交互配置语言。
   本仓交互层保持自己的（`player.toml` + config-gui + 我们的菜单），
   sprout 只当"上游实现参考"读（读它学思路，同 chainload 惯例），
-  需要上游能力先看 4 个 lib 有没有，没有才在 `src/` 自研。
+  需要上游能力先看 5 个 lib 有没有，没有才在 `src/` 自研。
 - macOS 原生引导不做（要 bless/APFS，超出 UEFI 范围；sprout 也没有），
   只做 OpenCore 链式接力（`\EFI\OC\OpenCore.efi` 存在即链，`[boot] macos` 开关；
   不扫通用 `BOOTX64.EFI`，那可能是我们自己）。
-- UKI 标题取文件名（不解析 `.uname` 区，省一次全读；要全名请写 BLS conf）。
+- UKI 读全套 profile（`.osrel/.cmdline/.uname/.profile`，一 profile 一条目，
+  标题/版本/sort-key 走上游同款，读不到用文件名）。
 
 ## 目录
 
@@ -46,7 +47,7 @@ x86 引导加载器（基于 sprout 扩展）+ SIMD 加速矩阵 + UEFI 播放�
 ## 双构建（UEFI 与 host 严格隔离）
 
 ```bash
-# 固件侧（根目录， Karol .cargo/config + rust-toolchain 已配好 target）
+# 固件侧（根目录，`.cargo/config` + rust-toolchain 已配好 target）
 cargo build --target x86_64-unknown-uefi
 cargo clippy --target x86_64-unknown-uefi
 cargo fmt --all --check
@@ -68,8 +69,7 @@ cargo run --manifest-path tools/config-gui/Cargo.toml --target "$(rustc -vV | se
    “egui 文件对话框”），看下载量、维护状态、MSRV（本仓线 1.92）、license、
    固件侧是否 `no_std` 可用。
 2. **有就用**：`Cargo.toml` 始终不 pin 版本（禁止 `=x.y.z` 精确锁定），
-   用 caret 兼容范围（如 `eframe 0.35` 即 `^0.35`）；可复现性由 `Cargo.lock`
-   保证。记录当时测过的组合（如 `eframe 0.35 / egui_glass 0.1.5 / wgpu 29`，
+   用 caret 兼容范围（如 `eframe 0.35` 即 `^0.35`）。记录当时测过的组合（如 `eframe 0.35 / egui_glass 0.1.5 / wgpu 29`，
    见 `tools/config-gui/Cargo.toml`），优先选与现有依赖同大版本的。
 3. **没有才造**：自研放 `src/`（固件）或对应工具包内，文件头注释写清
    “搜过什么、为什么不用”（如 “`movntdqa` 要求 WC 源，对普通 RAM 会 #GP，

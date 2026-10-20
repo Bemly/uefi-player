@@ -384,7 +384,15 @@ struct BootConfig {
 
 impl Default for BootConfig {
     fn default() -> Self {
-        Self { auto: true, windows: true, linux: true, shell: true, uki: true, macos: true, strict: false }
+        Self {
+            auto: true,
+            windows: true,
+            linux: true,
+            shell: true,
+            uki: true,
+            macos: true,
+            strict: false,
+        }
     }
 }
 
@@ -649,10 +657,7 @@ fn bench_pending(cfg: &FileConfig) -> bool {
         RenderMode::Direct => false,
         RenderMode::Auto => m.measured_render == RenderMode::Blt,
     };
-    if !render_is_blt
-        && s.workers == WorkersMode::Auto
-        && m.measured_workers == WorkersMode::Auto
-    {
+    if !render_is_blt && s.workers == WorkersMode::Auto && m.measured_workers == WorkersMode::Auto {
         return true;
     }
     let dist_in_play = !render_is_blt
@@ -885,7 +890,11 @@ impl App {
     /// half 实测行：有值报预算，无值提示下次启动现测取半。
     fn half_line(&self) -> String {
         if self.cfg.render.measured_vsync_fps > 0 {
-            t!("vsync.half_measured", v = self.cfg.render.measured_vsync_fps).into_owned()
+            t!(
+                "vsync.half_measured",
+                v = self.cfg.render.measured_vsync_fps
+            )
+            .into_owned()
         } else {
             t!("vsync.half_unmeasured").into_owned()
         }
@@ -1284,7 +1293,11 @@ impl App {
                         ui.label(t!("accel.workers"));
                         ui.horizontal(|ui| {
                             for v in WorkersMode::ALL {
-                                if self.option_button(ui, self.cfg.schedule.workers == v, v.file_str()) {
+                                if self.option_button(
+                                    ui,
+                                    self.cfg.schedule.workers == v,
+                                    v.file_str(),
+                                ) {
                                     self.cfg.schedule.workers = v;
                                 }
                             }
@@ -1297,7 +1310,11 @@ impl App {
                             // 一行四个（窄窗自动换行保底，不断尾；与 blt 行同式）。
                             ui.horizontal_wrapped(|ui| {
                                 for v in DistMode::ALL {
-                                    if self.option_button(ui, self.cfg.schedule.dist == v, v.file_str()) {
+                                    if self.option_button(
+                                        ui,
+                                        self.cfg.schedule.dist == v,
+                                        v.file_str(),
+                                    ) {
                                         self.cfg.schedule.dist = v;
                                     }
                                 }
@@ -1493,7 +1510,12 @@ impl App {
                     ui.small(t!("wallpaper.format_hint"));
                     ui.add_space(10.0);
                     ui.label(t!("wallpaper.popup_freeze"));
-                    let froze = self.switch_row(ui, self.cfg.wallpaper.popup_freeze, &t!("boot.on"), &t!("boot.off"));
+                    let froze = self.switch_row(
+                        ui,
+                        self.cfg.wallpaper.popup_freeze,
+                        &t!("boot.on"),
+                        &t!("boot.off"),
+                    );
                     self.cfg.wallpaper.popup_freeze = froze;
                     ui.small(t!("wallpaper.popup_freeze_hint"));
                     ui.add_space(10.0);
@@ -1511,36 +1533,36 @@ impl App {
                     self.cfg.wallpaper.fps = self.wp_fps_f.round().clamp(1.0, 30.0) as u32;
                     ui.add_space(10.0);
                     ui.label(t!("wallpaper.frames"));
-                let frames_label = if self.cfg.wallpaper.frames == 0 {
-                    t!("wallpaper.frames_all").into_owned()
-                } else {
-                    format!("{} frames", self.cfg.wallpaper.frames)
-                };
-                egui_glass::GlassSlider::new(&mut self.wp_frames_f, 0.0..=120.0)
-                    .text(frames_label)
-                    .step_by(1.0)
-                    .style(if self.dark {
-                        egui_glass::GlassStyle::dark()
+                    let frames_label = if self.cfg.wallpaper.frames == 0 {
+                        t!("wallpaper.frames_all").into_owned()
                     } else {
-                        egui_glass::GlassStyle::regular()
-                    })
-                    .show(ui);
-                self.cfg.wallpaper.frames = self.wp_frames_f.round().clamp(0.0, 120.0) as u32;
-                ui.small(t!("wallpaper.frames_hint"));
-                ui.add_space(10.0);
-                ui.label(t!("wallpaper.preload"));
-                let preload_label = format!("{} frames", self.cfg.wallpaper.preload);
-                egui_glass::GlassSlider::new(&mut self.wp_preload_f, 1.0..=16.0)
-                    .text(preload_label)
-                    .step_by(1.0)
-                    .style(if self.dark {
-                        egui_glass::GlassStyle::dark()
-                    } else {
-                        egui_glass::GlassStyle::regular()
-                    })
-                    .show(ui);
-                self.cfg.wallpaper.preload = self.wp_preload_f.round().clamp(1.0, 16.0) as u32;
-                ui.small(t!("wallpaper.preload_hint"));
+                        format!("{} frames", self.cfg.wallpaper.frames)
+                    };
+                    egui_glass::GlassSlider::new(&mut self.wp_frames_f, 0.0..=120.0)
+                        .text(frames_label)
+                        .step_by(1.0)
+                        .style(if self.dark {
+                            egui_glass::GlassStyle::dark()
+                        } else {
+                            egui_glass::GlassStyle::regular()
+                        })
+                        .show(ui);
+                    self.cfg.wallpaper.frames = self.wp_frames_f.round().clamp(0.0, 120.0) as u32;
+                    ui.small(t!("wallpaper.frames_hint"));
+                    ui.add_space(10.0);
+                    ui.label(t!("wallpaper.preload"));
+                    let preload_label = format!("{} frames", self.cfg.wallpaper.preload);
+                    egui_glass::GlassSlider::new(&mut self.wp_preload_f, 1.0..=16.0)
+                        .text(preload_label)
+                        .step_by(1.0)
+                        .style(if self.dark {
+                            egui_glass::GlassStyle::dark()
+                        } else {
+                            egui_glass::GlassStyle::regular()
+                        })
+                        .show(ui);
+                    self.cfg.wallpaper.preload = self.wp_preload_f.round().clamp(1.0, 16.0) as u32;
+                    ui.small(t!("wallpaper.preload_hint"));
                 }
             }
             Page::Boot => {
@@ -1555,15 +1577,18 @@ impl App {
                 if self.cfg.boot.auto {
                     ui.add_space(10.0);
                     ui.label(t!("boot.windows"));
-                    let v = self.switch_row(ui, self.cfg.boot.windows, &t!("boot.on"), &t!("boot.off"));
+                    let v =
+                        self.switch_row(ui, self.cfg.boot.windows, &t!("boot.on"), &t!("boot.off"));
                     self.cfg.boot.windows = v;
                     ui.add_space(4.0);
                     ui.label(t!("boot.linux"));
-                    let v = self.switch_row(ui, self.cfg.boot.linux, &t!("boot.on"), &t!("boot.off"));
+                    let v =
+                        self.switch_row(ui, self.cfg.boot.linux, &t!("boot.on"), &t!("boot.off"));
                     self.cfg.boot.linux = v;
                     ui.add_space(4.0);
                     ui.label(t!("boot.shell"));
-                    let v = self.switch_row(ui, self.cfg.boot.shell, &t!("boot.on"), &t!("boot.off"));
+                    let v =
+                        self.switch_row(ui, self.cfg.boot.shell, &t!("boot.on"), &t!("boot.off"));
                     self.cfg.boot.shell = v;
                     ui.add_space(4.0);
                     ui.label(t!("boot.uki"));
@@ -1571,11 +1596,13 @@ impl App {
                     self.cfg.boot.uki = v;
                     ui.add_space(4.0);
                     ui.label(t!("boot.macos"));
-                    let v = self.switch_row(ui, self.cfg.boot.macos, &t!("boot.on"), &t!("boot.off"));
+                    let v =
+                        self.switch_row(ui, self.cfg.boot.macos, &t!("boot.on"), &t!("boot.off"));
                     self.cfg.boot.macos = v;
                     ui.add_space(4.0);
                     ui.label(t!("boot.strict"));
-                    let v = self.switch_row(ui, self.cfg.boot.strict, &t!("boot.on"), &t!("boot.off"));
+                    let v =
+                        self.switch_row(ui, self.cfg.boot.strict, &t!("boot.on"), &t!("boot.off"));
                     self.cfg.boot.strict = v;
                 }
             }
@@ -1839,8 +1866,7 @@ mod schema_tests {
         assert_eq!(back.render.vsync, VsyncMode::Half);
         assert_eq!(back.render.measured_vsync_fps, 42);
         // 旧文件 `"on"` 按 static 照读（固件同 alias，不断旧配置）。
-        let old: FileConfig =
-            toml::from_str("[render]\nvsync = \"on\"\n").unwrap();
+        let old: FileConfig = toml::from_str("[render]\nvsync = \"on\"\n").unwrap();
         assert_eq!(old.render.vsync, VsyncMode::Static);
     }
 
@@ -1881,12 +1907,7 @@ mod schema_tests {
 mod blackbox_matrix {
     use super::*;
 
-    fn rc(
-        mode: RenderMode,
-        workers: WorkersMode,
-        dist: DistMode,
-        vsync: VsyncMode,
-    ) -> FileConfig {
+    fn rc(mode: RenderMode, workers: WorkersMode, dist: DistMode, vsync: VsyncMode) -> FileConfig {
         let mut cfg = FileConfig::default();
         cfg.render.mode = mode;
         cfg.render.vsync = vsync;
@@ -1979,7 +2000,11 @@ mod blackbox_matrix {
                 strict: false,
             },
             r#async: AsyncConfig { executor: e },
-            schedule: ScheduleConfig { backend: s, workers: w, dist: d },
+            schedule: ScheduleConfig {
+                backend: s,
+                workers: w,
+                dist: d,
+            },
         };
         let text = toml::to_string(&cfg).unwrap();
         let back: FileConfig = toml::from_str(&text).unwrap();
@@ -1992,7 +2017,9 @@ mod blackbox_matrix {
     /// fps 三态字符串照读照写（非法值不断解析，语义由 `parse_fps` 兜底）。
     #[test]
     fn fps_string_matrix() {
-        for s in ["auto", "max", "0", "1", "60", "120", "240", "999", "abc", ""] {
+        for s in [
+            "auto", "max", "0", "1", "60", "120", "240", "999", "abc", "",
+        ] {
             let text = format!("[play]\nfps = \"{s}\"\n");
             let cfg: FileConfig = toml::from_str(&text).unwrap();
             assert_eq!(cfg.play.fps, s);
@@ -2122,12 +2149,38 @@ mod blackbox_matrix {
     /// 落盘钳制矩阵：越界钳住，正常值不动。
     #[test]
     fn clamp_matrix() {
-        let mut t = RenderTune { frames: 0, tile_rows: 4, vsync_fps: 999, buffers: 99 };
+        let mut t = RenderTune {
+            frames: 0,
+            tile_rows: 4,
+            vsync_fps: 999,
+            buffers: 99,
+        };
         clamp_tune(&mut t);
-        assert_eq!(t, RenderTune { frames: 1, tile_rows: 8, vsync_fps: 240, buffers: 16 });
-        let mut ok = RenderTune { frames: 30, tile_rows: 64, vsync_fps: 60, buffers: 2 };
+        assert_eq!(
+            t,
+            RenderTune {
+                frames: 1,
+                tile_rows: 8,
+                vsync_fps: 240,
+                buffers: 16
+            }
+        );
+        let mut ok = RenderTune {
+            frames: 30,
+            tile_rows: 64,
+            vsync_fps: 60,
+            buffers: 2,
+        };
         clamp_tune(&mut ok);
-        assert_eq!(ok, RenderTune { frames: 30, tile_rows: 64, vsync_fps: 60, buffers: 2 });
+        assert_eq!(
+            ok,
+            RenderTune {
+                frames: 30,
+                tile_rows: 64,
+                vsync_fps: 60,
+                buffers: 2
+            }
+        );
     }
 
     /// 待测判定矩阵（与固件 `needs_render_bench` 同逻辑 + half）。
@@ -2137,25 +2190,50 @@ mod blackbox_matrix {
         // 基线：全 auto 无记忆 → 必测。
         assert!(bench_pending(&FileConfig::default()));
         // 全显式（Direct/BspOnly/Static/Off）→ 跳过。
-        let mut m = rc(RenderMode::Direct, WorkersMode::BspOnly, DistMode::Static, VsyncMode::Off);
+        let mut m = rc(
+            RenderMode::Direct,
+            WorkersMode::BspOnly,
+            DistMode::Static,
+            VsyncMode::Off,
+        );
         assert!(!bench_pending(&m));
         // Direct + workers auto 无记忆 → 测 workers。
-        m = rc(RenderMode::Direct, WorkersMode::Auto, DistMode::Auto, VsyncMode::Off);
+        m = rc(
+            RenderMode::Direct,
+            WorkersMode::Auto,
+            DistMode::Auto,
+            VsyncMode::Off,
+        );
         assert!(bench_pending(&m));
         // workers 已记忆 BspOnly → dist 不参测 → 跳过。
         m.render.measured_workers = WorkersMode::BspOnly;
         assert!(!bench_pending(&m));
         // Direct + 全核 + dist auto 无记忆 → 测 dist。
-        m = rc(RenderMode::Direct, WorkersMode::All, DistMode::Auto, VsyncMode::Off);
+        m = rc(
+            RenderMode::Direct,
+            WorkersMode::All,
+            DistMode::Auto,
+            VsyncMode::Off,
+        );
         assert!(bench_pending(&m));
         // dist 已记忆 → 跳过。
         m.render.measured_dist = DistMode::Static;
         assert!(!bench_pending(&m));
         // Blt 定死：workers/dist 不参测（auto 也白搭）。
-        m = rc(RenderMode::Blt, WorkersMode::Auto, DistMode::Auto, VsyncMode::Off);
+        m = rc(
+            RenderMode::Blt,
+            WorkersMode::Auto,
+            DistMode::Auto,
+            VsyncMode::Off,
+        );
         assert!(!bench_pending(&m));
         // mode auto 无记忆 → 必测（哪怕 Blt 倾向，首轮也得跑）。
-        m = rc(RenderMode::Auto, WorkersMode::Auto, DistMode::Auto, VsyncMode::Off);
+        m = rc(
+            RenderMode::Auto,
+            WorkersMode::Auto,
+            DistMode::Auto,
+            VsyncMode::Off,
+        );
         assert!(bench_pending(&m));
         // mode auto 已记忆 Direct + workers auto 无记忆 → 测 workers。
         m.render.measured_render = RenderMode::Direct;
@@ -2164,34 +2242,64 @@ mod blackbox_matrix {
         m.render.measured_render = RenderMode::Blt;
         assert!(!bench_pending(&m));
         // vsync auto 无记忆 → 测（其余全显式）。
-        m = rc(RenderMode::Direct, WorkersMode::BspOnly, DistMode::Static, VsyncMode::Auto);
+        m = rc(
+            RenderMode::Direct,
+            WorkersMode::BspOnly,
+            DistMode::Static,
+            VsyncMode::Auto,
+        );
         assert!(bench_pending(&m));
         // vsync auto 已记忆 → 跳过。
         m.render.measured_vsync = VsyncMode::Static;
         assert!(!bench_pending(&m));
         // half 无记忆 → 必测（其余全显式）。
-        m = rc(RenderMode::Direct, WorkersMode::BspOnly, DistMode::Static, VsyncMode::Half);
+        m = rc(
+            RenderMode::Direct,
+            WorkersMode::BspOnly,
+            DistMode::Static,
+            VsyncMode::Half,
+        );
         assert!(bench_pending(&m));
         // half 已记忆 → 跳过。
         m.render.measured_vsync_fps = 45;
         assert!(!bench_pending(&m));
         // 显式 half + dist auto 无记忆（全核）→ dist 照测。
-        m = rc(RenderMode::Direct, WorkersMode::All, DistMode::Auto, VsyncMode::Half);
+        m = rc(
+            RenderMode::Direct,
+            WorkersMode::All,
+            DistMode::Auto,
+            VsyncMode::Half,
+        );
         m.render.measured_vsync_fps = 45;
         assert!(bench_pending(&m));
         // Blt 引擎对照：Blt 在测 + 选中非 B2V → 必测（只出数）。
-        m = rc(RenderMode::Blt, WorkersMode::BspOnly, DistMode::Static, VsyncMode::Off);
+        m = rc(
+            RenderMode::Blt,
+            WorkersMode::BspOnly,
+            DistMode::Static,
+            VsyncMode::Off,
+        );
         m.render.blt_op = BltOpKind::VideoToBltBuffer;
         assert!(bench_pending(&m));
         // 同上但选中 B2V → B2V 格本就覆盖，无额外待测。
         m.render.blt_op = BltOpKind::BufferToVideo;
         assert!(!bench_pending(&m));
         // Blt 不在测（Direct 定死）→ 选中啥都不测 op 格。
-        m = rc(RenderMode::Direct, WorkersMode::BspOnly, DistMode::Static, VsyncMode::Off);
+        m = rc(
+            RenderMode::Direct,
+            WorkersMode::BspOnly,
+            DistMode::Static,
+            VsyncMode::Off,
+        );
         m.render.blt_op = BltOpKind::VideoFill;
         assert!(!bench_pending(&m));
         // mode auto 已记忆 Blt + 选中非 B2V → Blt 在测 → 测 op 格。
-        m = rc(RenderMode::Auto, WorkersMode::BspOnly, DistMode::Static, VsyncMode::Off);
+        m = rc(
+            RenderMode::Auto,
+            WorkersMode::BspOnly,
+            DistMode::Static,
+            VsyncMode::Off,
+        );
         m.render.measured_render = RenderMode::Blt;
         m.render.blt_op = BltOpKind::VideoFill;
         assert!(bench_pending(&m));
@@ -2203,19 +2311,44 @@ mod blackbox_matrix {
         // 全 auto 无记忆：全摆。
         assert_eq!(
             tune_visible(&FileConfig::default()),
-            TuneVisible { frames: true, tile: true, vfps: true, buf: true }
+            TuneVisible {
+                frames: true,
+                tile: true,
+                vfps: true,
+                buf: true
+            }
         );
         // Blt 定死：只剩 vfps（auto）+ frames（render auto 无记忆）。
-        let m = rc(RenderMode::Blt, WorkersMode::Auto, DistMode::Auto, VsyncMode::Auto);
+        let m = rc(
+            RenderMode::Blt,
+            WorkersMode::Auto,
+            DistMode::Auto,
+            VsyncMode::Auto,
+        );
         assert_eq!(
             tune_visible(&m),
-            TuneVisible { frames: true, tile: false, vfps: true, buf: false }
+            TuneVisible {
+                frames: true,
+                tile: false,
+                vfps: true,
+                buf: false
+            }
         );
         // 全显式 Direct/BspOnly/Static/Off：只剩 buf。
-        let m = rc(RenderMode::Direct, WorkersMode::BspOnly, DistMode::Static, VsyncMode::Off);
+        let m = rc(
+            RenderMode::Direct,
+            WorkersMode::BspOnly,
+            DistMode::Static,
+            VsyncMode::Off,
+        );
         assert_eq!(
             tune_visible(&m),
-            TuneVisible { frames: false, tile: false, vfps: false, buf: true }
+            TuneVisible {
+                frames: false,
+                tile: false,
+                vfps: false,
+                buf: true
+            }
         );
         // tile 沾边（auto/Tile）→ tile 摆；static/dynamic 藏。
         for (d, tile) in [
@@ -2229,7 +2362,12 @@ mod blackbox_matrix {
             m.render.measured_dist = DistMode::Static;
             assert_eq!(
                 tune_visible(&m),
-                TuneVisible { frames: false, tile, vfps: false, buf: true },
+                TuneVisible {
+                    frames: false,
+                    tile,
+                    vfps: false,
+                    buf: true
+                },
                 "{d:?}"
             );
         }
@@ -2254,7 +2392,12 @@ mod blackbox_matrix {
             assert!(!vis.frames && !vis.tile && vis.buf, "{v:?}");
         }
         // half 无记忆 → frames 亮（自带 bench）。
-        let m = rc(RenderMode::Direct, WorkersMode::BspOnly, DistMode::Static, VsyncMode::Half);
+        let m = rc(
+            RenderMode::Direct,
+            WorkersMode::BspOnly,
+            DistMode::Static,
+            VsyncMode::Half,
+        );
         assert!(tune_visible(&m).frames);
     }
 
@@ -2269,8 +2412,7 @@ mod blackbox_matrix {
                     cfg.schedule.backend = b;
                     cfg.schedule.workers = w;
                     cfg.schedule.dist = d;
-                    let back: FileConfig =
-                        toml::from_str(&toml::to_string(&cfg).unwrap()).unwrap();
+                    let back: FileConfig = toml::from_str(&toml::to_string(&cfg).unwrap()).unwrap();
                     assert_eq!(back.schedule.backend, b);
                     assert_eq!(back.schedule.workers, w);
                     assert_eq!(back.schedule.dist, d);

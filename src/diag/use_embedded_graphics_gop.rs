@@ -8,13 +8,13 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use embedded_graphics::mono_font::jis_x0201::FONT_10X20;
 use embedded_graphics::mono_font::MonoTextStyle;
+use embedded_graphics::mono_font::jis_x0201::FONT_10X20;
 use embedded_graphics::pixelcolor::Rgb888;
 use embedded_graphics::prelude::*;
 use embedded_graphics::text::Text;
-use u8g2_fonts::fonts::u8g2_font_boutique_bitmap_7x7_t_chinese3;
 use u8g2_fonts::U8g2TextStyle;
+use u8g2_fonts::fonts::u8g2_font_boutique_bitmap_7x7_t_chinese3;
 use uefi::boot;
 use uefi::proto::console::gop::{BltOp, BltPixel, BltRegion, GraphicsOutput};
 
@@ -29,7 +29,11 @@ struct Canvas {
 
 impl Canvas {
     fn new(w: usize, h: usize) -> Self {
-        Self { w, h, buf: vec![BltPixel::new(0, 0, 0); w * h] }
+        Self {
+            w,
+            h,
+            buf: vec![BltPixel::new(0, 0, 0); w * h],
+        }
     }
 }
 
@@ -52,7 +56,8 @@ impl DrawTarget for Canvas {
                 continue;
             }
             // GOP 是 BGRA 内存序；BltPixel::new(red, green, blue) 负责字段摆放。
-            self.buf[y as usize * self.w + x as usize] = BltPixel::new(color.r(), color.g(), color.b());
+            self.buf[y as usize * self.w + x as usize] =
+                BltPixel::new(color.r(), color.g(), color.b());
         }
         Ok(())
     }
@@ -67,13 +72,16 @@ pub fn run() -> Result {
     let mode = protocol
         .modes()
         .find(|m| m.info().resolution() == (800, 600))
-        .ok_or(NyaStatus::_Debug(String::from("800x600 GOP mode not found")))?;
+        .ok_or(NyaStatus::_Debug(String::from(
+            "800x600 GOP mode not found",
+        )))?;
     protocol.set_mode(&mode)?;
 
     let (w, h) = protocol.current_mode_info().resolution();
     let mut canvas = Canvas::new(w as usize, h as usize);
 
-    Text::new("ｱｲｳｴｵ, ASCII_JP
+    Text::new(
+        "ｱｲｳｴｵ, ASCII_JP
     1x   0   1   2   3   4   5   6   7   8   9   A   B   C   D   E   F
     2x  SP   !  \"   #   $   %   &   '   (   )   *   +   ,   -   .   /
     3x   0   1   2   3   4   5   6   7   8   9   :   ;   <   =   >   ?

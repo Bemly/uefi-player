@@ -12,10 +12,10 @@ use core::time::Duration;
 use uefi::boot::stall;
 use uefi::cstr16;
 
-use crate::boot::{self, entry_line, KEYS};
+use crate::boot::{self, KEYS, entry_line};
 use crate::diag::common::{flush_keys, pause_return, poll_key};
 use crate::error::Result;
-use crate::graphics::{calibrate_tps, tsc, Screen};
+use crate::graphics::{Screen, calibrate_tps, tsc};
 use crate::menu::run_menu;
 use crate::video::decoder::Clip;
 use crate::wallpaper::{self, WP_H, WP_TOP, WP_W};
@@ -86,18 +86,15 @@ fn popup(mut screen: Screen, clip: &Option<Clip>, tps: u64) -> Result<Screen> {
     let list = boot::list()?;
     // 冻结语义：开关关 / 无片源 / 分辨率不对 → 静态（行区无东西可播）。
     let (w, h) = screen.get_gop().current_mode_info().resolution();
-    let can_live =
-        !clip.as_ref().map(|c| c.is_empty()).unwrap_or(true) && (w as usize, h as usize) == (WP_W, WP_H);
+    let can_live = !clip.as_ref().map(|c| c.is_empty()).unwrap_or(true)
+        && (w as usize, h as usize) == (WP_W, WP_H);
     let frozen = !can_live || crate::config::wallpaper_popup_freeze();
     draw_popup(&mut screen, &list);
     // 弹窗行数（标题 1 + 警告 + 空行 1 + 条目 + 空行 1 + 固定 5 行）：
     // live 动画只画此行之下，避免盖字。
     let text_end = (2 + list.warnings.len() + list.entries.len() + 1 + 5) * 18 + 8;
     let anim_top = WP_TOP.max(text_end);
-    log::warn!(
-        "popup: open ({})",
-        if frozen { "frozen" } else { "live" }
-    );
+    log::warn!("popup: open ({})", if frozen { "frozen" } else { "live" });
 
     let budget = tps.max(1) / crate::config::wallpaper_fps().max(1) as u64;
     let mut idx = 0usize;
@@ -110,8 +107,7 @@ fn popup(mut screen: Screen, clip: &Option<Clip>, tps: u64) -> Result<Screen> {
             if now.saturating_sub(last) >= budget {
                 last = now;
                 if let Some(c) = clip {
-                    let _ =
-                        screen.upload_frame_region(WP_W, WP_H, anim_top, c.frame(idx));
+                    let _ = screen.upload_frame_region(WP_W, WP_H, anim_top, c.frame(idx));
                     idx += 1;
                 }
             }
@@ -197,7 +193,7 @@ fn draw_popup(screen: &mut Screen, list: &crate::boot::entries::BootList) {
 /// 重启进固件设置（BootToFwUi）：置 `OsIndications` bit0 后冷重启。
 /// 固件不支持（只读/无变量服务）就报错留下，不 halt。
 fn boot_to_firmware(screen: &mut Screen) {
-    use uefi::runtime::{set_variable, VariableAttributes, VariableVendor};
+    use uefi::runtime::{VariableAttributes, VariableVendor, set_variable};
     log::warn!("popup: firmware setup, resetting...");
     let name = cstr16!("OsIndications");
     // EFI_OS_INDICATIONS_BOOT_TO_FW_UI（bit0），小端 u64。
@@ -206,9 +202,7 @@ fn boot_to_firmware(screen: &mut Screen) {
         | VariableAttributes::BOOTSERVICE_ACCESS
         | VariableAttributes::RUNTIME_ACCESS;
     match set_variable(&name, &VariableVendor::GLOBAL_VARIABLE, attrs, &data) {
-        Ok(()) => {
-            uefi::runtime::reset(uefi::runtime::ResetType::COLD, uefi::Status::SUCCESS, None)
-        }
+        Ok(()) => uefi::runtime::reset(uefi::runtime::ResetType::COLD, uefi::Status::SUCCESS, None),
         Err(e) => {
             screen.draw_str(&format!("firmware setup unsupported: {:?}", e.status()));
             log::warn!("popup: firmware setup failed: {:?}", e.status());

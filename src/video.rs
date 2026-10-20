@@ -1,25 +1,25 @@
+use crate::config::{self, CopyWidth, DistMode, MediaFormat};
+use crate::error::Result;
+use crate::fs::Fs;
+use crate::graphics::{Screen, copy_block, dynamic_row_bounds};
+use crate::video::ascii_font::FONT_8X16;
+use crate::video::decoder::Clip;
 use alloc::boxed::Box;
-use alloc::{format, vec};
 use alloc::vec::Vec;
+use alloc::{format, vec};
 use core::ffi::c_void;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use core::time::Duration;
-use uefi::boot::{create_event, get_handle_for_protocol, open_protocol_exclusive, set_watchdog_timer, EventType, Tpl};
-use uefi::{boot, cstr16, CStr16, Status};
+use uefi::boot::{
+    EventType, Tpl, create_event, get_handle_for_protocol, open_protocol_exclusive,
+    set_watchdog_timer,
+};
 use uefi::proto::console::gop::{BltOp, BltPixel, BltRegion, GraphicsOutput};
-use uefi::proto::media::file::RegularFile;
 use uefi::proto::pi::mp::MpServices;
-use crate::config::{self, CopyWidth, DistMode, MediaFormat};
-use crate::fs::Fs;
-use crate::graphics::{dynamic_row_bounds, Screen, copy_block};
-use crate::video::buffer::{BltFrameBuffer, QoiFrameBuffer, RawFrameBuffer};
-use crate::video::decoder::{Clip, VideoMemory};
-use crate::error::Result;
-use crate::video::ascii_font::FONT_8X16;
+use uefi::{Status, boot, cstr16};
 
-pub mod buffer;
-pub mod decoder;
 pub mod ascii_font;
+pub mod decoder;
 pub mod exec;
 
 const VIDEO_W: usize = 1920;
@@ -77,9 +77,7 @@ pub(crate) fn pace_or_drop(
     }
 }
 
-
 pub fn video_run(screen: &mut Screen) -> Result {
-
     // 关闭看门狗，如果不行之后写定时喂狗
     set_watchdog_timer(0, 0, None)?;
 
@@ -97,7 +95,9 @@ pub fn video_run(screen: &mut Screen) -> Result {
     // （render 全 honoring）；dynamic 是多核 steal 泵（只直写前台，见 exec）。
     match crate::config::schedule_backend() {
         crate::config::ScheduleBackend::Nano => {
-            log::info!("play: path=nano_pump (single executor task; schedule workers/dist ignored)");
+            log::info!(
+                "play: path=nano_pump (single executor task; schedule workers/dist ignored)"
+            );
             exec::nano_pump(screen, clip, VIDEO_W, VIDEO_H, target, tps)
         }
         crate::config::ScheduleBackend::Dynamic => {
@@ -191,7 +191,10 @@ fn measure_max_fps(screen: &mut Screen, tps: u64) -> Result<u32> {
     screen.release_shadows();
     let dt = rdtsc().saturating_sub(t0).max(1);
     let fps = ((frames as u64 * tps) / dt).clamp(1, 10_000) as u32;
-    screen.draw_str(&format!("play: max {} fps, running at 3/4 (capped by video)", fps));
+    screen.draw_str(&format!(
+        "play: max {} fps, running at 3/4 (capped by video)",
+        fps
+    ));
     Ok(fps)
 }
 
@@ -238,153 +241,6 @@ fn direct_loop(
     }
 }
 
-fn draw_once(fs: &mut Fs, screen: &mut Screen, path: &CStr16, blt_buf: &mut [BltPixel]) -> Result {
-    // 加载文件
-    let qoi_data = fs.read_file(path)?;
-
-    // 解码图像
-    let (header, rgba_buf) = qoi::decode_to_vec(&qoi_data)?;
-
-    // 转换像素格式
-    blt_buf.iter_mut()
-        .zip(rgba_buf.chunks_exact(header.channels.as_u8() as usize))
-        .for_each(|(dest, src)| {
-            *dest = BltPixel::new(src[0], src[1], src[2]);
-        });
-
-    // 渲染
-    screen.draw_image(header.width, header.height, &blt_buf)?;
-
-    Ok(())
-}
-
-fn draw_all_mem(
-    video: &mut VideoMemory,
-    screen: &mut Screen,
-    qoi: &mut QoiFrameBuffer,
-    raw: &mut RawFrameBuffer,
-    blt: &mut BltFrameBuffer
-) -> Result {
-    if video.next_frame(&mut qoi.0) {
-        raw.header = loop {
-            match qoi::decode_to_buf(&mut raw.pixels, &qoi.0) {
-                Ok(header) => break header,
-                Err(qoi::Error::OutputBufferTooSmall { required, .. }) => {
-                    raw.pixels.resize(required, 0)
-                }
-                // TODO:严重错误 真机上会出现数据错位的情况,概率极大
-                Err(e) => return Ok(()),
-            }
-        };
-
-        let pixel_count = raw.get_size();
-        let step = raw.header.channels.as_u8() as usize;
-
-        // 这里的 zip 配合 iter_mut 是目前最稳妥的写法
-        raw.pixels[..pixel_count * step]
-            .chunks_exact(step)
-            .zip(blt.0[..pixel_count].iter_mut())
-            .for_each(|(r, b)| {
-                b.red = r[0];
-                b.green = r[1];
-                b.blue = r[2];
-            });
-
-        // 4. 显示
-        screen.draw_image(raw.header.width, raw.header.height, &blt.0)?;
-    } else {
-        // 读完了，重置指针实现循环播放
-        video.rewind();
-    }
-
-    Ok(())
-}
-
-// 目前只支持4通道互转
-fn draw_all_mem_zero_copy(
-    video: &mut VideoMemory,
-    screen: &mut Screen,
-    qoi: &mut QoiFrameBuffer,
-    blt: &mut BltFrameBuffer
-) -> Result {
-    if video.next_frame(&mut qoi.0) {
-        // TODO:严重错误 真机上会出现数据错位的情况,概率极大
-        let Ok(header) = qoi::decode_header(&qoi.0) else { return Ok(()) };
-        let pixel_count = (header.width * header.height) as usize;
-
-        if blt.0.len() < pixel_count {
-            blt.0.resize(pixel_count, BltPixel::new(0,0,0));
-        }
-
-        // 直接解码到 [R, G, B, A, R, G, B, A...]
-        // TODO:严重错误 真机上会出现数据错位的情况,概率极大
-        let Ok(_) = qoi::decode_to_buf(as_u8_slice_mut(&mut blt.0[..pixel_count]), &qoi.0)
-        else { return Ok(()) };
-
-        // 交换 R 和 B
-        for pixel in blt.0[..pixel_count].iter_mut() {
-            core::mem::swap(&mut pixel.red, &mut pixel.blue);
-        }
-
-        screen.draw_image(header.width, header.height, &blt.0)?;
-    } else {
-        video.rewind();
-    }
-    Ok(())
-}
-
-fn as_u8_slice_mut(slice: &mut [BltPixel]) -> &mut [u8] {
-    let len = slice.len() * core::mem::size_of::<BltPixel>();
-    unsafe {
-        // 起始地址（指针转换） 总字节长度
-        core::slice::from_raw_parts_mut(slice.as_mut_ptr() as *mut u8, len)
-    }
-}
-
-fn draw(
-    fs: &mut Fs,
-    file: &mut RegularFile,
-    screen: &mut Screen,
-    qoi: &mut QoiFrameBuffer,
-    raw: &mut RawFrameBuffer,
-    blt: &mut BltFrameBuffer
-) -> Result {
-    // 读文件流
-    if fs.read_frame_next(file, &mut qoi.0)? {
-        // 解码
-        raw.header = loop {
-            match qoi::decode_to_buf(&mut raw.pixels, &qoi.0) {
-                Ok(header) => break header,
-                Err(qoi::Error::OutputBufferTooSmall { required, .. }) => {
-                    raw.pixels.resize(required, 0)
-                }
-                // TODO:严重错误 真机上会出现数据错位的情况,概率极大
-                // qoi::Error::InvalidPadding
-                // qemu无问题 不知道怎么解决 暂时丢帧处理
-                Err(e) => return Ok(()),
-            }
-        };
-
-        // 转换
-        // 只取当前帧需要的切片范围，避免处理旧数据
-        let step = raw.header.channels.as_u8() as usize;
-        let raw_data = raw.pixels[..raw.get_size() * step].chunks_exact(step);
-        let blt_data = &mut blt.0[..raw.get_size()];
-        for (r, b) in raw_data.zip(blt_data.iter_mut()) {
-            b.red = r[0];
-            b.green = r[1];
-            b.blue = r[2];
-        }
-
-        screen.draw_image(raw.header.width, raw.header.height, &blt.0)?;
-    } else {
-        // 从头读
-        file.set_position(0)?;
-    }
-
-    Ok(())
-}
-
 type PixelPoint = u8;
 type Frame = Vec<PixelPoint>;
 type FrameSegment = Vec<Frame>;
@@ -403,7 +259,7 @@ struct PlayTask<'a> {
     core_frame_ptrs: *const *const *const u8,
     total_frames: usize,
     sync_counter: &'a AtomicUsize, // 关键：原子计数器
-    target_fps: u32, // 0 = 不限速（max 模式）
+    target_fps: u32,               // 0 = 不限速（max 模式）
     tps: u64,
     /// P2 位宽（`config::copy_width` 快照；AP/BSP 同值，见 `copy_block` 门控）。
     copy: u8,
@@ -466,11 +322,15 @@ pub(crate) unsafe fn copy_tile_rows(
 }
 
 extern "efiapi" fn play_task(arg: *mut c_void) {
-    if arg.is_null() { return; }
+    if arg.is_null() {
+        return;
+    }
     let ctx = unsafe { &*(arg as *const PlayTask) };
 
     let my_id = unsafe { (*ctx.mp).who_am_i().unwrap_or(usize::MAX) };
-    if my_id >= ctx.num_cores { return; }
+    if my_id >= ctx.num_cores {
+        return;
+    }
 
     // P4-dynamic 开关（快照自 `effective_dist`；static/tile/dynamic 三路互斥）。
     let dynamic = ctx.dist == DistMode::Dynamic as u8;
@@ -519,7 +379,6 @@ extern "efiapi" fn play_task(arg: *mut c_void) {
     // 计算帧率
     let ticks_per_sec;
     let target_ticks_per_frame;
-    const TARGET_FPS: u128 = 60;
     if my_id == 0 {
         boot::stall(Duration::from_millis(100));
         // 采样时间太短（如 1ms）误差大，太长（如 1s）启动慢，100ms 是黄金平衡点
@@ -537,7 +396,14 @@ extern "efiapi" fn play_task(arg: *mut c_void) {
     }
 
     /// 绘制不透明字符串：位图为 1 画 color，位图为 0 画黑色
-    unsafe fn draw_string_opaque(fb_base: *mut u32, stride: usize, x: u32, y: u32, s: &[u8], color: u32) {
+    unsafe fn draw_string_opaque(
+        fb_base: *mut u32,
+        stride: usize,
+        x: u32,
+        y: u32,
+        s: &[u8],
+        color: u32,
+    ) {
         let mut current_x = x;
         for &char_code in s {
             // 只有 ASCII 0-127 有效
@@ -574,7 +440,11 @@ extern "efiapi" fn play_task(arg: *mut c_void) {
 
     // 计算偏移量和拷贝大小（也是固定的）
     let offset = start_y * stride;
-    let copy_size = if end_y > start_y { (end_y - start_y) * stride } else { 0 };
+    let copy_size = if end_y > start_y {
+        (end_y - start_y) * stride
+    } else {
+        0
+    };
     loop {
         // 0. 取本轮掉帧指令（P3 确定性设计）：
         //    BSP 在上轮末尾发布 `(drop_gen = iter, drop_flag)`，AP 自旋等到可见再开工。
@@ -683,7 +553,7 @@ extern "efiapi" fn play_task(arg: *mut c_void) {
                             copy_w,
                         );
                     }
-                }else {
+                } else {
                     let src_ptr = *my_frames_list.add(fi);
                     let my_dst = out_base.add(y_start * ctx.stride_bytes);
                     copy_block(my_dst, src_ptr, my_block_size, copy_w);
@@ -877,9 +747,8 @@ pub fn mp_draw(
     // `Clip` 帧已是 BGRA `BltPixel`：reinterpret 为字节做行切分（零拷贝视图，
     // 下游 `copy_block` 按字节搬运，与旧 `single_raw` 同布局）。
     for frame in &clip.frames {
-        let raw: &[u8] = unsafe {
-            core::slice::from_raw_parts(frame.as_ptr() as *const u8, frame.len() * 4)
-        };
+        let raw: &[u8] =
+            unsafe { core::slice::from_raw_parts(frame.as_ptr() as *const u8, frame.len() * 4) };
         if raw.len() < height.saturating_mul(row_bytes) {
             continue;
         }
@@ -1104,7 +973,10 @@ pub fn mp_draw(
         // 注意：如果你需要它不阻塞持续播放，这里要设置为 false (非阻塞启动)
         // 启动失败不静默：BSP 会永远卡在首轮栅栏（QEMU 实测定位过一次）。
         if let Err(e) = mp.startup_all_aps(false, play_task, arg_ptr, Some(event), None) {
-            log::warn!("play: startup_all_aps failed: {:?}, BSP-only fallback", e.status());
+            log::warn!(
+                "play: startup_all_aps failed: {:?}, BSP-only fallback",
+                e.status()
+            );
         }
     }
 

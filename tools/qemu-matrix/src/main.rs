@@ -303,7 +303,12 @@ fn read_artifact(fstype: &str, image: &str, glob: &str, contains: &[String]) -> 
     if fstype == "hdiutil" {
         let mnt = format!("{image}.ro");
         let _ = std::fs::create_dir_all(&mnt);
-        if run("hdiutil", &["attach", "-readonly", "-mountpoint", &mnt, image]).is_err() {
+        if run(
+            "hdiutil",
+            &["attach", "-readonly", "-mountpoint", &mnt, image],
+        )
+        .is_err()
+        {
             return (false, "re-mount failed".into());
         }
         let mut hits = Vec::new();
@@ -494,7 +499,9 @@ fn build_efi(force: bool) -> Result<String, String> {
             String::from_utf8_lossy(&out.stderr)
         ));
     }
-    Ok(format!("{ROOT}/target/x86_64-unknown-uefi/debug/uefi-player.efi"))
+    Ok(format!(
+        "{ROOT}/target/x86_64-unknown-uefi/debug/uefi-player.efi"
+    ))
 }
 
 /// 固件路径解析："debug" = 全局默认（brew 瓶 DEBUG OVMF，`matrix.toml [global] ovmf`
@@ -528,14 +535,18 @@ fn run_case(
     let _ = std::fs::remove_file(&image);
 
     // 1. 组镜像文件。
-    let efi_data =
-        std::fs::read(efi).map_err(|e| format!("read efi: {e}")).unwrap_or_default();
+    let efi_data = std::fs::read(efi)
+        .map_err(|e| format!("read efi: {e}"))
+        .unwrap_or_default();
     if efi_data.is_empty() {
         return (false, "efi unreadable".into());
     }
     let mut files: Vec<(&str, Vec<u8>)> = vec![
         ("EFI/BOOT/BOOTX64.EFI", efi_data.clone()),
-        ("player.toml", case.config.trim_start_matches('\n').as_bytes().to_vec()),
+        (
+            "player.toml",
+            case.config.trim_start_matches('\n').as_bytes().to_vec(),
+        ),
     ];
     if case.needs_video {
         let src = format!("{ROOT}/usb_reports/1080p/video.qois");
@@ -630,18 +641,16 @@ fn run_case(
         cmd.push("-cpu".into());
         cmd.push(cpu.into());
     }
-    cmd.extend(
-        [
-            "-device".into(),
-            "virtio-vga,xres=1920,yres=1080".into(),
-            "-drive".into(),
-            format!("if=pflash,format=raw,unit=0,file={ovmf},readonly=on"),
-            "-drive".into(),
-            format!("file={image},format=raw,if=none,id=hd"),
-            "-device".into(),
-            "virtio-blk-pci,drive=hd".into(),
-        ],
-    );
+    cmd.extend([
+        "-device".into(),
+        "virtio-vga,xres=1920,yres=1080".into(),
+        "-drive".into(),
+        format!("if=pflash,format=raw,unit=0,file={ovmf},readonly=on"),
+        "-drive".into(),
+        format!("file={image},format=raw,if=none,id=hd"),
+        "-device".into(),
+        "virtio-blk-pci,drive=hd".into(),
+    ]);
     // 附加卷挂 hd2、hd3…（多卷发现的测试夹具）。
     for (i, vimg) in extra_images.iter().enumerate() {
         let id = format!("hd{}", i + 2);
@@ -650,21 +659,19 @@ fn run_case(
         cmd.push("-device".into());
         cmd.push(format!("virtio-blk-pci,drive={id}"));
     }
-    cmd.extend(
-        [
-            "-smp".to_string(),
-            glob.smp.unwrap_or(4).to_string(),
-            "-m".into(),
-            glob.mem_mb.unwrap_or(1024).to_string(),
-            "-display".into(),
-            "none".into(),
-            "-no-reboot".into(),
-            "-serial".into(),
-            format!("file:{serial}"),
-            "-monitor".into(),
-            format!("telnet:127.0.0.1:{port},server,nowait"),
-        ],
-    );
+    cmd.extend([
+        "-smp".to_string(),
+        glob.smp.unwrap_or(4).to_string(),
+        "-m".into(),
+        glob.mem_mb.unwrap_or(1024).to_string(),
+        "-display".into(),
+        "none".into(),
+        "-no-reboot".into(),
+        "-serial".into(),
+        format!("file:{serial}"),
+        "-monitor".into(),
+        format!("telnet:127.0.0.1:{port},server,nowait"),
+    ]);
     cmd.extend(pick_accel());
     println!("  {}", cmd.join(" "));
     let mut proc = match Command::new(&cmd[0])
@@ -683,36 +690,39 @@ fn run_case(
 
     // 3. 等 boot 断言 -> 落定（菜单重画+排空陈旧键约 1s 量级，首键不等会被 flush 吃掉）
     //    -> 发键 -> 等最终断言（可 soak）。
-    let (ok, missing, _) =
-        wait_patterns(&serial, &case.boot_expect, timeout, &mut proc);
+    let (ok, missing, _) = wait_patterns(&serial, &case.boot_expect, timeout, &mut proc);
     if !ok {
         fail = Some(format!("boot patterns missing: {missing:?}"));
     } else {
         let settle = Duration::from_secs(case.settle_sec.or(glob.settle_sec).unwrap_or(8));
         std::thread::sleep(settle);
-            for k in &case.keys {
-                if fail.is_some() {
-                    break;
-                }
-                if !k.wait_for.is_empty() {
-                    let remain_k = timeout.saturating_sub(t0.elapsed()).max(Duration::from_secs(10));
-                    let (ok, missing, _) = wait_patterns(&serial, &k.wait_for, remain_k, &mut proc);
-                    if !ok {
-                        fail = Some(format!("key '{}' precondition missing: {missing:?}", k.send));
-                        break;
-                    }
-                }
-                if !sendkey(port, &k.send, Duration::from_secs(15)) {
-                    fail = Some(format!("sendkey {} failed", k.send));
-                    break;
-                }
-                std::thread::sleep(Duration::from_secs(k.wait_after));
+        for k in &case.keys {
+            if fail.is_some() {
+                break;
             }
+            if !k.wait_for.is_empty() {
+                let remain_k = timeout
+                    .saturating_sub(t0.elapsed())
+                    .max(Duration::from_secs(10));
+                let (ok, missing, _) = wait_patterns(&serial, &k.wait_for, remain_k, &mut proc);
+                if !ok {
+                    fail = Some(format!(
+                        "key '{}' precondition missing: {missing:?}",
+                        k.send
+                    ));
+                    break;
+                }
+            }
+            if !sendkey(port, &k.send, Duration::from_secs(15)) {
+                fail = Some(format!("sendkey {} failed", k.send));
+                break;
+            }
+            std::thread::sleep(Duration::from_secs(k.wait_after));
+        }
         if fail.is_none() {
             let elapsed = t0.elapsed();
             let remain = timeout.saturating_sub(elapsed).max(Duration::from_secs(10));
-            let (ok, missing, _) =
-                wait_patterns(&serial, &case.expect, remain, &mut proc);
+            let (ok, missing, _) = wait_patterns(&serial, &case.expect, remain, &mut proc);
             if !ok {
                 fail = Some(format!("expect patterns missing: {missing:?}"));
             } else if let Some(soak) = case.soak_sec {

@@ -29,8 +29,8 @@
 //! x86_64 only，由调用方保证。
 
 use alloc::vec::Vec;
-use core::arch::x86_64::{__cpuid, __cpuid_count, _xgetbv};
 use core::arch::asm;
+use core::arch::x86_64::{__cpuid, __cpuid_count, _xgetbv};
 
 use crate::diag::avx_checker::check_avx_support;
 use crate::error::Result;
@@ -51,11 +51,7 @@ fn rdtsc() -> u64 {
 }
 
 fn yn(b: bool) -> &'static str {
-    if b {
-        "YES"
-    } else {
-        "no"
-    }
+    if b { "YES" } else { "no" }
 }
 
 // ---------- ISA 门控 ----------
@@ -245,7 +241,10 @@ unsafe fn fill_mmx64(dst: *mut u8, len: usize, seed: u32) {
 /// SSE1 128 位（movups，FP 域存）：与 SSE2 movdqu 同宽，做编码域对照。
 unsafe fn fill_sse128(dst: *mut u8, len: usize, seed: u32) {
     unsafe {
-        let v: u128 = (seed as u128) | ((seed as u128) << 32) | ((seed as u128) << 64) | ((seed as u128) << 96);
+        let v: u128 = (seed as u128)
+            | ((seed as u128) << 32)
+            | ((seed as u128) << 64)
+            | ((seed as u128) << 96);
         let mut p = dst;
         let end = dst.add(len & !15);
         while p < end {
@@ -258,7 +257,10 @@ unsafe fn fill_sse128(dst: *mut u8, len: usize, seed: u32) {
 #[target_feature(enable = "sse2")]
 unsafe fn fill_sse2(dst: *mut u8, len: usize, seed: u32) {
     unsafe {
-        let v: u128 = (seed as u128) | ((seed as u128) << 32) | ((seed as u128) << 64) | ((seed as u128) << 96);
+        let v: u128 = (seed as u128)
+            | ((seed as u128) << 32)
+            | ((seed as u128) << 64)
+            | ((seed as u128) << 96);
         let mut p = dst;
         let end = dst.add(len & !15);
         while p < end {
@@ -271,7 +273,10 @@ unsafe fn fill_sse2(dst: *mut u8, len: usize, seed: u32) {
 #[target_feature(enable = "sse2")]
 unsafe fn fill_sse2_nt(dst: *mut u8, len: usize, seed: u32) {
     unsafe {
-        let v: u128 = (seed as u128) | ((seed as u128) << 32) | ((seed as u128) << 64) | ((seed as u128) << 96);
+        let v: u128 = (seed as u128)
+            | ((seed as u128) << 32)
+            | ((seed as u128) << 64)
+            | ((seed as u128) << 96);
         let mut p = dst;
         let end = dst.add(len & !15);
         while p < end {
@@ -286,7 +291,10 @@ unsafe fn fill_sse2_nt(dst: *mut u8, len: usize, seed: u32) {
 #[target_feature(enable = "avx")]
 unsafe fn fill_avx128(dst: *mut u8, len: usize, seed: u32) {
     unsafe {
-        let v: u128 = (seed as u128) | ((seed as u128) << 32) | ((seed as u128) << 64) | ((seed as u128) << 96);
+        let v: u128 = (seed as u128)
+            | ((seed as u128) << 32)
+            | ((seed as u128) << 64)
+            | ((seed as u128) << 96);
         let mut p = dst;
         let end = dst.add(len & !15);
         while p < end {
@@ -510,11 +518,21 @@ unsafe fn copy_avx2_pf(dst: *mut u8, src: *const u8, len: usize, hint: u8) {
         let n = len & !31;
         while i < n {
             match hint {
-                1 => asm!("prefetchnta [{p}]", p = in(reg) src.add(i + 512), options(nostack, preserves_flags)),
-                2 => asm!("prefetchw [{p}]", p = in(reg) src.add(i + 512), options(nostack, preserves_flags)),
-                3 => asm!("prefetcht0 [{p}]", p = in(reg) src.add(i + 512), options(nostack, preserves_flags)),
-                4 => asm!("prefetcht1 [{p}]", p = in(reg) src.add(i + 512), options(nostack, preserves_flags)),
-                5 => asm!("prefetcht2 [{p}]", p = in(reg) src.add(i + 512), options(nostack, preserves_flags)),
+                1 => {
+                    asm!("prefetchnta [{p}]", p = in(reg) src.add(i + 512), options(nostack, preserves_flags))
+                }
+                2 => {
+                    asm!("prefetchw [{p}]", p = in(reg) src.add(i + 512), options(nostack, preserves_flags))
+                }
+                3 => {
+                    asm!("prefetcht0 [{p}]", p = in(reg) src.add(i + 512), options(nostack, preserves_flags))
+                }
+                4 => {
+                    asm!("prefetcht1 [{p}]", p = in(reg) src.add(i + 512), options(nostack, preserves_flags))
+                }
+                5 => {
+                    asm!("prefetcht2 [{p}]", p = in(reg) src.add(i + 512), options(nostack, preserves_flags))
+                }
                 _ => {}
             }
             asm!("vmovdqu {t}, [{s}]", "vmovdqu [{d}], {t}",
@@ -572,7 +590,7 @@ unsafe fn convert_scalar(dst: *mut u8, src: *const u8, px: usize) {
 #[target_feature(enable = "avx")]
 unsafe fn convert_vpshufb128(dst: *mut u8, src: *const u8, px: usize) {
     unsafe {
-        use core::arch::x86_64::{_mm_set_epi8, __m128i};
+        use core::arch::x86_64::{__m128i, _mm_set_epi8};
         let m = _mm_set_epi8(15, 12, 13, 14, 11, 8, 9, 10, 7, 4, 5, 6, 3, 0, 1, 2);
         let mut i = 0;
         let n = px & !3;
@@ -628,7 +646,7 @@ unsafe fn convert_pshufb(dst: *mut u8, src: *const u8, px: usize) {
 #[target_feature(enable = "avx2")]
 unsafe fn convert_vpshufb256(dst: *mut u8, src: *const u8, px: usize) {
     unsafe {
-        use core::arch::x86_64::{_mm256_set_m128i, _mm_set_epi8};
+        use core::arch::x86_64::{_mm_set_epi8, _mm256_set_m128i};
         let m128 = _mm_set_epi8(15, 12, 13, 14, 11, 8, 9, 10, 7, 4, 5, 6, 3, 0, 1, 2);
         let m = _mm256_set_m128i(m128, m128);
         let mut i = 0;
@@ -658,7 +676,7 @@ unsafe fn convert_vpshufb256(dst: *mut u8, src: *const u8, px: usize) {
 #[target_feature(enable = "avx512f,avx512bw")]
 unsafe fn convert_vpshufb512(dst: *mut u8, src: *const u8, px: usize) {
     unsafe {
-        use core::arch::x86_64::{_mm512_broadcast_i32x4, _mm_set_epi8};
+        use core::arch::x86_64::{_mm_set_epi8, _mm512_broadcast_i32x4};
         let m128 = _mm_set_epi8(15, 12, 13, 14, 11, 8, 9, 10, 7, 4, 5, 6, 3, 0, 1, 2);
         let m = _mm512_broadcast_i32x4(m128);
         let mut i = 0;
@@ -731,7 +749,7 @@ unsafe fn convert_vpermb(dst: *mut u8, src: *const u8, px: usize) {
 /// 注：rustc 的 xop target_feature 尚未稳定，直接用 asm 发射，运行时门控。
 unsafe fn convert_vpperm_xop(dst: *mut u8, src: *const u8, px: usize) {
     unsafe {
-        use core::arch::x86_64::{_mm_set_epi8, __m128i};
+        use core::arch::x86_64::{__m128i, _mm_set_epi8};
         let m = _mm_set_epi8(15, 12, 13, 14, 11, 8, 9, 10, 7, 4, 5, 6, 3, 0, 1, 2);
         let mut i = 0;
         let n = px & !3;
@@ -1254,7 +1272,11 @@ unsafe fn gpr_blcfill_sum(buf: *const u32, n: usize) -> u64 {
 
 // ---------- 主入口 ----------
 
-pub fn run_section(report: &mut Vec<alloc::string::String>, screen: &mut Screen, tps: u64) -> Result {
+pub fn run_section(
+    report: &mut Vec<alloc::string::String>,
+    screen: &mut Screen,
+    tps: u64,
+) -> Result {
     let isa = read_isa();
     let g = read_gates(&isa);
     let (w, h) = screen.get_gop().current_mode_info().resolution();
@@ -1263,25 +1285,64 @@ pub fn run_section(report: &mut Vec<alloc::string::String>, screen: &mut Screen,
 
     tline!(report, screen, "-- gop-simd: full-ISA pixel path --");
     tline!(
-        report, screen,
+        report,
+        screen,
         "gates: MMX {} SSE {} SSE2 {} SSE3 {} SSSE3 {} SSE4.1 {} SSE4.2 {} AES {} PCLMUL {} SHA {} GFNI {} POPCNT {} RDRAND {} RDSEED {} MOVBE {} BMI1 {} BMI2 {} LZCNT {} TZCNT {} CLFLUSHOPT {} CLWB {} PREFETCHW {}",
-        yn(g.mmx), yn(g.sse), yn(g.sse2), yn(g.sse3), yn(g.ssse3), yn(g.sse41), yn(g.sse42),
-        yn(g.aes), yn(g.pclmulqdq), yn(g.sha), yn(g.gfni), yn(g.popcnt), yn(g.rdrand), yn(g.rdseed),
-        yn(g.movbe), yn(g.bmi1), yn(g.bmi2), yn(g.lzcnt), yn(g.tzcnt), yn(g.clflushopt), yn(g.clwb), yn(g.prefetchw),
+        yn(g.mmx),
+        yn(g.sse),
+        yn(g.sse2),
+        yn(g.sse3),
+        yn(g.ssse3),
+        yn(g.sse41),
+        yn(g.sse42),
+        yn(g.aes),
+        yn(g.pclmulqdq),
+        yn(g.sha),
+        yn(g.gfni),
+        yn(g.popcnt),
+        yn(g.rdrand),
+        yn(g.rdseed),
+        yn(g.movbe),
+        yn(g.bmi1),
+        yn(g.bmi2),
+        yn(g.lzcnt),
+        yn(g.tzcnt),
+        yn(g.clflushopt),
+        yn(g.clwb),
+        yn(g.prefetchw),
     );
     tline!(
-        report, screen,
+        report,
+        screen,
         "gates2: AVX {} AVX2 {} AVX512F {} BW {} VL {} VBMI {} VPOPCNTDQ {} VAES {} VPCLMUL {} || AMD: SSE4a {} 3DNow {} 3DNow+ {} XOP {} TBM {}",
-        yn(g.avx_usable), yn(g.avx2_usable), yn(g.avx512_usable), yn(g.avx512bw_hw),
-        yn(g.avx512vl_hw), yn(g.avx512vbmi_hw), yn(g.avx512vpopcntdq_hw), yn(g.vaes_hw), yn(g.vpclmulqdq_hw),
-        yn(g.sse4a), yn(g.d3now), yn(g.d3nowa), yn(g.xop), yn(g.tbm),
+        yn(g.avx_usable),
+        yn(g.avx2_usable),
+        yn(g.avx512_usable),
+        yn(g.avx512bw_hw),
+        yn(g.avx512vl_hw),
+        yn(g.avx512vbmi_hw),
+        yn(g.avx512vpopcntdq_hw),
+        yn(g.vaes_hw),
+        yn(g.vpclmulqdq_hw),
+        yn(g.sse4a),
+        yn(g.d3now),
+        yn(g.d3nowa),
+        yn(g.xop),
+        yn(g.tbm),
     );
     // 全叶原始值（7.EDX/7.1.EAX/ext.EDX 只报不测：AI/密码/历史语义，无像素通路）。
     // 7.1 子叶不存在时 EAX 恒零，has7.1 如实标注，免得把“不存在”误读成“全不支持”。
     tline!(
-        report, screen,
+        report,
+        screen,
         "raw: leaf7.EBX={:#010x} ECX={:#010x} EDX={:#010x} leaf7.1(has={})EAX={:#010x} ext.ECX={:#010x} EDX={:#010x}",
-        isa.b7, isa.c7, isa.d7, yn(isa.hass1), isa.s1, isa.xc, isa.xd,
+        isa.b7,
+        isa.c7,
+        isa.d7,
+        yn(isa.hass1),
+        isa.s1,
+        isa.xc,
+        isa.xd,
     );
 
     // framebuffer 对齐门：nt/512 要求天然对齐，否则如实 SKIP。
@@ -1293,7 +1354,12 @@ pub fn run_section(report: &mut Vec<alloc::string::String>, screen: &mut Screen,
     let aligned32 = fb_base & 31 == 0;
     let aligned64 = fb_base & 63 == 0;
     if !aligned64 {
-        tline!(report, screen, "note: fb base {:#x} not 64B-aligned, nt/512 variants SKIP", fb_base);
+        tline!(
+            report,
+            screen,
+            "note: fb base {:#x} not 64B-aligned, nt/512 variants SKIP",
+            fb_base
+        );
     }
 
     let seed = (rdtsc() as u32) | 1;
@@ -1308,20 +1374,80 @@ pub fn run_section(report: &mut Vec<alloc::string::String>, screen: &mut Screen,
             avx: bool,
         }
         let vars = [
-            F { name: "scalar-u64", on: true, f: fill_scalar_u64, avx: false },
-            F { name: "mmx-64", on: g.mmx, f: fill_mmx64, avx: false },
-            F { name: "sse-128", on: g.sse, f: fill_sse128, avx: false },
-            F { name: "sse2-128", on: g.sse2, f: fill_sse2, avx: false },
-            F { name: "sse2-128-nt", on: g.sse2 && aligned16, f: fill_sse2_nt, avx: false },
-            F { name: "avx-128-vex", on: g.avx_usable, f: fill_avx128, avx: true },
-            F { name: "avx2-256", on: g.avx2_usable, f: fill_avx2, avx: true },
-            F { name: "avx2-256-nt", on: g.avx2_usable && aligned32, f: fill_avx2_nt, avx: true },
-            F { name: "avx512-512", on: g.avx512_usable && aligned64, f: fill_avx512, avx: true },
-            F { name: "avx512-512-nt", on: g.avx512_usable && aligned64, f: fill_avx512_nt, avx: true },
-            F { name: "avx512vl-256", on: g.avx512_usable && g.avx512vl_hw && aligned32, f: fill_avx512vl256, avx: true },
+            F {
+                name: "scalar-u64",
+                on: true,
+                f: fill_scalar_u64,
+                avx: false,
+            },
+            F {
+                name: "mmx-64",
+                on: g.mmx,
+                f: fill_mmx64,
+                avx: false,
+            },
+            F {
+                name: "sse-128",
+                on: g.sse,
+                f: fill_sse128,
+                avx: false,
+            },
+            F {
+                name: "sse2-128",
+                on: g.sse2,
+                f: fill_sse2,
+                avx: false,
+            },
+            F {
+                name: "sse2-128-nt",
+                on: g.sse2 && aligned16,
+                f: fill_sse2_nt,
+                avx: false,
+            },
+            F {
+                name: "avx-128-vex",
+                on: g.avx_usable,
+                f: fill_avx128,
+                avx: true,
+            },
+            F {
+                name: "avx2-256",
+                on: g.avx2_usable,
+                f: fill_avx2,
+                avx: true,
+            },
+            F {
+                name: "avx2-256-nt",
+                on: g.avx2_usable && aligned32,
+                f: fill_avx2_nt,
+                avx: true,
+            },
+            F {
+                name: "avx512-512",
+                on: g.avx512_usable && aligned64,
+                f: fill_avx512,
+                avx: true,
+            },
+            F {
+                name: "avx512-512-nt",
+                on: g.avx512_usable && aligned64,
+                f: fill_avx512_nt,
+                avx: true,
+            },
+            F {
+                name: "avx512vl-256",
+                on: g.avx512_usable && g.avx512vl_hw && aligned32,
+                f: fill_avx512vl256,
+                avx: true,
+            },
         ];
         for v in vars.iter().filter(|v| !v.on) {
-            tline!(report, screen, "gop-simd fill {}: SKIP (gate/align)", v.name);
+            tline!(
+                report,
+                screen,
+                "gop-simd fill {}: SKIP (gate/align)",
+                v.name
+            );
         }
         let live: Vec<&F> = vars.iter().filter(|v| v.on).collect();
         // 热身 1 轮（不计时）。
@@ -1353,14 +1479,18 @@ pub fn run_section(report: &mut Vec<alloc::string::String>, screen: &mut Screen,
         }
         let mut base_mbs = 0.0;
         for (i, v) in live.iter().enumerate() {
-            let mbs = (ROUNDS * fb_bytes as u64) as f64 * tps as f64 / (acc[i].max(1) as f64 * 1024.0 * 1024.0);
+            let mbs = (ROUNDS * fb_bytes as u64) as f64 * tps as f64
+                / (acc[i].max(1) as f64 * 1024.0 * 1024.0);
             if i == 0 {
                 base_mbs = mbs;
             }
             tline!(
-                report, screen,
+                report,
+                screen,
                 "gop-simd fill {:<14}: {:7.1} MB/s ({:+.0}% vs scalar)",
-                v.name, mbs, (mbs - base_mbs) / base_mbs.max(0.01) * 100.0
+                v.name,
+                mbs,
+                (mbs - base_mbs) / base_mbs.max(0.01) * 100.0
             );
         }
     }
@@ -1386,20 +1516,80 @@ pub fn run_section(report: &mut Vec<alloc::string::String>, screen: &mut Screen,
             avx: bool,
         }
         let vars = [
-            C { name: "scalar-u64", on: true, f: copy_scalar_u64, avx: false },
-            C { name: "mmx-64", on: g.mmx, f: copy_mmx64, avx: false },
-            C { name: "sse-128", on: g.sse, f: copy_sse128, avx: false },
-            C { name: "sse2-128", on: g.sse2, f: copy_sse2, avx: false },
-            C { name: "sse3-lddqu", on: g.sse3, f: copy_sse3_lddqu, avx: false },
-            C { name: "sse2-128-nt", on: g.sse2 && aligned16, f: copy_sse2_nt, avx: false },
-            C { name: "avx-128-vex", on: g.avx_usable, f: copy_avx128, avx: true },
-            C { name: "avx2-256", on: g.avx2_usable, f: copy_avx2, avx: true },
-            C { name: "avx2-256-nt", on: g.avx2_usable && aligned32, f: copy_avx2_nt, avx: true },
-            C { name: "avx512-512", on: g.avx512_usable && aligned64, f: copy_avx512, avx: true },
-            C { name: "avx512-512-nt", on: g.avx512_usable && aligned64, f: copy_avx512_nt, avx: true },
+            C {
+                name: "scalar-u64",
+                on: true,
+                f: copy_scalar_u64,
+                avx: false,
+            },
+            C {
+                name: "mmx-64",
+                on: g.mmx,
+                f: copy_mmx64,
+                avx: false,
+            },
+            C {
+                name: "sse-128",
+                on: g.sse,
+                f: copy_sse128,
+                avx: false,
+            },
+            C {
+                name: "sse2-128",
+                on: g.sse2,
+                f: copy_sse2,
+                avx: false,
+            },
+            C {
+                name: "sse3-lddqu",
+                on: g.sse3,
+                f: copy_sse3_lddqu,
+                avx: false,
+            },
+            C {
+                name: "sse2-128-nt",
+                on: g.sse2 && aligned16,
+                f: copy_sse2_nt,
+                avx: false,
+            },
+            C {
+                name: "avx-128-vex",
+                on: g.avx_usable,
+                f: copy_avx128,
+                avx: true,
+            },
+            C {
+                name: "avx2-256",
+                on: g.avx2_usable,
+                f: copy_avx2,
+                avx: true,
+            },
+            C {
+                name: "avx2-256-nt",
+                on: g.avx2_usable && aligned32,
+                f: copy_avx2_nt,
+                avx: true,
+            },
+            C {
+                name: "avx512-512",
+                on: g.avx512_usable && aligned64,
+                f: copy_avx512,
+                avx: true,
+            },
+            C {
+                name: "avx512-512-nt",
+                on: g.avx512_usable && aligned64,
+                f: copy_avx512_nt,
+                avx: true,
+            },
         ];
         for v in vars.iter().filter(|v| !v.on) {
-            tline!(report, screen, "gop-simd copy {}: SKIP (gate/align)", v.name);
+            tline!(
+                report,
+                screen,
+                "gop-simd copy {}: SKIP (gate/align)",
+                v.name
+            );
         }
         let live: Vec<&C> = vars.iter().filter(|v| v.on).collect();
         {
@@ -1432,14 +1622,18 @@ pub fn run_section(report: &mut Vec<alloc::string::String>, screen: &mut Screen,
         }
         let mut base_mbs = 0.0;
         for (i, v) in live.iter().enumerate() {
-            let mbs = (ROUNDS * fb_bytes as u64) as f64 * tps as f64 / (acc[i].max(1) as f64 * 1024.0 * 1024.0);
+            let mbs = (ROUNDS * fb_bytes as u64) as f64 * tps as f64
+                / (acc[i].max(1) as f64 * 1024.0 * 1024.0);
             if i == 0 {
                 base_mbs = mbs;
             }
             tline!(
-                report, screen,
+                report,
+                screen,
                 "gop-simd copy {:<14}: {:7.1} MB/s ({:+.0}% vs scalar)",
-                v.name, mbs, (mbs - base_mbs) / base_mbs.max(0.01) * 100.0
+                v.name,
+                mbs,
+                (mbs - base_mbs) / base_mbs.max(0.01) * 100.0
             );
         }
         // prefetch 扫描（同 256 位宽，只换 hint）。
@@ -1470,16 +1664,33 @@ pub fn run_section(report: &mut Vec<alloc::string::String>, screen: &mut Screen,
                 }
             }
             unsafe { vzeroupper() };
-            let mbs = |dt: u64| (4 * fb_bytes as u64) as f64 * tps as f64 / (dt.max(1) as f64 * 1024.0 * 1024.0);
+            let mbs = |dt: u64| {
+                (4 * fb_bytes as u64) as f64 * tps as f64 / (dt.max(1) as f64 * 1024.0 * 1024.0)
+            };
             for (k, (name, _, ok)) in hints.iter().enumerate() {
                 if *ok {
-                    tline!(report, screen, "gop-simd copy avx2-256-pf-{:<10}: {:.1} MB/s", name, mbs(pf[k]));
+                    tline!(
+                        report,
+                        screen,
+                        "gop-simd copy avx2-256-pf-{:<10}: {:.1} MB/s",
+                        name,
+                        mbs(pf[k])
+                    );
                 } else {
-                    tline!(report, screen, "gop-simd copy avx2-256-pf-{:<10}: SKIP (no hw)", name);
+                    tline!(
+                        report,
+                        screen,
+                        "gop-simd copy avx2-256-pf-{:<10}: SKIP (no hw)",
+                        name
+                    );
                 }
             }
         } else {
-            tline!(report, screen, "gop-simd copy prefetch sweep: SKIP (need AVX2)");
+            tline!(
+                report,
+                screen,
+                "gop-simd copy prefetch sweep: SKIP (need AVX2)"
+            );
         }
     }
 
@@ -1500,8 +1711,14 @@ pub fn run_section(report: &mut Vec<alloc::string::String>, screen: &mut Screen,
             }
             rdtsc() - t0
         };
-        let scalar_mbs = (5 * fb_bytes as u64) as f64 * tps as f64 / (t_scalar.max(1) as f64 * 1024.0 * 1024.0);
-        tline!(report, screen, "gop-simd convert scalar     : {:.1} MB/s", scalar_mbs);
+        let scalar_mbs =
+            (5 * fb_bytes as u64) as f64 * tps as f64 / (t_scalar.max(1) as f64 * 1024.0 * 1024.0);
+        tline!(
+            report,
+            screen,
+            "gop-simd convert scalar     : {:.1} MB/s",
+            scalar_mbs
+        );
         if g.ssse3 {
             let s = core::hint::black_box(src.as_ptr());
             let d = core::hint::black_box(dst.as_mut_ptr());
@@ -1513,10 +1730,21 @@ pub fn run_section(report: &mut Vec<alloc::string::String>, screen: &mut Screen,
                 unsafe { convert_pshufb(d, s, px) };
             }
             let dt = rdtsc() - t0;
-            let mbs = (5 * fb_bytes as u64) as f64 * tps as f64 / (dt.max(1) as f64 * 1024.0 * 1024.0);
-            tline!(report, screen, "gop-simd convert ssse3-pshufb: {:.1} MB/s ({:+.0}%)", mbs, (mbs - scalar_mbs) / scalar_mbs.max(0.01) * 100.0);
+            let mbs =
+                (5 * fb_bytes as u64) as f64 * tps as f64 / (dt.max(1) as f64 * 1024.0 * 1024.0);
+            tline!(
+                report,
+                screen,
+                "gop-simd convert ssse3-pshufb: {:.1} MB/s ({:+.0}%)",
+                mbs,
+                (mbs - scalar_mbs) / scalar_mbs.max(0.01) * 100.0
+            );
         } else {
-            tline!(report, screen, "gop-simd convert ssse3-pshufb: SKIP (no SSSE3)");
+            tline!(
+                report,
+                screen,
+                "gop-simd convert ssse3-pshufb: SKIP (no SSSE3)"
+            );
         }
         if g.avx2_usable {
             let s = core::hint::black_box(src.as_ptr());
@@ -1530,10 +1758,21 @@ pub fn run_section(report: &mut Vec<alloc::string::String>, screen: &mut Screen,
             }
             let dt = rdtsc() - t0;
             unsafe { vzeroupper() };
-            let mbs = (5 * fb_bytes as u64) as f64 * tps as f64 / (dt.max(1) as f64 * 1024.0 * 1024.0);
-            tline!(report, screen, "gop-simd convert avx2-vpshufb : {:.1} MB/s ({:+.0}%)", mbs, (mbs - scalar_mbs) / scalar_mbs.max(0.01) * 100.0);
+            let mbs =
+                (5 * fb_bytes as u64) as f64 * tps as f64 / (dt.max(1) as f64 * 1024.0 * 1024.0);
+            tline!(
+                report,
+                screen,
+                "gop-simd convert avx2-vpshufb : {:.1} MB/s ({:+.0}%)",
+                mbs,
+                (mbs - scalar_mbs) / scalar_mbs.max(0.01) * 100.0
+            );
         } else {
-            tline!(report, screen, "gop-simd convert avx2-vpshufb : SKIP (need AVX2+XCR0)");
+            tline!(
+                report,
+                screen,
+                "gop-simd convert avx2-vpshufb : SKIP (need AVX2+XCR0)"
+            );
         }
         if g.avx512_usable && g.avx512bw_hw && aligned64 {
             let s = core::hint::black_box(src.as_ptr());
@@ -1547,10 +1786,21 @@ pub fn run_section(report: &mut Vec<alloc::string::String>, screen: &mut Screen,
             }
             let dt = rdtsc() - t0;
             unsafe { vzeroupper() };
-            let mbs = (5 * fb_bytes as u64) as f64 * tps as f64 / (dt.max(1) as f64 * 1024.0 * 1024.0);
-            tline!(report, screen, "gop-simd convert avx512bw-shuf: {:.1} MB/s ({:+.0}%)", mbs, (mbs - scalar_mbs) / scalar_mbs.max(0.01) * 100.0);
+            let mbs =
+                (5 * fb_bytes as u64) as f64 * tps as f64 / (dt.max(1) as f64 * 1024.0 * 1024.0);
+            tline!(
+                report,
+                screen,
+                "gop-simd convert avx512bw-shuf: {:.1} MB/s ({:+.0}%)",
+                mbs,
+                (mbs - scalar_mbs) / scalar_mbs.max(0.01) * 100.0
+            );
         } else {
-            tline!(report, screen, "gop-simd convert avx512bw-shuf: SKIP (need AVX512F+BW+XCR0-ZMM)");
+            tline!(
+                report,
+                screen,
+                "gop-simd convert avx512bw-shuf: SKIP (need AVX512F+BW+XCR0-ZMM)"
+            );
         }
         if g.avx_usable {
             let s = core::hint::black_box(src.as_ptr());
@@ -1564,10 +1814,21 @@ pub fn run_section(report: &mut Vec<alloc::string::String>, screen: &mut Screen,
             }
             let dt = rdtsc() - t0;
             unsafe { vzeroupper() };
-            let mbs = (5 * fb_bytes as u64) as f64 * tps as f64 / (dt.max(1) as f64 * 1024.0 * 1024.0);
-            tline!(report, screen, "gop-simd convert avx-pshufb128 : {:.1} MB/s ({:+.0}%)", mbs, (mbs - scalar_mbs) / scalar_mbs.max(0.01) * 100.0);
+            let mbs =
+                (5 * fb_bytes as u64) as f64 * tps as f64 / (dt.max(1) as f64 * 1024.0 * 1024.0);
+            tline!(
+                report,
+                screen,
+                "gop-simd convert avx-pshufb128 : {:.1} MB/s ({:+.0}%)",
+                mbs,
+                (mbs - scalar_mbs) / scalar_mbs.max(0.01) * 100.0
+            );
         } else {
-            tline!(report, screen, "gop-simd convert avx-pshufb128 : SKIP (need AVX)");
+            tline!(
+                report,
+                screen,
+                "gop-simd convert avx-pshufb128 : SKIP (need AVX)"
+            );
         }
         if g.avx512_usable && g.avx512bw_hw && g.avx512vbmi_hw && aligned64 {
             let s = core::hint::black_box(src.as_ptr());
@@ -1581,10 +1842,21 @@ pub fn run_section(report: &mut Vec<alloc::string::String>, screen: &mut Screen,
             }
             let dt = rdtsc() - t0;
             unsafe { vzeroupper() };
-            let mbs = (5 * fb_bytes as u64) as f64 * tps as f64 / (dt.max(1) as f64 * 1024.0 * 1024.0);
-            tline!(report, screen, "gop-simd convert avx512vbmi-permb: {:.1} MB/s ({:+.0}%)", mbs, (mbs - scalar_mbs) / scalar_mbs.max(0.01) * 100.0);
+            let mbs =
+                (5 * fb_bytes as u64) as f64 * tps as f64 / (dt.max(1) as f64 * 1024.0 * 1024.0);
+            tline!(
+                report,
+                screen,
+                "gop-simd convert avx512vbmi-permb: {:.1} MB/s ({:+.0}%)",
+                mbs,
+                (mbs - scalar_mbs) / scalar_mbs.max(0.01) * 100.0
+            );
         } else {
-            tline!(report, screen, "gop-simd convert avx512vbmi-permb: SKIP (need AVX512VBMI+XCR0-ZMM)");
+            tline!(
+                report,
+                screen,
+                "gop-simd convert avx512vbmi-permb: SKIP (need AVX512VBMI+XCR0-ZMM)"
+            );
         }
         if g.xop {
             let s = core::hint::black_box(src.as_ptr());
@@ -1597,10 +1869,21 @@ pub fn run_section(report: &mut Vec<alloc::string::String>, screen: &mut Screen,
                 unsafe { convert_vpperm_xop(d, s, px) };
             }
             let dt = rdtsc() - t0;
-            let mbs = (5 * fb_bytes as u64) as f64 * tps as f64 / (dt.max(1) as f64 * 1024.0 * 1024.0);
-            tline!(report, screen, "gop-simd convert xop-vpperm    : {:.1} MB/s ({:+.0}%)", mbs, (mbs - scalar_mbs) / scalar_mbs.max(0.01) * 100.0);
+            let mbs =
+                (5 * fb_bytes as u64) as f64 * tps as f64 / (dt.max(1) as f64 * 1024.0 * 1024.0);
+            tline!(
+                report,
+                screen,
+                "gop-simd convert xop-vpperm    : {:.1} MB/s ({:+.0}%)",
+                mbs,
+                (mbs - scalar_mbs) / scalar_mbs.max(0.01) * 100.0
+            );
         } else {
-            tline!(report, screen, "gop-simd convert xop-vpperm    : SKIP (no XOP)");
+            tline!(
+                report,
+                screen,
+                "gop-simd convert xop-vpperm    : SKIP (no XOP)"
+            );
         }
         core::hint::black_box(dst.as_ptr());
     }
@@ -1616,7 +1899,13 @@ pub fn run_section(report: &mut Vec<alloc::string::String>, screen: &mut Screen,
         let dt = rdtsc() - t0;
         core::hint::black_box(chk);
         let mbs = (5 * fb_bytes as u64) as f64 * tps as f64 / (dt.max(1) as f64 * 1024.0 * 1024.0);
-        tline!(report, screen, "gop-simd checksum scalar-sum: {:.1} MB/s (chk={:#x})", mbs, chk & 0xFFFF);
+        tline!(
+            report,
+            screen,
+            "gop-simd checksum scalar-sum: {:.1} MB/s (chk={:#x})",
+            mbs,
+            chk & 0xFFFF
+        );
         if g.sse42 {
             let t0 = rdtsc();
             let mut chk = 0u64;
@@ -1625,10 +1914,21 @@ pub fn run_section(report: &mut Vec<alloc::string::String>, screen: &mut Screen,
             }
             let dt = rdtsc() - t0;
             core::hint::black_box(chk);
-            let m2 = (5 * fb_bytes as u64) as f64 * tps as f64 / (dt.max(1) as f64 * 1024.0 * 1024.0);
-            tline!(report, screen, "gop-simd checksum sse42-crc32: {:.1} MB/s ({:+.0}%)", m2, (m2 - mbs) / mbs.max(0.01) * 100.0);
+            let m2 =
+                (5 * fb_bytes as u64) as f64 * tps as f64 / (dt.max(1) as f64 * 1024.0 * 1024.0);
+            tline!(
+                report,
+                screen,
+                "gop-simd checksum sse42-crc32: {:.1} MB/s ({:+.0}%)",
+                m2,
+                (m2 - mbs) / mbs.max(0.01) * 100.0
+            );
         } else {
-            tline!(report, screen, "gop-simd checksum sse42-crc32: SKIP (no SSE4.2)");
+            tline!(
+                report,
+                screen,
+                "gop-simd checksum sse42-crc32: SKIP (no SSE4.2)"
+            );
         }
         if g.popcnt {
             let t0 = rdtsc();
@@ -1637,8 +1937,15 @@ pub fn run_section(report: &mut Vec<alloc::string::String>, screen: &mut Screen,
                 bits = bits.wrapping_add(unsafe { density_popcnt(s, fb_bytes) });
             }
             let dt = rdtsc() - t0;
-            let m2 = (3 * fb_bytes as u64) as f64 * tps as f64 / (dt.max(1) as f64 * 1024.0 * 1024.0);
-            tline!(report, screen, "gop-simd density popcnt: {:.1} MB/s (bits/byte={:.2})", m2, bits as f64 / (3 * fb_bytes) as f64);
+            let m2 =
+                (3 * fb_bytes as u64) as f64 * tps as f64 / (dt.max(1) as f64 * 1024.0 * 1024.0);
+            tline!(
+                report,
+                screen,
+                "gop-simd density popcnt: {:.1} MB/s (bits/byte={:.2})",
+                m2,
+                bits as f64 / (3 * fb_bytes) as f64
+            );
         } else {
             tline!(report, screen, "gop-simd density popcnt: SKIP (no POPCNT)");
         }
@@ -1650,43 +1957,69 @@ pub fn run_section(report: &mut Vec<alloc::string::String>, screen: &mut Screen,
             }
             let dt = rdtsc() - t0;
             unsafe { vzeroupper() };
-            let m2 = (3 * fb_bytes as u64) as f64 * tps as f64 / (dt.max(1) as f64 * 1024.0 * 1024.0);
+            let m2 =
+                (3 * fb_bytes as u64) as f64 * tps as f64 / (dt.max(1) as f64 * 1024.0 * 1024.0);
             tline!(report, screen, "gop-simd density vpopcntq: {:.1} MB/s", m2);
         } else {
-            tline!(report, screen, "gop-simd density vpopcntq: SKIP (need AVX512VPOPCNTDQ+XCR0-ZMM)");
+            tline!(
+                report,
+                screen,
+                "gop-simd density vpopcntq: SKIP (need AVX512VPOPCNTDQ+XCR0-ZMM)"
+            );
         }
 
         // ---- SSE4.1 拆包 / 密码 / GFNI / AMD 扩展数据通路 ----
-        let mut extra = |name: &str, on: bool, collapse_zero: bool, f: unsafe fn(*const u8, usize) -> u64| {
-            if !on {
-                tline!(report, screen, "gop-simd extra {:<16}: SKIP", name);
-                return;
-            }
-            let s = core::hint::black_box(src_buf.as_ptr());
-            core::hint::black_box(unsafe { f(s, fb_bytes) }); // 热身
-            let t0 = rdtsc();
-            let mut acc = 0u64;
-            for _ in 0..3 {
-                acc = acc.wrapping_add(unsafe { f(s, fb_bytes) });
-            }
-            let dt = rdtsc() - t0;
-            core::hint::black_box(acc);
-            let mbs = (3 * fb_bytes as u64) as f64 * tps as f64 / (dt.max(1) as f64 * 1024.0 * 1024.0);
-            if collapse_zero {
-                // PCLMUL 链在 8MB 随机缓冲下数学上必坍缩为 0（截断环赋值 walk，
-                // 宿主机同算法复现 o0=o1=0，二进制编码已确认无误），chk!=0 反而是错。
-                tline!(report, screen, "gop-simd extra {:<16}: {:.1} MB/s (collapse-invariant {})", name, mbs, if acc == 0 { "PASS" } else { "FAIL" });
-            } else {
-                tline!(report, screen, "gop-simd extra {:<16}: {:.1} MB/s (chk={:#x})", name, mbs, acc & 0xFFFF);
-            }
-        };
+        let mut extra =
+            |name: &str, on: bool, collapse_zero: bool, f: unsafe fn(*const u8, usize) -> u64| {
+                if !on {
+                    tline!(report, screen, "gop-simd extra {:<16}: SKIP", name);
+                    return;
+                }
+                let s = core::hint::black_box(src_buf.as_ptr());
+                core::hint::black_box(unsafe { f(s, fb_bytes) }); // 热身
+                let t0 = rdtsc();
+                let mut acc = 0u64;
+                for _ in 0..3 {
+                    acc = acc.wrapping_add(unsafe { f(s, fb_bytes) });
+                }
+                let dt = rdtsc() - t0;
+                core::hint::black_box(acc);
+                let mbs = (3 * fb_bytes as u64) as f64 * tps as f64
+                    / (dt.max(1) as f64 * 1024.0 * 1024.0);
+                if collapse_zero {
+                    // PCLMUL 链在 8MB 随机缓冲下数学上必坍缩为 0（截断环赋值 walk，
+                    // 宿主机同算法复现 o0=o1=0，二进制编码已确认无误），chk!=0 反而是错。
+                    tline!(
+                        report,
+                        screen,
+                        "gop-simd extra {:<16}: {:.1} MB/s (collapse-invariant {})",
+                        name,
+                        mbs,
+                        if acc == 0 { "PASS" } else { "FAIL" }
+                    );
+                } else {
+                    tline!(
+                        report,
+                        screen,
+                        "gop-simd extra {:<16}: {:.1} MB/s (chk={:#x})",
+                        name,
+                        mbs,
+                        acc & 0xFFFF
+                    );
+                }
+            };
         extra("sse4.1-unpack", g.sse41, false, extra_sse41_unpack);
         extra("aes-ni", g.aes, false, crypto_aes);
         extra("pclmulqdq", g.pclmulqdq, true, crypto_pclmul);
         extra("sha-ext", g.sha, false, crypto_sha);
         extra("gfni", g.gfni, false, crypto_gfni);
         extra("vaes-256", g.vaes_hw && g.avx2_usable, false, crypto_vaes);
-        extra("vpclmulqdq-256", g.vpclmulqdq_hw && g.avx2_usable, true, crypto_vpclmul);
+        extra(
+            "vpclmulqdq-256",
+            g.vpclmulqdq_hw && g.avx2_usable,
+            true,
+            crypto_vpclmul,
+        );
         extra("amd-sse4a", g.sse4a, false, crypto_sse4a);
         extra("amd-3dnow", g.d3nowa, false, crypto_3dnow);
     }
@@ -1705,7 +2038,13 @@ pub fn run_section(report: &mut Vec<alloc::string::String>, screen: &mut Screen,
             let fails = unsafe { rng_rdrand(buf.as_mut_ptr(), words) };
             let dt = rdtsc() - t0;
             let m2 = (fb_bytes as u64) as f64 * tps as f64 / (dt.max(1) as f64 * 1024.0 * 1024.0);
-            tline!(report, screen, "gop-simd rng rdrand: {:.1} MB/s (fails={})", m2, fails);
+            tline!(
+                report,
+                screen,
+                "gop-simd rng rdrand: {:.1} MB/s (fails={})",
+                m2,
+                fails
+            );
         } else {
             tline!(report, screen, "gop-simd rng rdrand: SKIP (no RDRAND hw)");
         }
@@ -1715,7 +2054,13 @@ pub fn run_section(report: &mut Vec<alloc::string::String>, screen: &mut Screen,
             let fails = unsafe { rng_rdseed(buf.as_mut_ptr(), half) };
             let dt = rdtsc() - t0;
             let m2 = (half as u64 * 4) as f64 * tps as f64 / (dt.max(1) as f64 * 1024.0 * 1024.0);
-            tline!(report, screen, "gop-simd rng rdseed: {:.1} MB/s (fails={}, half-buf)", m2, fails);
+            tline!(
+                report,
+                screen,
+                "gop-simd rng rdseed: {:.1} MB/s (fails={}, half-buf)",
+                m2,
+                fails
+            );
         } else {
             tline!(report, screen, "gop-simd rng rdseed: SKIP (no RDSEED hw)");
         }
@@ -1745,7 +2090,12 @@ pub fn run_section(report: &mut Vec<alloc::string::String>, screen: &mut Screen,
             }
             let dt = rdtsc() - t0;
             core::hint::black_box(acc);
-            tline!(report, screen, "gop-simd gpr bmi1-bextr: {:.1} MB/s", (3 * fb_bytes as u64) as f64 * tps as f64 / (dt.max(1) as f64 * 1024.0 * 1024.0));
+            tline!(
+                report,
+                screen,
+                "gop-simd gpr bmi1-bextr: {:.1} MB/s",
+                (3 * fb_bytes as u64) as f64 * tps as f64 / (dt.max(1) as f64 * 1024.0 * 1024.0)
+            );
         } else {
             tline!(report, screen, "gop-simd gpr bmi1-bextr: SKIP (no BMI1)");
         }
@@ -1757,7 +2107,12 @@ pub fn run_section(report: &mut Vec<alloc::string::String>, screen: &mut Screen,
             }
             let dt = rdtsc() - t0;
             core::hint::black_box(acc);
-            tline!(report, screen, "gop-simd gpr bmi2-pext : {:.1} MB/s", (3 * fb_bytes as u64) as f64 * tps as f64 / (dt.max(1) as f64 * 1024.0 * 1024.0));
+            tline!(
+                report,
+                screen,
+                "gop-simd gpr bmi2-pext : {:.1} MB/s",
+                (3 * fb_bytes as u64) as f64 * tps as f64 / (dt.max(1) as f64 * 1024.0 * 1024.0)
+            );
         } else {
             tline!(report, screen, "gop-simd gpr bmi2-pext : SKIP (no BMI2)");
         }
@@ -1769,7 +2124,12 @@ pub fn run_section(report: &mut Vec<alloc::string::String>, screen: &mut Screen,
             }
             let dt = rdtsc() - t0;
             core::hint::black_box(acc);
-            tline!(report, screen, "gop-simd gpr lzcnt     : {:.1} MB/s", (3 * fb_bytes as u64) as f64 * tps as f64 / (dt.max(1) as f64 * 1024.0 * 1024.0));
+            tline!(
+                report,
+                screen,
+                "gop-simd gpr lzcnt     : {:.1} MB/s",
+                (3 * fb_bytes as u64) as f64 * tps as f64 / (dt.max(1) as f64 * 1024.0 * 1024.0)
+            );
         } else {
             tline!(report, screen, "gop-simd gpr lzcnt     : SKIP (no LZCNT)");
         }
@@ -1785,8 +2145,13 @@ pub fn run_section(report: &mut Vec<alloc::string::String>, screen: &mut Screen,
             }
             let dt = rdtsc() - t0;
             core::hint::black_box(acc);
-            tline!(report, screen, "gop-simd gpr {:<16}: {:.1} MB/s", name,
-                (3 * fb_bytes as u64) as f64 * tps as f64 / (dt.max(1) as f64 * 1024.0 * 1024.0));
+            tline!(
+                report,
+                screen,
+                "gop-simd gpr {:<16}: {:.1} MB/s",
+                name,
+                (3 * fb_bytes as u64) as f64 * tps as f64 / (dt.max(1) as f64 * 1024.0 * 1024.0)
+            );
         };
         gprx("bmi1-andn", g.bmi1, gpr_andn_sum);
         gprx("bmi1-tzcnt", g.tzcnt, gpr_tzcnt_sum);
@@ -1799,11 +2164,24 @@ pub fn run_section(report: &mut Vec<alloc::string::String>, screen: &mut Screen,
     }
 
     // ---- 本节归因 ----
-    tline!(report, screen, "verdict: gop-simd widths compared against same-run scalar (no stale baselines)");
-    tline!(report, screen, "verdict: nt-stream wins only if WC-write-combining not already optimal; else temporal wins (fence cost)");
-    tline!(report, screen, "verdict: shufb-lanes are per-128b; 256/512 speedups come from width, not fewer shuffles");
     tline!(
-        report, screen,
+        report,
+        screen,
+        "verdict: gop-simd widths compared against same-run scalar (no stale baselines)"
+    );
+    tline!(
+        report,
+        screen,
+        "verdict: nt-stream wins only if WC-write-combining not already optimal; else temporal wins (fence cost)"
+    );
+    tline!(
+        report,
+        screen,
+        "verdict: shufb-lanes are per-128b; 256/512 speedups come from width, not fewer shuffles"
+    );
+    tline!(
+        report,
+        screen,
         "note: not-executed (by design): FP vectors FMA/FMA4/F16C/AVX512-FP16/BF16/AVX512-BF16 (target soft-float, would scalarize); AI/matrix VNNI/AVX-VNNI/BITALG/AMX-*/IFMA/VP2INTERSECT/4FMAPS/4VNNIW; system/bigint ADX/FSGSBASE/SMAP/XSAVE/CET; AMD legacy FP MMXEXT/FFXSR. Everything else is executed, gated, or SKIP-with-reason."
     );
     let _ = stride;

@@ -1,4 +1,5 @@
-//! EFI chainload（基于 `edera-sprout-eficore`，`boot` bin 不可依赖，自研组装）。
+//! EFI chainload（基于 `edera-sprout-eficore` + `edera-sprout-parsing` 现货组装；
+//! `boot` lib 经 `patches/` 叠 `[lib]` 后直调 `boot_counter`，见 `entries.rs`）。
 //!
 //! 与上游 `crates/boot/src/actions/chainload.rs` 的偏离（QEMU 实测结论）：
 //! 上游用 `resolve_path`（DevicePathFromText 文本往返 + `locate_device_path`）
@@ -15,7 +16,7 @@
 //! 直接用给定 buffer；`file_path` 照给，子镜像设备上下文完整）。
 //! 自检：`locate_device_path` 验证拼出的路径能定位回本卷（串口 `locate ok`），
 //! 否则 file_path 给了也白给（曾因此子实例无卷）。
-//! 代价：跨盘启动项不支持（entries 本来就只枚举本卷，单盘 U 盘场景全覆盖）。
+//! 跨盘：目标卷设备句柄拼路径 + 从该卷直读（`volume` 参数，本卷传 `None`）。
 //! `LoadedImage.set_load_options`（BLS `options` 透传）与 `UnloadGuard` 照抄上游。
 
 use alloc::format;

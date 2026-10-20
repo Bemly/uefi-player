@@ -12,7 +12,7 @@ use uefi::boot::stall;
 
 use crate::diag::common::{flush_keys, pause_return, poll_key};
 use crate::diag::registry::{Entry, ITEMS};
-use crate::error::{handle_fatal, NyaStatus, Result};
+use crate::error::{NyaStatus, Result, handle_fatal};
 use crate::graphics::{Screen, calibrate_tps, tsc};
 use crate::video::decoder::Clip;
 use crate::wallpaper::{self, WP_H, WP_TOP, WP_W};
@@ -22,7 +22,12 @@ fn draw_menu(screen: &mut Screen) {
     screen.reset_cursor();
     screen.draw_str("== UEFI Diag Menu ==");
     for item in ITEMS {
-        screen.draw_str(&alloc::format!("[{}] {} - {}", item.key, item.name, item.desc));
+        screen.draw_str(&alloc::format!(
+            "[{}] {} - {}",
+            item.key,
+            item.name,
+            item.desc
+        ));
     }
     screen.draw_str("[r] reboot  [q] back to wallpaper");
     screen.draw_str("Press key to select:");
@@ -55,7 +60,11 @@ fn load_background(screen: &mut Screen) -> Option<WpState> {
     }
     let (w, h) = screen.get_gop().current_mode_info().resolution();
     if (w as usize, h as usize) != (WP_W, WP_H) {
-        log::warn!("wallpaper: menu bg skipped (mode {}x{}, need 1920x1080)", w, h);
+        log::warn!(
+            "wallpaper: menu bg skipped (mode {}x{}, need 1920x1080)",
+            w,
+            h
+        );
         return None;
     }
     let tps = calibrate_tps();
@@ -156,11 +165,11 @@ pub fn run_menu(mut screen: Screen) -> Screen {
                         // 先释放 Screen 再跑，跑完重建 Screen 回菜单。
                         // 注意：这里不清屏——demo 画面要留给用户看，
                         // 提示行打在底部。
-                    drop(screen);
-                    let result = f();
-                    screen = Screen::reacquire().expect("Failed to re-create screen");
-                    screen.cursor_to_bottom();
-                    log::info!("menu: back from {}", item.key);
+                        drop(screen);
+                        let result = f();
+                        screen = Screen::reacquire().expect("Failed to re-create screen");
+                        screen.cursor_to_bottom();
+                        log::info!("menu: back from {}", item.key);
                         match result {
                             Ok(()) => pause_return(&mut screen),
                             Err(e) => show_recoverable(&mut screen, e),
@@ -175,7 +184,8 @@ pub fn run_menu(mut screen: Screen) -> Screen {
             // 带上原始键值：固件若把扫描码塞进 unicode_char，这里能看出来。
             screen.draw_str(&alloc::format!(
                 "Unknown key: code U+{:04X} ('{}') - try again.",
-                raw, key
+                raw,
+                key
             ));
             stall(Duration::from_millis(500));
         }

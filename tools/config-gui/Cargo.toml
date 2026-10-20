@@ -14,8 +14,10 @@ description = "player.toml 跨平台可视化编辑器（host 工具，与 UEFI 
 # - rust-i18n 4：400 万下载的现货（YAML 编译期进二进制，t! + set_locale）。
 #   对比过 fluent（Mozilla 那套要 unic-langid + ftl，杀鸡用牛刀），故不用。
 # - CJK 字体：egui 默认字体无中文字形。搜过系统字体方案（各平台 ttc 路径不一、
-#   ab_glyph 对 ttc 支持存疑），故用 Noto Sans SC 按 zh-CN.yml 实际用字子集化
-#   （assets/cjk.ttf 53KB），include_bytes! 编进二进制，不自带 17MB 全量。
+#   ab_glyph 对 ttc 支持存疑），故用缝合像素 fusion-pixel 10px proportional 简中
+#   TTF 原包全量文件（`assets/fusion-pixel-10px-proportional-zh_hans.ttf` 上游
+#   v2026.10.16，约 4MB），`include_bytes!` 编进二进制。字体禁止子集化
+#   （根 AGENTS.md 有令：子集漏字只能事后补，体积换完整）。
 [dependencies]
 eframe = { version = "0.35", default-features = false, features = ["accesskit", "default_fonts", "wgpu", "wayland", "x11"] }
 egui = "0.35"

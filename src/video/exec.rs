@@ -23,7 +23,7 @@ use core::cell::RefCell;
 use core::ffi::c_void;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use uefi::boot::{create_event, get_handle_for_protocol, open_protocol_exclusive, EventType, Tpl};
+use uefi::boot::{EventType, Tpl, create_event, get_handle_for_protocol, open_protocol_exclusive};
 use uefi::proto::pi::mp::MpServices;
 
 use uefi_async::Yield;
@@ -33,7 +33,7 @@ use uefi_async::tick;
 
 use crate::config::{self, CopyWidth};
 use crate::error::{NyaStatus, Result};
-use crate::graphics::{copy_block, Screen};
+use crate::graphics::{Screen, copy_block};
 use crate::video::ascii_font::FONT_8X16;
 use crate::video::decoder::Clip;
 use crate::video::{pace_or_drop, rdtsc};
@@ -49,8 +49,7 @@ fn draw_str_raw(fb_base: *mut u32, stride: usize, x: u32, y: u32, s: &[u8], colo
         for row in 0..16 {
             let row_data = glyph[row];
             unsafe {
-                let row_ptr =
-                    fb_base.add(((y + row as u32) * stride as u32 + current_x) as usize);
+                let row_ptr = fb_base.add(((y + row as u32) * stride as u32 + current_x) as usize);
                 for col in 0..8 {
                     let pixel_color = if (row_data << col) & 0x80 != 0 {
                         color
@@ -314,9 +313,8 @@ pub fn dynamic_draw(
     let row_bytes = vw * 4;
     let mut full: Vec<Vec<u8>> = Vec::new();
     for frame in &clip.frames {
-        let raw: &[u8] = unsafe {
-            core::slice::from_raw_parts(frame.as_ptr() as *const u8, frame.len() * 4)
-        };
+        let raw: &[u8] =
+            unsafe { core::slice::from_raw_parts(frame.as_ptr() as *const u8, frame.len() * 4) };
         if raw.len() < vh.saturating_mul(row_bytes) {
             continue;
         }
@@ -372,7 +370,13 @@ pub fn dynamic_draw(
         execs: execs.as_ptr(),
         n: n_cores,
     }));
-    if let Err(e) = mp.startup_all_aps(false, exec_ap, apctx as *mut ApCtx as *mut c_void, Some(event), None) {
+    if let Err(e) = mp.startup_all_aps(
+        false,
+        exec_ap,
+        apctx as *mut ApCtx as *mut c_void,
+        Some(event),
+        None,
+    ) {
         log::warn!(
             "play: startup_all_aps failed: {:?}, BSP drains bands alone",
             e.status()

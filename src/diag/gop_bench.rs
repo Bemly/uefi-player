@@ -18,7 +18,7 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 use core::time::Duration;
 
 use uefi::boot::{
-    create_event, get_handle_for_protocol, open_protocol_exclusive, stall, EventType, Tpl,
+    EventType, Tpl, create_event, get_handle_for_protocol, open_protocol_exclusive, stall,
 };
 use uefi::proto::console::gop::{BltOp, BltPixel, BltRegion};
 use uefi::proto::pi::mp::MpServices;
@@ -172,18 +172,16 @@ pub fn run_section(report: &mut Vec<String>, screen: &mut Screen, tps: u64) -> R
     let dt = rdtsc() - t0;
     core::hint::black_box(conv.as_ptr());
     let conv_mbs = (CONV_N * fb_bytes as u64) as f64 * tps as f64 / (dt as f64 * 1024.0 * 1024.0);
-    tline!(
-        report,
-        screen,
-        "cpu convert RB-swap: {:.1} MB/s",
-        conv_mbs
-    );
+    tline!(report, screen, "cpu convert RB-swap: {:.1} MB/s", conv_mbs);
     drop(conv);
 
     // ---- 单核 vs 多核：显存分区填充 ----
     let n_cores = match get_handle_for_protocol::<MpServices>() {
         Ok(h) => match open_protocol_exclusive::<MpServices>(h) {
-            Ok(mp) => mp.get_number_of_processors().map(|c| c.enabled).unwrap_or(1),
+            Ok(mp) => mp
+                .get_number_of_processors()
+                .map(|c| c.enabled)
+                .unwrap_or(1),
             Err(_) => 1,
         },
         Err(_) => 1,
@@ -333,14 +331,38 @@ pub fn run_section(report: &mut Vec<String>, screen: &mut Screen, tps: u64) -> R
 
     // 格1/2：单核（BSP 直拷整帧，无 AP）。
     let fps_1_free = anim_cell(
-        report, screen, tps, mp_ref, anim_fb, anim_stride,
-        anim_ptr, frame_bytes, row_bytes, h,
-        0, h, AnimWorkers::BspOnly, "1core", false,
+        report,
+        screen,
+        tps,
+        mp_ref,
+        anim_fb,
+        anim_stride,
+        anim_ptr,
+        frame_bytes,
+        row_bytes,
+        h,
+        0,
+        h,
+        AnimWorkers::BspOnly,
+        "1core",
+        false,
     )?;
     anim_cell(
-        report, screen, tps, mp_ref, anim_fb, anim_stride,
-        anim_ptr, frame_bytes, row_bytes, h,
-        0, h, AnimWorkers::BspOnly, "1core", true,
+        report,
+        screen,
+        tps,
+        mp_ref,
+        anim_fb,
+        anim_stride,
+        anim_ptr,
+        frame_bytes,
+        row_bytes,
+        h,
+        0,
+        h,
+        AnimWorkers::BspOnly,
+        "1core",
+        true,
     )?;
 
     // 格3/4：双核（BSP 上半 + 1 个 AP 下半，startup_this_ap 定点启动）。
@@ -348,7 +370,10 @@ pub fn run_section(report: &mut Vec<String>, screen: &mut Screen, tps: u64) -> R
     let mut fps_n_free = 0.0;
     if let Some(mp) = mp_ref {
         let bsp_idx = mp.who_am_i().unwrap_or(0);
-        let total = mp.get_number_of_processors().map(|c| c.total).unwrap_or(n_cores);
+        let total = mp
+            .get_number_of_processors()
+            .map(|c| c.total)
+            .unwrap_or(n_cores);
         // 找第一个启用的非 BSP 核做单 AP。
         let mut ap_idx = None;
         for i in 0..total {
@@ -366,15 +391,39 @@ pub fn run_section(report: &mut Vec<String>, screen: &mut Screen, tps: u64) -> R
 
         if let Some(idx) = ap_idx {
             let fps = anim_cell(
-                report, screen, tps, mp_ref, anim_fb, anim_stride,
-                anim_ptr, frame_bytes, row_bytes, h,
-                0, mid, AnimWorkers::OneAp(idx), "2core(1AP)", false,
+                report,
+                screen,
+                tps,
+                mp_ref,
+                anim_fb,
+                anim_stride,
+                anim_ptr,
+                frame_bytes,
+                row_bytes,
+                h,
+                0,
+                mid,
+                AnimWorkers::OneAp(idx),
+                "2core(1AP)",
+                false,
             )?;
             let _ = fps;
             anim_cell(
-                report, screen, tps, mp_ref, anim_fb, anim_stride,
-                anim_ptr, frame_bytes, row_bytes, h,
-                0, mid, AnimWorkers::OneAp(idx), "2core(1AP)", true,
+                report,
+                screen,
+                tps,
+                mp_ref,
+                anim_fb,
+                anim_stride,
+                anim_ptr,
+                frame_bytes,
+                row_bytes,
+                h,
+                0,
+                mid,
+                AnimWorkers::OneAp(idx),
+                "2core(1AP)",
+                true,
             )?;
         } else {
             tline!(report, screen, "anim 2core: SKIP (no usable AP)");
@@ -383,14 +432,38 @@ pub fn run_section(report: &mut Vec<String>, screen: &mut Screen, tps: u64) -> R
         // 全核：BSP 取自己 id 分区，AP 各取各的。
         let (by0, by1) = rows_for(bsp_idx % n_cores, n_cores, h);
         fps_n_free = anim_cell(
-            report, screen, tps, mp_ref, anim_fb, anim_stride,
-            anim_ptr, frame_bytes, row_bytes, h,
-            by0, by1, AnimWorkers::All, "Ncore", false,
+            report,
+            screen,
+            tps,
+            mp_ref,
+            anim_fb,
+            anim_stride,
+            anim_ptr,
+            frame_bytes,
+            row_bytes,
+            h,
+            by0,
+            by1,
+            AnimWorkers::All,
+            "Ncore",
+            false,
         )?;
         anim_cell(
-            report, screen, tps, mp_ref, anim_fb, anim_stride,
-            anim_ptr, frame_bytes, row_bytes, h,
-            by0, by1, AnimWorkers::All, "Ncore", true,
+            report,
+            screen,
+            tps,
+            mp_ref,
+            anim_fb,
+            anim_stride,
+            anim_ptr,
+            frame_bytes,
+            row_bytes,
+            h,
+            by0,
+            by1,
+            AnimWorkers::All,
+            "Ncore",
+            true,
         )?;
     } else {
         tline!(report, screen, "anim multi: SKIP (no MP services)");
@@ -479,8 +552,8 @@ pub fn run_section(report: &mut Vec<String>, screen: &mut Screen, tps: u64) -> R
     }
     let dt = dt_snow;
     let snow_dw_fps = (SNOW_PRESENT_N as f64 * tps as f64) / dt.max(1) as f64;
-    let snow_dw_mbs =
-        (SNOW_PRESENT_N * fb_bytes as u64) as f64 * tps as f64 / (dt.max(1) as f64 * 1024.0 * 1024.0);
+    let snow_dw_mbs = (SNOW_PRESENT_N * fb_bytes as u64) as f64 * tps as f64
+        / (dt.max(1) as f64 * 1024.0 * 1024.0);
     let solid_dw_fps = (SNOW_PRESENT_N as f64 * tps as f64) / dt_solid.max(1) as f64;
     tline!(
         report,
@@ -577,7 +650,8 @@ pub fn run_section(report: &mut Vec<String>, screen: &mut Screen, tps: u64) -> R
     }
     let dt = rdtsc() - t0;
     let v2v_fps = (V2V_N as f64 * tps as f64) / dt.max(1) as f64;
-    let v2v_mbs = (V2V_N * fb_bytes as u64) as f64 * tps as f64 / (dt.max(1) as f64 * 1024.0 * 1024.0);
+    let v2v_mbs =
+        (V2V_N * fb_bytes as u64) as f64 * tps as f64 / (dt.max(1) as f64 * 1024.0 * 1024.0);
     tline!(
         report,
         screen,
@@ -601,7 +675,8 @@ pub fn run_section(report: &mut Vec<String>, screen: &mut Screen, tps: u64) -> R
     let dt = rdtsc() - t0;
     core::hint::black_box(readback.as_ptr());
     let rdb_fps = (RDB_N as f64 * tps as f64) / dt.max(1) as f64;
-    let rdb_mbs = (RDB_N * fb_bytes as u64) as f64 * tps as f64 / (dt.max(1) as f64 * 1024.0 * 1024.0);
+    let rdb_mbs =
+        (RDB_N * fb_bytes as u64) as f64 * tps as f64 / (dt.max(1) as f64 * 1024.0 * 1024.0);
     tline!(
         report,
         screen,
@@ -929,7 +1004,12 @@ fn anim_cell(
         let m = mp.ok_or(NyaStatus::_Debug(alloc::string::String::from("no MP")))?;
         let (halves, n, ap_y0, ap_y1) = match workers {
             AnimWorkers::OneAp(_) => (true, 2, h / 2, h),
-            _ => (false, m.get_number_of_processors().map(|c| c.enabled).unwrap_or(1), 0, 0),
+            _ => (
+                false,
+                m.get_number_of_processors().map(|c| c.enabled).unwrap_or(1),
+                0,
+                0,
+            ),
         };
         let ctx = AnimCtx {
             mp: m,

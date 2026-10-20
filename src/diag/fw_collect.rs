@@ -11,14 +11,14 @@ use alloc::vec::Vec;
 use core::slice;
 
 use dmidecode::{EntryPoint, Structure};
+use uefi::Identify;
 use uefi::boot::{
-    image_handle, locate_handle_buffer, open_protocol, OpenProtocolAttributes,
-    OpenProtocolParams, SearchType,
+    OpenProtocolAttributes, OpenProtocolParams, SearchType, image_handle, locate_handle_buffer,
+    open_protocol,
 };
 use uefi::proto::media::block::BlockIO;
-use uefi::proto::pci::root_bridge::PciRootBridgeIo;
 use uefi::proto::pci::PciIoAddress;
-use uefi::Identify;
+use uefi::proto::pci::root_bridge::PciRootBridgeIo;
 
 use crate::diag::common::{find_smbios_address, save_report};
 use crate::error::Result;
@@ -80,11 +80,7 @@ fn cpu_simd_summary(report: &mut Vec<String>, screen: &mut Screen) {
     use core::arch::x86_64::{__cpuid, __cpuid_count};
 
     fn yn(b: bool) -> &'static str {
-        if b {
-            "YES"
-        } else {
-            "no"
-        }
+        if b { "YES" } else { "no" }
     }
 
     let c1 = __cpuid(1);
@@ -106,7 +102,11 @@ fn cpu_simd_summary(report: &mut Vec<String>, screen: &mut Screen) {
         yn(avx_hw),
         yn(avx2_hw),
         yn(avx512f_hw),
-        match fw { Some(true) => "on", Some(false) => "off", None => "unk" },
+        match fw {
+            Some(true) => "on",
+            Some(false) => "off",
+            None => "unk",
+        },
         if usable { "YES" } else { "NO" }
     );
 }
@@ -153,7 +153,9 @@ fn smbios_collect(report: &mut Vec<String>, screen: &mut Screen) {
                     s.product,
                     s.version,
                     s.serial,
-                    s.uuid.map(|u| format!("{}", u)).unwrap_or(String::from("-")),
+                    s.uuid
+                        .map(|u| format!("{}", u))
+                        .unwrap_or(String::from("-")),
                     s.sku.unwrap_or("-"),
                     s.family.unwrap_or("-")
                 );
@@ -270,7 +272,13 @@ fn pci_collect(report: &mut Vec<String>, screen: &mut Screen) {
         } {
             Ok(p) => p,
             Err(e) => {
-                tline!(report, screen, "pci rb{}: open denied ({:?})", rbi, e.status());
+                tline!(
+                    report,
+                    screen,
+                    "pci rb{}: open denied ({:?})",
+                    rbi,
+                    e.status()
+                );
                 continue;
             }
         };
@@ -311,13 +319,34 @@ fn dump_pci_fun(
     if vid == 0xFFFF {
         return;
     }
-    let did = rb.pci().read_one::<u16>(base.with_register(0x02)).unwrap_or(0);
-    let rev = rb.pci().read_one::<u8>(base.with_register(0x08)).unwrap_or(0);
-    let prog = rb.pci().read_one::<u8>(base.with_register(0x09)).unwrap_or(0);
-    let sub = rb.pci().read_one::<u8>(base.with_register(0x0A)).unwrap_or(0);
-    let class = rb.pci().read_one::<u8>(base.with_register(0x0B)).unwrap_or(0);
-    let svid = rb.pci().read_one::<u16>(base.with_register(0x2C)).unwrap_or(0);
-    let sdid = rb.pci().read_one::<u16>(base.with_register(0x2E)).unwrap_or(0);
+    let did = rb
+        .pci()
+        .read_one::<u16>(base.with_register(0x02))
+        .unwrap_or(0);
+    let rev = rb
+        .pci()
+        .read_one::<u8>(base.with_register(0x08))
+        .unwrap_or(0);
+    let prog = rb
+        .pci()
+        .read_one::<u8>(base.with_register(0x09))
+        .unwrap_or(0);
+    let sub = rb
+        .pci()
+        .read_one::<u8>(base.with_register(0x0A))
+        .unwrap_or(0);
+    let class = rb
+        .pci()
+        .read_one::<u8>(base.with_register(0x0B))
+        .unwrap_or(0);
+    let svid = rb
+        .pci()
+        .read_one::<u16>(base.with_register(0x2C))
+        .unwrap_or(0);
+    let sdid = rb
+        .pci()
+        .read_one::<u16>(base.with_register(0x2E))
+        .unwrap_or(0);
     *total += 1;
     tline!(
         report,

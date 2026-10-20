@@ -2,21 +2,23 @@
 //!
 //! 轮子结论（见根 `AGENTS.md`「轮子优先」）：
 //! - 内核/initramfs 前缀表 + 配对规则 + `unique_hash` 有现货
-//!   （`edera-sprout-parsing`，4 个 lib 之一，直接用，不自研）。
+//!   （`edera-sprout-parsing`，5 个 lib 之一，直接用，不自研）。
 //! - 卷枚举/目录遍历 uefi-rs 无现成 walker（`find_handles` 有，目录树没有），
 //!   用本仓 `Fs::{open, list_dir}` 自研（`entries.rs` 同款做法）。
 //! - 与上游的偏离（有意，UI/配置保持本仓，见 AGENTS「sprout 全功能对齐」）：
 //!   - 不读 sprout.toml/menu 体系，不进 generator/action 概念，直接产
 //!     `BootEntry`，进我们自己的子菜单；开关走 `[boot]` + GUI（本仓交互层）。
-//!   - 不做 strict/XBOOTLDR 分卷（systemd 严格模式），全卷平等扫——
-//!     要的就是"插上就有"，少一个漏报比多一个重复重要。
-//!   - UKI 不解析 `.uname` 区（省一次全读），标题取文件名；要全名请写 BLS conf。
+//!   - `strict` 模式（`[boot] strict` 开关）：BLS 只认本卷 + XBOOTLDR 卷
+//!     （systemd 严格模式同语义；其余类别不受影响）。
+//!   - UKI 读全套 profile（`.osrel/.cmdline/.uname/.profile`，上游同款
+//!     `uki_profiles`），一 profile 一条目，标题/版本/sort-key 走上游同款，
+//!     读不到用文件名。
 //!   - macOS 原生引导不做（要 bless/APFS，超出 UEFI 范围；sprout 也没有），
 //!     只做 OpenCore 链式接力（`\EFI\OC\OpenCore.efi` 存在即链，`[boot] macos`
 //!     开关；不扫通用 `BOOTX64.EFI`，那可能是我们自己，会自举死循环）。
 //!   - UEFI Shell 上游没有，是 systemd-boot 式的顺手（同 Windows 形状，零代价）。
-//!   - 排序按发现顺序（本卷 BLS → 逐卷 BLS/UKI/Linux/Windows/Shell），
-//!     不做上游的 version-sort（屏显菜单稳定可预期最重要）。
+//!   - 同卷 BLS+UKI 按上游规则排序（`sort_key` 字典序 + 版本新者在前，
+//!     跨卷不混排，见 `entries::sort_boot_group`）。
 
 use alloc::collections::BTreeSet;
 use alloc::format;

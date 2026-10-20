@@ -95,7 +95,10 @@ extern "efiapi" fn ap_draw_task(arg: *mut c_void) {
 }
 
 pub fn run(screen: &mut Screen) -> Result {
-    emit!(screen, "=== Starting Multi-Processor (MP) Video Copy Test ===");
+    emit!(
+        screen,
+        "=== Starting Multi-Processor (MP) Video Copy Test ==="
+    );
 
     // 1. 获取 MP 服务
     let mp_handle = get_handle_for_protocol::<MpServices>()?;

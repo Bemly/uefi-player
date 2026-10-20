@@ -1,8 +1,8 @@
+use crate::graphics::Screen;
 use alloc::string::String;
 use core::fmt::Debug;
-use uefi::boot::stall;
 use core::time::Duration;
-use crate::graphics::Screen;
+use uefi::boot::stall;
 
 pub type Result<Output = (), ErrData = ()> = core::result::Result<Output, NyaStatus<ErrData>>;
 
@@ -17,7 +17,9 @@ pub enum NyaStatus<Data: Debug = ()> {
 }
 
 impl From<uefi::Error> for NyaStatus {
-    fn from(e: uefi::Error) -> Self { NyaStatus::Uefi(e) }
+    fn from(e: uefi::Error) -> Self {
+        NyaStatus::Uefi(e)
+    }
 }
 
 // 直接转换状态
@@ -28,7 +30,9 @@ impl From<uefi::Status> for NyaStatus {
 }
 
 impl From<qoi::Error> for NyaStatus {
-    fn from(e: qoi::Error) -> Self { NyaStatus::Qoi(e) }
+    fn from(e: qoi::Error) -> Self {
+        NyaStatus::Qoi(e)
+    }
 }
 
 // 垫底的错误处理，至少是安全的输出内容（大雾

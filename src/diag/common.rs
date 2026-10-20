@@ -55,9 +55,7 @@ fn key_to_char(key: Key) -> Option<(char, u16)> {
 /// Input 句柄”：多键盘机器上后者可能拿到非控制台句柄，读不到真实按键
 /// （此前菜单在部分真机上全线 Unknown key 的嫌疑之一）。
 pub fn flush_keys() {
-    uefi::system::with_stdin(|input| {
-        while matches!(input.read_key(), Ok(Some(_))) {}
-    });
+    uefi::system::with_stdin(|input| while matches!(input.read_key(), Ok(Some(_))) {});
 }
 
 /// 阻塞等待一个可打印按键，返回 (归一化小写字符, 原始 u16)。
@@ -233,7 +231,11 @@ pub fn ensure_xsave_enabled() -> bool {
     // bit1=SSE(xmm)，bit2=AVX(ymm)，bit5/6/7=AVX512(opmask/zmm)
     let want = (1u64 << 1)
         | if has_avx { 1u64 << 2 } else { 0 }
-        | if has_avx512 { (1 << 5) | (1 << 6) | (1 << 7) } else { 0 };
+        | if has_avx512 {
+            (1 << 5) | (1 << 6) | (1 << 7)
+        } else {
+            0
+        };
     if xcr0 & want != want {
         xcr0 |= want;
         lo = xcr0 as u32;

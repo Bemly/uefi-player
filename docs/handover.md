@@ -26,8 +26,8 @@ src/error.rs       NyaStatus + handle_fatal（只生产路径走致命）
 src/diag/*         真机诊断项（registry 注册；emit! 双写屏显+串口）
 tools/config-gui   host 独立 crate（eframe 0.35 + egui_glass 液态玻璃），与固件零依赖
 tools/qemu-matrix  host 独立 crate（纯 Rust QEMU 黑盒矩阵，matrix.toml 定义用例）
-third_party/sprout 只读 submodule，只依赖 4 个 lib
-                   （edera-sprout-config/eficore/bls/parsing）；`boot` 是 bin，不可依赖
+third_party/sprout 只读 submodule，只依赖 5 个 lib
+                    （edera-sprout-config/eficore/bls/parsing/boot；`boot` 上游纯 bin，本仓用 `patches/` 叠 `[lib]` 后直调）
 ```
 
 交互铁律（坏了会出大事的）：
@@ -64,20 +64,20 @@ third_party/sprout 只读 submodule，只依赖 4 个 lib
      旧文件兼容、读盘/落盘钳制、`bench_pending`/`tune_visible` 表格断言。
      纯规则已抽成无 display 依赖的自由函数（`coerce_loaded/clamp_tune/
      bench_pending/tune_visible`），UI 只是薄调用——新规则先加表再接 UI。
-   - QEMU 侧 `tools/qemu-matrix/`（纯 Rust runner + `matrix.toml`，19 + 1 slow 全绿）：
+   - QEMU 侧 `tools/qemu-matrix/`（纯 Rust runner + `matrix.toml`，33 case 全绿）：
      每个 case 独立 FAT 镜像 + 独立 QEMU（pflash 挂 OVMF code，`-bios` 拒载
      3.5MB 非对齐文件），串口断言 + `sendkey` 按键（`wait_for` 事件驱动，
      `push_gen` 同款思想），`needs_video/wallpaper/extra_volumes/artifact/soak`齐全。
 7. **sprout 全功能对齐（用户拍板，见 AGENTS「sprout 全功能对齐」）**：
-   - `src/boot/detect.rs`：多卷自动发现（逐卷 BLS/UKI/Linux 内核对/Windows/Shell）。
+   - `src/boot/detect.rs`：多卷自动发现（逐卷 BLS/UKI/Linux 内核对/Windows/Shell/OpenCore）。
    - Linux 直启（kernel + initrd 拼接 + options + `LINUX_EFI_INITRD_MEDIA_GUID`
      交接 + devicetree；stubble 占位 `placeholder` 照抄上游）。
    - 跨盘 chainload（目标卷设备句柄拼路径 + 跨卷直读）。
    - BLS 全字段透传（options/多 initrd/devicetree/arch 过滤/uki 键/版本排序）。
-   - boot counting 消费（启动尝试即递减，读旧写新删旧拼 FAT rename）。
+    - boot counting 消费（启动尝试即递减，直调上游 `BootCounterTarget::consume` 真改名）。
    - UKI 多 profile 展开（`.osrel/.cmdline/.uname/.profile`，一 profile 一条目）。
    - strict 模式（`[boot] strict`：BLS 只认本卷 + XBOOTLDR）。
-   - `[boot]` 配置（auto/windows/linux/shell/uki/strict）+ GUI 引导页 + 矩阵覆盖。
+    - `[boot]` 配置（auto/windows/linux/shell/uki/macos/strict）+ GUI 引导页 + 矩阵覆盖。
    - QEMU 验证：Windows/UKI/多 profile 跨盘 chainload 全通，`locate ok` → 1338880 字节
      → `starting image` → 第二遍 cfg + 菜单（计数断言 `x2`，不是误判）。
 
@@ -118,26 +118,22 @@ third_party/sprout 只读 submodule，只依赖 4 个 lib
   要验需要真内核 + initrd + 根文件系统，QEMU 里另起一套盘。
 - **devicetree 安装路径**：代码已通（Secure Boot 开时跳过，上游同款），x86 无消费者，
   没实测过。
-- **boot counting 递减**：逻辑已实现（启动尝试即改名），没做"计数耗尽自动跳过"的
-  端到端 case（需要 `name+N-M.conf`  fixtures + 两次启动不断言；好做，待排）。
+- **boot counting 递减**：逻辑已实现（启动尝试即真改名），`boot-counting`
+  矩阵 case 已覆盖单次递减断言；"计数耗尽自动跳过"的端到端（两次启动）还没做，
+  待排。
 - **并行多核 tile 路读源问题（疑似）**：`video.rs` tile 分支用本核切片按全局行号
   取数，疑似错位/OOB——bench 路（共用源）是对的所以 HWBENCH 数字不受影响；
   没动手，等用户拍板再修（动了会改变现有 tile 行为）。
-- **`parallel_video_draw` 是个空壳**（只数核就返回）：存量死代码，别删（等用户定夺）。
-- **macOS 自动发现**：用户明确不要（bless/APFS 超出 UEFI 范围；sprout 自己也没有）。
+- **macOS 原生引导**：用户明确不要（bless/APFS 超出 UEFI 范围；sprout 自己也没有）。
+  只做 OpenCore 链式接力（已实现：`[boot] macos` + detect + `boot-macos` case）。
 - **sprout 的菜单/phase/extractor/driver/SBAT/交互配置语言**：有意不搬
   （AGENTS 已定：UI/配置保持本仓，sprout 只当实现参考）。
-- **OpenCore 链式接力**（`[boot] macos` 开关 + detect + 矩阵 case）：用户刚问完难度，
-  还没拍板开工。方案已想好（见第 5 节），等一句话。
+- **OpenCore 链式接力**：已实现（`[boot] macos` 开关 + detect + `boot-macos`
+  矩阵 case，Windows 同款形状；不扫通用 `BOOTX64.EFI`）。
 
 ## 5. 接下来怎么做的计划（按顺序）
 
-1. **OpenCore 接力（等用户拍板）**：`detect.rs` 加 `\EFI\OC\OpenCore.efi` 探测
-   （Windows 同款形状，不扫通用 `BOOTX64.EFI`——那可能是我们自己，会自举死循环）；
-   `config [boot] macos` + GUI 一行 + QEMU case（第二盘放改名 efi，断言列出+交权，
-   和 `boot-windows-crossvol` 同式）。预计半天（含矩阵）。
-   同时把 AGENTS 那句"macOS 不做"改成"macOS 原生引导不做，只做 OpenCore 链式接力"。
-2. **补 boot counting 端到端 case**：第二卷放 `test+2-0.conf` + efi，起一次，
+1. **补 boot counting 耗尽跳过端到端 case**：第二卷放 `test+2-0.conf` + efi，起两次，
    断言文件名变成 `test+1-0.conf`（重挂载读目录）。预计半天。
 3. **tile 读源疑似错位**：先写个最小复现（QEMU 截屏对比 static/tile 同一帧，
    或串口 dump 像素校验和），确认后再动手修。预计 1 天（含验证）。

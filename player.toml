@@ -1,0 +1,53 @@
+version = 1
+
+[accel]
+level = "auto"
+
+[render]
+mode = "auto"
+workers = "auto"
+dist = "auto"
+vsync = "auto"
+blt_op = "buffer_to_video"
+measured_render = "auto"
+measured_workers = "auto"
+measured_dist = "auto"
+measured_vsync = "auto"
+measured_vsync_fps = 0
+measured_cores = 0
+
+[render.tune]
+frames = 30
+tile_rows = 64
+vsync_fps = 60
+buffers = 0
+
+[play]
+fps = "auto"
+measured_max_fps = 0
+format = "qois"
+
+[wallpaper]
+enable = false
+fps = 15
+frames = 0
+preload = 8
+format = "raw"
+popup_freeze = true
+
+[boot]
+auto = true
+windows = true
+linux = true
+shell = true
+uki = true
+macos = true
+strict = false
+
+[schedule]
+backend = "manual"
+workers = "auto"
+dist = "auto"
+
+[async]
+executor = "dynamic"

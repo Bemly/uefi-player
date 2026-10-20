@@ -60,7 +60,14 @@ pub fn entry_line(list: &BootList, i: usize) -> String {
     } else {
         ""
     };
-    format!("[{}] {} <{}>{}{}", key, e.title, e.kind.kind_str(), tries, def)
+    format!(
+        "[{}] {} <{}>{}{}",
+        key,
+        e.title,
+        e.kind.kind_str(),
+        tries,
+        def
+    )
 }
 
 /// 值传递拿走 Screen：`drop` 即释放 GOP 独占，chainload 才能干净交权；

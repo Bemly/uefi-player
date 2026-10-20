@@ -1,3 +1,6 @@
+use crate::config::{self, BltOpKind, CopyWidth, DistMode, RenderMode, VsyncMode, WorkersMode};
+use crate::error::Result;
+use crate::video::ascii_font::FONT_8X16;
 use alloc::boxed::Box;
 use alloc::string::{String, ToString};
 use alloc::vec;
@@ -6,13 +9,12 @@ use core::arch::asm;
 use core::ffi::c_void;
 use core::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use core::time::Duration;
-use uefi::boot::{create_event, get_handle_for_protocol, open_protocol_exclusive, stall, EventType, ScopedProtocol, Tpl};
+use uefi::boot::{
+    EventType, ScopedProtocol, Tpl, create_event, get_handle_for_protocol, open_protocol_exclusive,
+    stall,
+};
 use uefi::proto::console::gop::{BltOp, BltPixel, BltRegion, GraphicsOutput, Mode};
 use uefi::proto::pi::mp::MpServices;
-use crate::config::{self, BltOpKind, CopyWidth, DistMode, RenderMode, VsyncMode, WorkersMode};
-use crate::error::Result;
-use crate::video::ascii_font::FONT_8X16;
-use crate::video::decoder::Clip;
 
 pub struct Screen {
     gop: ScopedProtocol<GraphicsOutput>,
@@ -31,15 +33,20 @@ impl Screen {
         let mut gop = open_protocol_exclusive::<GraphicsOutput>(handle)?;
         // 首选 1080p：视频就是按 1920x1080 准备的，且大窗口更易读。
         // 固件没有该模式时保持默认（尽力而为，不报错）。
-        let mode_1080p = gop
-            .modes()
-            .find(|m| m.info().resolution() == (1920, 1080));
+        let mode_1080p = gop.modes().find(|m| m.info().resolution() == (1920, 1080));
         if let Some(mode) = mode_1080p {
             if let Err(e) = gop.set_mode(&mode) {
                 log::warn!("set 1080p GOP mode failed: {:?}", e);
             }
         }
-        Ok(Self { gop, stdout: 0, sh_ring: Vec::new(), sh_w: 0, sh_h: 0, sh_k: 0 })
+        Ok(Self {
+            gop,
+            stdout: 0,
+            sh_ring: Vec::new(),
+            sh_w: 0,
+            sh_h: 0,
+            sh_k: 0,
+        })
     }
 
     /// 独占 GOP 的 demo 跑完后重建：保持当前模式、不切分辨率，
@@ -48,13 +55,24 @@ impl Screen {
     pub fn reacquire() -> Result<Self> {
         let handle = get_handle_for_protocol::<GraphicsOutput>()?;
         let gop = open_protocol_exclusive::<GraphicsOutput>(handle)?;
-        Ok(Self { gop, stdout: 0, sh_ring: Vec::new(), sh_w: 0, sh_h: 0, sh_k: 0 })
+        Ok(Self {
+            gop,
+            stdout: 0,
+            sh_ring: Vec::new(),
+            sh_w: 0,
+            sh_h: 0,
+            sh_k: 0,
+        })
     }
 
-    pub fn get_gop(&mut self) -> &mut ScopedProtocol<GraphicsOutput> { &mut self.gop }
+    pub fn get_gop(&mut self) -> &mut ScopedProtocol<GraphicsOutput> {
+        &mut self.gop
+    }
 
     /// 把文本光标复位到左上角（配合 `clear()` 在菜单/报错切屏时用）。
-    pub fn reset_cursor(&mut self) { self.stdout = 0; }
+    pub fn reset_cursor(&mut self) {
+        self.stdout = 0;
+    }
 
     /// 把文本光标移到屏幕底部（独占 GOP 的 demo 跑完后用：
     /// 画面要留给用户看，不能 `clear()`，提示行打在底部避免盖住内容）。
@@ -98,7 +116,9 @@ impl Screen {
         let bg = BltPixel::new(0, 0, 0);
 
         // 防止超出高度
-        if self.stdout + 20 >= height { self.stdout = 0 }
+        if self.stdout + 20 >= height {
+            self.stdout = 0
+        }
 
         for c in text.chars() {
             // --- 1. 处理换行逻辑 ---
@@ -107,7 +127,9 @@ impl Screen {
             if c == '\n' {
                 x = 0;
                 self.stdout += 18; // 换行高度（点阵16像素 + 2像素间距）
-                if self.stdout >= height { self.stdout = 0 }
+                if self.stdout >= height {
+                    self.stdout = 0
+                }
                 continue;
             }
 
@@ -115,7 +137,9 @@ impl Screen {
             if x + 8 > width {
                 x = 0;
                 self.stdout += 18;
-                if self.stdout >= height { self.stdout = 0 }
+                if self.stdout >= height {
+                    self.stdout = 0
+                }
             }
 
             // --- 2. 绘制字符 ---
@@ -144,128 +168,6 @@ impl Screen {
 
         // 整个字符串画完后，最后额外换一行，防止下一次打印重叠
         self.stdout += 18;
-    }
-
-    pub fn draw_all_mem_raw_zero_copy(&mut self, video: &mut Clip, width: usize, height: usize) {
-        // 获取下一帧的原始像素引用
-        if let Some(pixel_slice) = video.next_frame() {
-            // 直接绘制到屏幕
-            // 假设你的屏幕分辨率和视频一致，从 (0,0) 开始画
-            self.gop.blt(
-                BltOp::BufferToVideo {
-                    buffer: pixel_slice,
-                    src: BltRegion::Full,
-                    dest: (0, 0),
-                    dims: (width, height),
-                }
-            ).ok();
-        } else {
-            video.rewind();
-        }
-    }
-
-
-    /// 高性能显存直接写入
-    pub fn draw_fast_direct_copy(
-        &mut self,
-        video: &mut Clip,
-        width: usize,
-        height: usize
-    ) {
-        // 1. 获取下一帧
-        let pixel_slice = match video.next_frame() {
-            Some(slice) => slice,
-            None => {
-                video.rewind();
-                return;
-            }
-        };
-
-        // 2. 先提取 ModeInfo（此时 gop 会被借用，但在这一行结束后就会释放）
-        let mode_info = self.gop.current_mode_info();
-        let stride = mode_info.stride();
-
-        // 3. 再获取 FrameBuffer（此时 gop 被独占借用）
-        let mut fb = self.gop.frame_buffer();
-        let dest_ptr = fb.as_mut_ptr();
-
-        // 4. 执行内存拷贝
-        unsafe {
-            if stride == width {
-                // 全局一次性拷贝
-                core::ptr::copy_nonoverlapping(
-                    pixel_slice.as_ptr() as *const u8,
-                    dest_ptr,
-                    width * height * 4
-                );
-            } else {
-                // 考虑 Stride 的逐行拷贝
-                let src_ptr = pixel_slice.as_ptr() as *const u8;
-                for y in 0..height {
-                    let row_src = src_ptr.add(y * width * 4);
-                    let row_dest = dest_ptr.add(y * stride * 4);
-                    core::ptr::copy_nonoverlapping(row_src, row_dest, width * 4);
-                }
-            }
-        }
-    }
-
-
-    #[inline]
-    pub fn draw_u64_optimized(
-        &mut self,
-        video: &mut Clip,
-        width: usize,
-        height: usize,
-        stride: usize,
-        is_continuous: bool,
-        dest_ptr: *mut u8
-    ) {
-        let pixel_slice = match video.next_frame() {
-            Some(slice) => slice,
-            None => { video.rewind(); return; }
-        };
-
-        let src_ptr = pixel_slice.as_ptr() as *const u8;
-
-        unsafe {
-            if is_continuous {
-                // 全屏连续拷贝
-                let total_bytes = width * height * 4;
-                u64_fast_copy(src_ptr, dest_ptr, total_bytes);
-            } else {
-                // 按行拷贝（处理 Stride）
-                let row_bytes = width * 4;
-                let stride_bytes = stride * 4;
-                for y in 0..height {
-                    let row_src = src_ptr.add(y * row_bytes);
-                    let row_dest = dest_ptr.add(y * stride_bytes);
-                    u64_fast_copy(row_src, row_dest, row_bytes);
-                }
-            }
-        }
-    }
-
-    pub fn draw_u64_optimized_loop(&mut self, video: &mut Clip, width: usize, height: usize) {
-        let mode_info = self.gop.current_mode_info();
-        let stride = mode_info.stride();
-        let mut fb = self.gop.frame_buffer();
-        let is_continuous = stride == width;
-        let dest_ptr = fb.as_mut_ptr();
-
-        loop {
-            self.draw_u64_optimized(video, width, height, stride, is_continuous, dest_ptr);
-        }
-    }
-
-    pub fn parallel_video_draw(&mut self, video: &mut Clip, width: usize, height: usize) -> Result {
-        let mp_handle = get_handle_for_protocol::<MpServices>()?;
-        let mp_services = open_protocol_exclusive::<MpServices>(mp_handle)?;
-
-        // 1. 识别所有可用的 AP（排除主核 BSP）
-        let proc_count = mp_services.get_number_of_processors()?;
-
-        Ok(())
     }
 
     // ---------- 渲染路径矩阵（配置文件驱动） ----------
@@ -654,35 +556,34 @@ impl Screen {
                             .startup_all_aps(false, ap_cal_copy, arg_ptr, Some(ev), None)
                             .is_ok()
                         {
-                        let bsp_id = mp.who_am_i().unwrap_or(0) % n_cores.max(1);
-                        let (by0, by1) = rows_for_cal(bsp_id, n_cores, h);
-                        mp_drive = Some(MpDrive {
-                            n: n_cores,
-                            bsp_id,
-                            fb_base: draw_base,
-                            fb_stride,
-                            src: pixels.as_ptr() as *const u8,
-                            row_bytes: w * 4,
-                            height: h,
-                            bsp_y0: by0,
-                            bsp_y1: by1,
-                            expected: n_cores.saturating_sub(1),
-                            round: &cal_round,
-                            done: &cal_done,
-                    mode: &cal_mode,
-                    tile: &cal_tile,
-                    tile_rows: config::tune_tile_rows() as usize,
-                    tiles_total: h.div_ceil(config::tune_tile_rows().max(1) as usize),
-                            times: cal_times.as_ptr(),
-                            bounds: cal_bounds.as_ptr(),
-                            sh_base: cal_sh,
-                            real_fb: fb_base,
-                            gop: gop_ptr,
-                            blt_push: !cal_sh.is_null(),
-                            push_warned: false,
-                            next: 0,
-                            tps,
-                        });
+                            let bsp_id = mp.who_am_i().unwrap_or(0) % n_cores.max(1);
+                            let (by0, by1) = rows_for_cal(bsp_id, n_cores, h);
+                            mp_drive = Some(MpDrive {
+                                n: n_cores,
+                                bsp_id,
+                                fb_base: draw_base,
+                                fb_stride,
+                                src: pixels.as_ptr() as *const u8,
+                                row_bytes: w * 4,
+                                height: h,
+                                bsp_y0: by0,
+                                bsp_y1: by1,
+                                expected: n_cores.saturating_sub(1),
+                                round: &cal_round,
+                                done: &cal_done,
+                                mode: &cal_mode,
+                                tile: &cal_tile,
+                                tile_rows: config::tune_tile_rows() as usize,
+                                tiles_total: h.div_ceil(config::tune_tile_rows().max(1) as usize),
+                                times: cal_times.as_ptr(),
+                                bounds: cal_bounds.as_ptr(),
+                                real_fb: fb_base,
+                                gop: gop_ptr,
+                                blt_push: !cal_sh.is_null(),
+                                push_warned: false,
+                                next: 0,
+                                tps,
+                            });
                         } else {
                             log::warn!("render auto: MP startup failed, all-core cell SKIP");
                         }
@@ -881,21 +782,17 @@ impl Screen {
             if winner_render != RenderMode::Direct || winner_workers != WorkersMode::All {
                 DistMode::Tile // 无害默认，实际不用（effective_dist 短路）
             } else if probe_dist {
-                let mut best = DistMode::Tile;
-                let mut best_ticks = u64::MAX;
-                if static_valid && acc_static < best_ticks {
-                    best = DistMode::Static;
-                    best_ticks = acc_static;
-                }
-                if tile_valid && acc_tile < best_ticks {
-                    best = DistMode::Tile;
-                    best_ticks = acc_tile;
-                }
-                if dynamic_valid && acc_dynamic < best_ticks {
-                    best = DistMode::Dynamic;
-                    best_ticks = acc_dynamic;
-                }
-                best
+                // 三个有效 cell 取计时最小（全无效退回 tile 无害默认）。
+                [
+                    (static_valid, acc_static, DistMode::Static),
+                    (tile_valid, acc_tile, DistMode::Tile),
+                    (dynamic_valid, acc_dynamic, DistMode::Dynamic),
+                ]
+                .into_iter()
+                .filter(|(valid, _, _)| *valid)
+                .min_by_key(|(_, ticks, _)| *ticks)
+                .map(|(_, _, dist)| dist)
+                .unwrap_or(DistMode::Tile)
             } else {
                 fixed_dist.unwrap_or(DistMode::Tile)
             };
@@ -1189,11 +1086,10 @@ struct MpDrive<'a> {
     tiles_total: usize,
     times: *const AtomicUsize,
     bounds: *const AtomicUsize,
-    /// 混合整推三件套（`buffers>0` 时启用）：`sh_base` 为影子槽（AP/BSP 画影子，
-    /// 此时 `fb_base` 同样指向影子）；`real_fb` 为真前台；`gop` 裸指针只给 BSP
+    /// 混合整推（`buffers>0` 时启用）：`fb_base` 建会话时已指向影子槽
+    /// （AP/BSP 画影子）；`real_fb` 为真前台；`gop` 裸指针只给 BSP
     /// 调 Blt 用（AP 永不碰 GOP：独占协议 + 固件 Blt 非线程安全）。
-    /// 直写时 `sh_base` 为空，行为与旧版一致。
-    sh_base: *mut u8,
+    /// 直写时 `fb_base` 即真前台，行为与旧版一致。
     real_fb: *mut u8,
     gop: *mut GraphicsOutput,
     blt_push: bool,
@@ -1584,39 +1480,5 @@ unsafe fn copy_block_z512(dst: *mut u8, src: *const u8, len: usize) {
             dst.add(i).write(src.add(i).read());
             i += 1;
         }
-    }
-}
-
-/// 极致性能的底层拷贝函数（无 self 依赖）
-#[inline(always)]
-unsafe fn u64_fast_copy(src: *const u8, dst: *mut u8, len: usize) {
-    let mut i = 0;
-    while i + 64 <= len {
-        let s0 = (src.add(i) as *const u64).read_unaligned();
-        let s1 = (src.add(i + 8) as *const u64).read_unaligned();
-        let s2 = (src.add(i + 16) as *const u64).read_unaligned();
-        let s3 = (src.add(i + 24) as *const u64).read_unaligned();
-        let s4 = (src.add(i + 32) as *const u64).read_unaligned();
-        let s5 = (src.add(i + 40) as *const u64).read_unaligned();
-        let s6 = (src.add(i + 48) as *const u64).read_unaligned();
-        let s7 = (src.add(i + 56) as *const u64).read_unaligned();
-
-        (dst.add(i) as *mut u64).write_volatile(s0);
-        (dst.add(i + 8) as *mut u64).write_volatile(s1);
-        (dst.add(i + 16) as *mut u64).write_volatile(s2);
-        (dst.add(i + 24) as *mut u64).write_volatile(s3);
-        (dst.add(i + 32) as *mut u64).write_volatile(s4);
-        (dst.add(i + 40) as *mut u64).write_volatile(s5);
-        (dst.add(i + 48) as *mut u64).write_volatile(s6);
-        (dst.add(i + 56) as *mut u64).write_volatile(s7);
-        i += 64;
-    }
-    while i + 8 <= len {
-        (dst.add(i) as *mut u64).write_volatile((src.add(i) as *const u64).read_unaligned());
-        i += 8;
-    }
-    while i < len {
-        dst.add(i).write_volatile(src.add(i).read());
-        i += 1;
     }
 }
