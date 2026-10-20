@@ -38,7 +38,7 @@ pub(crate) struct App {
     pub(crate) play_f: f32,
     /// 加速档位滑杆镜像：0-8 对应 `AccelLevel::ALL` 下标。
     pub(crate) accel_f: f32,
-    /// 壁纸滑杆镜像：fps 1-30，frames 0-120（0 = 全播），preload 1-16。
+    /// 壁纸滑杆镜像：fps 1-30，frames 0-120（0 = 全播），preload 0-32（0 = 不封顶）。
     /// 库内滑杆只吃 `f32`，整数档用 round 镜像（见 Accel 页 `*_f` 字段）。
     pub(crate) wp_fps_f: f32,
     pub(crate) wp_frames_f: f32,

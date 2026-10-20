@@ -780,6 +780,31 @@ keys = [
 expect = ["AVX is "]
 forbid = ["panicked at", "CpuDeadLoop", "menu bg skipped"]
 
+# 壁纸预载拉满：preload = 0 不封顶（3 帧黑场全进内存，和播片一样）；
+# 串口 preloaded 计数即断言。无按键：只验开机预载（待机即停）。
+[[case]]
+name = "wallpaper-preload-full"
+timeout_sec = 120
+needs_wallpaper = 3
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+workers = "bsp_only"
+dist = "static"
+vsync = "off"
+[play]
+fps = "max"
+[wallpaper]
+enable = true
+fps = 15
+preload = 0
+"""
+boot_expect = ["cfg: version=1", "idle: ready"]
+expect = ["wallpaper: preloaded 3 frames"]
+
 # 引导 chainload：弹窗（等计数标记）0 选第一项，被起镜像是同一份 efi
 # 换个路径（单盘场景）；成功 = 同一串口出现第二遍 cfg + 待机就绪（计数断言）。
 [[case]]

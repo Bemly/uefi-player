@@ -268,6 +268,20 @@ mod blackbox_matrix {
         }
     }
 
+    /// 预载帧数回写（0 = 不封顶，1/8/32 照写；老文件缺键按默认 8 照读）。
+    #[test]
+    fn preload_roundtrip_matrix() {
+        for p in [0, 1, 8, 32] {
+            let mut cfg = FileConfig::default();
+            cfg.wallpaper.preload = p;
+            let back: FileConfig = toml::from_str(&toml::to_string(&cfg).unwrap()).unwrap();
+            assert_eq!(back.wallpaper.preload, p);
+            assert_eq!(back, cfg);
+        }
+        let legacy: FileConfig = toml::from_str("version = 1\n").unwrap();
+        assert_eq!(legacy.wallpaper.preload, 8);
+    }
+
     /// 播放管线八档位回写（clip/staged/zero_copy/stream/single/legacy 三档，
     /// 不丢字段；老文件缺键按 clip 照读，现路行为不变）。
     #[test]

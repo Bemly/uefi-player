@@ -56,7 +56,8 @@ format = "raw"          # 片源格式：raw（wallpaper/frameNNNN.raw，默认�
 popup_freeze = true     # 选项弹窗时冻结壁纸（false 则行区继续播；GUI 有开关）
 fps = 15                # 背景循环帧率（1-60，已钳制）
 frames = 0              # B 过渡封顶帧数（0 = 全播预载集）
-preload = 8             # 预载帧数上限（1-32；1080p BGRA 单帧约 8MB）
+preload = 8             # 预载帧数上限（1-32；0 = 不封顶，和播片一样拉满；
+                          # 1080p BGRA 单帧约 8MB，长动画注意内存）
 
 [boot]
 auto = true             # 多卷自动发现总开关（关 = 只列本卷 BLS，老行为）

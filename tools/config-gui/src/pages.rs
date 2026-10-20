@@ -397,8 +397,13 @@ impl App {
                     ui.small(t!("wallpaper.frames_hint"));
                     ui.add_space(10.0);
                     ui.label(t!("wallpaper.preload"));
-                    let preload_label = format!("{} frames", self.cfg.wallpaper.preload);
-                    egui_glass::GlassSlider::new(&mut self.wp_preload_f, 1.0..=16.0)
+                    // 最左 0 = 不封顶（和播片一样拉满），1-32 封顶帧数。
+                    let preload_label = if self.cfg.wallpaper.preload == 0 {
+                        t!("wallpaper.preload_full").into_owned()
+                    } else {
+                        format!("{} frames", self.cfg.wallpaper.preload)
+                    };
+                    egui_glass::GlassSlider::new(&mut self.wp_preload_f, 0.0..=32.0)
                         .text(preload_label)
                         .step_by(1.0)
                         .style(if self.dark {
@@ -407,7 +412,7 @@ impl App {
                             egui_glass::GlassStyle::regular()
                         })
                         .show(ui);
-                    self.cfg.wallpaper.preload = self.wp_preload_f.round().clamp(1.0, 16.0) as u32;
+                    self.cfg.wallpaper.preload = self.wp_preload_f.round().clamp(0.0, 32.0) as u32;
                     ui.small(t!("wallpaper.preload_hint"));
                 }
             }

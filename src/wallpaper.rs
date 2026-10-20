@@ -25,14 +25,20 @@ pub const MENU_LINES: usize = crate::diag::registry::ITEMS.len() + 4;
 /// 壁纸行区起点（菜单文字之下，18px/行 + 8px 间隙）。
 pub const WP_TOP: usize = MENU_LINES * 18 + 8;
 
-/// 入菜单/子菜单时调：开关关 → `None`；开 → 按格式预载（内存兜底 `preload` 上限）。
-/// 缺目录/无有效帧不报错，返回 `None`（串口记 warning，壁纸是装饰，不 halt 菜单）。
+/// 入菜单/子菜单时调：开关关 → `None`；开 → 按格式预载（`preload` 上限，
+/// 0 = 不封顶；缺目录/无有效帧不报错，返回 `None`）。
+/// 预载帧数打串口（矩阵靠它断言 0 拉满与封顶行为）。
 pub fn load() -> Result<Option<Clip>> {
     if !config::wallpaper_enabled() {
         return Ok(None);
     }
     let mut fs = Fs::new()?;
-    let want = config::wallpaper_preload().max(1) as usize;
+    // 0 = 不封顶（和播片一样拉满；`from_raw_dir` 的 `take` 与 qois 的
+    // `truncate` 对 MAX 都是无操作，长动画注意内存）。
+    let want = match config::wallpaper_preload() {
+        0 => usize::MAX,
+        n => n as usize,
+    };
     let clip = match config::wallpaper_format() {
         MediaFormat::Raw => {
             Clip::from_raw_dir(&mut fs, "wallpaper", want, FRAME_BYTES, "wallpaper")
@@ -57,5 +63,10 @@ pub fn load() -> Result<Option<Clip>> {
     if clip.is_empty() {
         return Ok(None);
     }
+    log::info!(
+        "wallpaper: preloaded {} frames (preload {})",
+        clip.len(),
+        config::wallpaper_preload()
+    );
     Ok(Some(clip))
 }

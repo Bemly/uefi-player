@@ -36,7 +36,8 @@
 //! format = "raw"          # 片源格式："raw"（wallpaper/frameNNNN.raw）| "qois"（wallpaper/wall.qois）
 //! fps = 15                # 背景循环帧率（低帧即可）
 //! frames = 0              # B 过渡封顶帧数（0 = 全播预载集）
-//! preload = 8             # A/B 共用预载帧数上限（1080p BGRA ≈ 8MB/帧）
+//! preload = 8             # 预载帧数上限（1-32；0 = 不封顶，和播片一样拉满；
+//!                         # 1080p BGRA 单帧约 8MB，长动画注意内存）
 //! popup_freeze = true     # 选项弹窗时冻结壁纸（false 则行区继续播）
 //! [boot]
 //! auto = true             # 多卷自动发现总开关（关 = 只列本卷 BLS，老行为）
@@ -541,6 +542,7 @@ pub struct WallpaperConfig {
     #[serde(default)]
     pub frames: u32,
     /// 预载帧数上限（内存兜底；单帧 1920x1080x4 ≈ 8MB）。
+    /// 0 = 不封顶（和播片一样拉满：有多少读多少，长动画注意内存）。
     #[serde(default = "default_wallpaper_preload")]
     pub preload: u32,
     /// 片源格式（默认 raw，老文件照读）。
@@ -853,7 +855,7 @@ pub fn load() -> Option<String> {
     WALLPAPER_ENABLE.store(cfg.wallpaper.enable as u8, Ordering::Relaxed);
     WALLPAPER_FPS.store(cfg.wallpaper.fps.clamp(1, 60).max(1), Ordering::Relaxed);
     WALLPAPER_FRAMES.store(cfg.wallpaper.frames, Ordering::Relaxed);
-    WALLPAPER_PRELOAD.store(cfg.wallpaper.preload.clamp(1, 32).max(1), Ordering::Relaxed);
+    WALLPAPER_PRELOAD.store(cfg.wallpaper.preload.min(32), Ordering::Relaxed);
     WALLPAPER_POPUP_FREEZE.store(cfg.wallpaper.popup_freeze as u8, Ordering::Relaxed);
     BOOT_AUTO.store(cfg.boot.auto as u8, Ordering::Relaxed);
     BOOT_WINDOWS.store(cfg.boot.windows as u8, Ordering::Relaxed);
@@ -1157,9 +1159,9 @@ pub fn wallpaper_fps() -> u32 {
 pub fn wallpaper_frames() -> u32 {
     WALLPAPER_FRAMES.load(Ordering::Relaxed)
 }
-/// 预载帧数上限（1-32，已钳制；单帧约 8MB，内存兜底）。
+/// 预载帧数上限（0 = 不封顶；1-32，已钳制；单帧约 8MB，内存兜底）。
 pub fn wallpaper_preload() -> u32 {
-    WALLPAPER_PRELOAD.load(Ordering::Relaxed).max(1)
+    WALLPAPER_PRELOAD.load(Ordering::Relaxed).min(32)
 }
 
 /// `[boot]` 自动发现总开关（关 = 只列本卷 BLS，老行为）。
