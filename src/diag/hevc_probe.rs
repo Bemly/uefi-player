@@ -7,7 +7,11 @@
 //!   详见该目录 VENDOR.md；纯整数运算，连 `libm` 都不要。
 //! - host 实测：320x240 Main 样片与 ffmpeg 逐字节一致，标量/SIMD 双路一致；
 //!   本项只验“轮子在 UEFI 里能跑”，全规格一致性以 host 探针为准。
-//! - 固件形态：标量路（`simd` 未 port 用不得，见 VENDOR.md）。
+//! - 固件形态：`[accel] level` 单比特开关（`scalar`=关/其余=开；开则解码取
+//!   轮子上限，SSE2 保底、AVX2 看 CPUID/XCR0，开机 `resolve_accel` 已按需开过
+//!   XSAVE，首解前这里再幂等保一次，防 OVMF 默认 CR4.OSXSAVE=0 下 XGETBV 的
+//!   `#UD`；轮内无第二套检测，见 VENDOR.md）。双胞胎与标量路 bit-exact，
+//!   校验和口径（仅 Y 平面 wrapping 和）与标量路一致。
 //!
 //! 样片：`data/hevc_probe_main.265`（ffmpeg testsrc 320x240×10 帧 Main 无 B 帧，
 //! 约 8KB，`include_bytes!` 编进固件，免 U 盘文件依赖）。
@@ -38,6 +42,8 @@ fn fail(msg: &str) -> NyaStatus {
 
 pub fn run(screen: &mut Screen) -> Result {
     emit!(screen, "=== HEVC(H.265) decode probe (rusty_h265) ===");
+    // 首解前幂等保一次 XSAVE（`resolve_accel` 开机已做；这里防首解跑到它前面）。
+    crate::diag::common::ensure_xsave_enabled();
     let mut dec = rusty_h265::Decoder::new();
     dec.push_annexb(SAMPLE, None)
         .map_err(|e| fail(&alloc::format!("hevc: push error: {:?}", e)))?;

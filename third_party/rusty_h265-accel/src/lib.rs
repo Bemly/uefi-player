@@ -35,6 +35,9 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 // VENDOR(uefi-player): always in scope; `use alloc::…` resolves in both builds.
 extern crate alloc;
+// VENDOR(uefi-player): core atomics resolve in both builds (std links core;
+// the per-module `std::sync::atomic` imports below became this one shape).
+use core::sync::atomic::{AtomicBool, Ordering};
 
 pub mod deblock;
 pub mod intra;
@@ -68,7 +71,8 @@ pub enum Isa {
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 mod detect {
     use super::Isa;
-    use std::sync::atomic::{AtomicU8, Ordering};
+    // VENDOR(uefi-player): `std::sync::atomic` => `core` (same type, both builds).
+    use core::sync::atomic::{AtomicU8, Ordering};
 
     static CACHE: AtomicU8 = AtomicU8::new(u8::MAX);
     /// A cap set before first use, for harnesses that need to vary the ISA per
@@ -100,6 +104,15 @@ mod detect {
         // what its name says is worse than no arm at all -- every conclusion
         // drawn from it is wrong in the confident direction. The real scalar
         // build is `--no-default-features`.
+        // VENDOR(uefi-player): no_std => the env knob reads as unset (uncapped)
+        // and the hardware level is assumed max. The firmware owns the ONLY
+        // detection set (`config::probe_max_width` over CPUID/XCR0, after
+        // `ensure_xsave_enabled`) and pushes its verdict via `force_isa` /
+        // `force_scalar` before the first decode, so `FORCED` below is the
+        // real gate. Same values as a host run with a clean environment on a
+        // machine the firmware gate already approved. Do NOT grow a second
+        // CPUID/XCR0 probe here.
+        #[cfg(feature = "std")]
         let cap = match std::env::var("RH265_ISA").as_deref() {
             Ok("scalar") => panic!(
                 "RH265_ISA=scalar does not select the scalar kernels -- level 0 is the SSE2 rung.                  Build with --no-default-features for a genuinely scalar decoder."
@@ -108,6 +121,9 @@ mod detect {
             Ok("sse41") => 1,
             _ => 2,
         };
+        #[cfg(not(feature = "std"))]
+        let cap = 2u8;
+        #[cfg(feature = "std")]
         let have = if std::is_x86_feature_detected!("avx2") {
             2
         } else if std::is_x86_feature_detected!("sse4.1") {
@@ -115,7 +131,16 @@ mod detect {
         } else {
             0
         };
+        // VENDOR(uefi-player): no_std => assumed max (see above); `forced`
+        // clamps it to what the firmware vetted.
+        #[cfg(not(feature = "std"))]
+        let have = 2u8;
         let forced = FORCED.load(Ordering::Relaxed);
+        // VENDOR(uefi-player): fail loud in debug if the firmware forgot the
+        // push — otherwise AVX2 would execute unvetted. Release keeps the
+        // assumed-max (documented contract, see VENDOR.md).
+        #[cfg(not(feature = "std"))]
+        debug_assert!(forced != u8::MAX, "rusty_h265-accel: no_std+simd probed before the firmware pushed an ISA cap (resolve_accel must run before first decode)");
         have.min(cap).min(if forced == u8::MAX { u8::MAX } else { forced })
     }
 
@@ -160,7 +185,28 @@ mod detect {
 /// call often, but hoist it above a hot loop anyway.
 #[inline]
 pub fn isa() -> Isa {
+    // VENDOR(uefi-player): firmware scalar park (see `force_scalar`); every
+    // dispatcher treats `Isa::Scalar` as "take the scalar twin".
+    if FORCE_SCALAR.load(Ordering::Relaxed) {
+        return Isa::Scalar;
+    }
     detect::isa()
+}
+
+// VENDOR(uefi-player): the firmware off-switch for `[accel] level=scalar`.
+// Upstream `force_isa(Scalar)` collapses to the SSE2 rung (level 0 IS that
+// rung, see `probe`); parking here is the true runtime off-switch. Applies to
+// every build (scalar builds already sit at `Scalar`, where this is a no-op).
+// Must be called before the first kernel dispatch; `resolve_accel` does.
+static FORCE_SCALAR: AtomicBool = AtomicBool::new(false);
+
+/// Park every dispatcher on its scalar twin, before the first kernel dispatch.
+///
+/// The firmware calls this when `[accel] level=scalar`; anything else goes
+/// through [`force_isa`] (capped by the firmware gate). A later [`force_isa`]
+/// cap does NOT lift the park — re-resolve from a clean boot instead.
+pub fn force_scalar() {
+    FORCE_SCALAR.store(true, Ordering::Relaxed);
 }
 
 /// Cap the ISA programmatically, before the first kernel dispatch.
@@ -194,7 +240,9 @@ pub fn describe() -> &'static str {
                 "rusty_h265-accel: baseline"
             }
         }
-        Isa::Scalar => "rusty_h265-accel: scalar (simd feature off)",
+        // VENDOR(uefi-player): was "scalar (simd feature off)"; the firmware
+        // parks here at runtime via `force_scalar` with simd compiled in.
+        Isa::Scalar => "rusty_h265-accel: scalar",
     }
 }
 

@@ -307,7 +307,8 @@ fn transform_skip_scalar(d: &mut [i32], n: usize, shift: u32) {
 
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 mod x86 {
-    use std::arch::x86_64::*;
+    // VENDOR(uefi-player): `std::arch` => `core` (same intrinsics, no_std-safe).
+    use core::arch::x86_64::*;
 
     /// # Safety
     /// `dst` must have `dst_stride * (h - 1) + w` writable `u16`; `src`
@@ -1047,7 +1048,8 @@ mod x86 {
 
 #[cfg(all(feature = "simd", target_arch = "aarch64"))]
 mod arm {
-    use std::arch::aarch64::*;
+    // VENDOR(uefi-player): `std::arch` => `core` (same intrinsics, no_std-safe).
+    use core::arch::aarch64::*;
 
     /// # Safety
     /// As the SSE2 twin.

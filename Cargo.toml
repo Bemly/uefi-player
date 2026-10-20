@@ -17,9 +17,12 @@ shiguredo_mp4 = { version = "2026.5.0", default-features = false }
 # 到时 `[accel]` 矩阵经 `scalar`=关/`else`=开做单比特开关（设计已论证，见 simd.md）。）
 rusty_h264-decoder = { version = "0.16", default-features = false, features = ["libm"] }
 # H.265 解码（mp4/壁纸片源用；pure-Rust，上游 0.6.2 尚无 no_std 分层，
-# 本仓 vendor 到 third_party/rusty_h265(+accel) 后自 port 标量路，
-# 见该目录 VENDOR.md；纯整数运算，连 libm 都不要；`simd` 未 port 用不得）。
-rusty_h265 = { path = "third_party/rusty_h265", default-features = false }
+# 本仓 vendor 到 third_party/rusty_h265(+accel) 后自 port（标量路 + SIMD 双胞胎
+# no_std 化，见该目录 VENDOR.md）；纯整数运算，连 libm 都不要。
+# `simd` 开：`[accel] level` 做单比特开关（`scalar`=关/其余=开，
+# `resolve_accel` 按 `copy_width()` 经轮子自带的 `rusty_h265::accel::`
+# 缝推 force 上限，显式超硬件被钳住）。
+rusty_h265 = { path = "third_party/rusty_h265", default-features = false, features = ["simd"] }
 # Theora 解码（ogg 片源用；pure-Rust，上游 0.0.12 尚无 no_std 分层，
 # 本仓 vendor 到 third_party/oxideav-theora 后自 port 标量 decoder-only，
 # 见该目录 VENDOR.md；纯标量整数 iDCT，无 SIMD 概念；`default-features = false`

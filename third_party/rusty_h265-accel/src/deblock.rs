@@ -42,7 +42,7 @@
 //! `|delta| < 10*tc` in the weak path is per line, and that becomes a lane mask.
 
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-use std::arch::x86_64::*;
+use core::arch::x86_64::*; // VENDOR(uefi-player): `std::arch` => `core` (same intrinsics, no_std-safe).
 
 use crate::census;
 

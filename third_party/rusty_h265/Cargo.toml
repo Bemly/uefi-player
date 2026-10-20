@@ -17,11 +17,11 @@ default = ["std", "simd"]
 # diagnostic prints become no-ops (shipped defaults — the doctrine upstream
 # documents for its own no_std consumers).
 std = ["rusty_h265-accel/std"]
-# Portable SIMD kernels in rusty_h265-accel (SSE2/AVX2/NEON). The firmware
-# scalar port leaves this off. `simd` implies accel `std`: the SIMD twins were
-# not ported to no_std (out of scope — scalar arm only), so `simd` without
-# `std` is NOT a supported combination.
-simd = ["rusty_h265-accel/simd", "rusty_h265-accel/std"]
+# Portable SIMD kernels in rusty_h265-accel (SSE2/AVX2/NEON). no_std-safe since
+# the accel port (see ../rusty_h265-accel + VENDOR.md §3): `simd` no longer
+# implies accel `std`. The runtime ISA is firmware-gated (`force_isa` /
+# `force_scalar` pushed by `resolve_accel` before first decode).
+simd = ["rusty_h265-accel/simd"]
 census = ["rusty_h265-accel/census"]
 cabac-trace = []
 prof = []

@@ -1078,6 +1078,8 @@ pub fn vsync_enabled() -> bool {
 /// 开机探一次硬件最大搬运位宽（P2）：先 `ensure_xsave_enabled`（CPL0 直接开，
 /// 幂等），再按 CPUID/XCR0 取最高可用。调一次，`upload_frame` 每次读结论。
 /// 必须在任何上屏/bench 之前调（`main` 里调，bench/播放只读）。
+/// 末尾把 `[accel]` 单比特开关推进解码轮子：`scalar`=关（驻标量双胞胎），
+/// 其余=开（轮子按 `copy_width()` 钳后的上限跑，显式超硬件在这里被钳住）。
 pub fn resolve_accel() {
     #[cfg(target_arch = "x86_64")]
     {
@@ -1094,6 +1096,19 @@ pub fn resolve_accel() {
             );
         }
         log::info!("accel: hardware max width = {:?}", max_width_name(max));
+        // 解码轮子的运行时检测就是这道固件门（轮内无第二套 CPUID/XCR0 探）：
+        // `copy_width()` 已是 min(配置, 硬件)，按它推上限，首解前生效。
+        // `V128`（AVX）在轮侧无 VEX-128 档，取其下最高档 `Sse41`
+        //（AVX 机器恒有 SSE4.1，可安全执行）。
+        match copy_width() {
+            CopyWidth::U64 => rusty_h265::accel::force_scalar(),
+            CopyWidth::X128 => rusty_h265::accel::force_isa(rusty_h265::accel::Isa::Baseline),
+            CopyWidth::V128 => rusty_h265::accel::force_isa(rusty_h265::accel::Isa::Sse41),
+            CopyWidth::Y256 | CopyWidth::Z512 => {
+                rusty_h265::accel::force_isa(rusty_h265::accel::Isa::Avx2)
+            }
+        }
+        log::info!("accel: hevc decode isa = {}", rusty_h265::accel::describe());
     }
 }
 

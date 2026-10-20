@@ -175,7 +175,8 @@ fn copy_shift_scalar(src: &[u16], stride: usize, w: usize, h: usize, shift: u32,
 
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 mod x86 {
-    use std::arch::x86_64::*;
+    // VENDOR(uefi-player): `std::arch` => `core` (same intrinsics, no_std-safe).
+    use core::arch::x86_64::*;
 
     /// A shift that vanishes when the caller's shift is zero, so the
     /// specialised path emits no instruction at all.
@@ -979,7 +980,8 @@ mod x86 {
 
 #[cfg(all(feature = "simd", target_arch = "aarch64"))]
 mod arm {
-    use std::arch::aarch64::*;
+    // VENDOR(uefi-player): `std::arch` => `core` (same intrinsics, no_std-safe).
+    use core::arch::aarch64::*;
 
     /// Horizontal FIR, NEON. 8 outputs per iteration, accumulating in `i32`.
     ///
@@ -1138,7 +1140,8 @@ fn fir_h<const N: usize>(p: McPlan, src: &[u16], stride: usize, t: &[i16; N], w:
 fn as_i16(s: &[u16]) -> &[i16] {
     // SAFETY: `u16` and `i16` have identical size and alignment, and the
     // lifetime and length are carried over unchanged.
-    unsafe { std::slice::from_raw_parts(s.as_ptr().cast::<i16>(), s.len()) }
+    // VENDOR(uefi-player): `std::slice` => `core::slice` (same fn, no_std-safe).
+    unsafe { core::slice::from_raw_parts(s.as_ptr().cast::<i16>(), s.len()) }
 }
 
 /// Vertical FIR straight off the reference plane (the `fx == 0` case).
