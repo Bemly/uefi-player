@@ -42,10 +42,13 @@ mod scalar_impl {
     }
 }
 
-// VENDOR(uefi-player): `simd_impl` is std-only (wide); without `std` the
-// scalar kernel below filters every edge instead (see the twins in
-// `deblock_horiz` / `deblock_vert`).
-#[cfg(feature = "std")]
+// VENDOR(uefi-player): `simd_impl` needs the `simd` feature (wide); without
+// it the scalar kernel below filters every edge instead (see the twins in
+// `deblock_horiz` / `deblock_vert`). `wide` itself is `#![no_std]` — its
+// `std` feature only speeds up float `sqrt`, which this integer kernel never
+// touches — so this module also builds for firmware
+// (`--no-default-features --features simd`).
+#[cfg(feature = "simd")]
 mod simd_impl {
     // VENDOR(uefi-player): std-only module (wide SIMD); `core::ops` so the
     // import itself is shape-neutral.
@@ -124,14 +127,43 @@ mod simd_impl {
 
 // VENDOR(uefi-player): no_std port — `alloc::Vec` for the `deblock` return.
 use alloc::vec::Vec;
-// VENDOR(uefi-player): `izip!` drives the std-only 8-row parallel loop;
-// the no_std twin below needs no zipping.
-#[cfg(feature = "std")]
+// VENDOR(uefi-player): `izip!` drives the `simd`-gated 8-row parallel loop;
+// the scalar twin below needs no zipping.
+#[cfg(feature = "simd")]
 use itertools::izip;
 use scalar_impl::process;
-// VENDOR(uefi-player): std-only SIMD entry point.
-#[cfg(feature = "std")]
+// VENDOR(uefi-player): SIMD entry point, `simd`-gated.
+#[cfg(feature = "simd")]
 use simd_impl::process_simd;
+
+// VENDOR(uefi-player): firmware gate — the single-bit `[accel]` switch backer
+// (`scalar` => firmware calls `set_simd_enabled(false)`, any other level =>
+// `true` once `ensure_xsave_enabled` has run; see VENDOR.md for the wiring
+// contract — this crate never probes CPUID itself, it only obeys). The kernel
+// only ever emits SSE2-baseline integer math (x86-64 psABI guaranteed), so the
+// switch is config semantics, not a safety gate: ON under `std` (upstream ran
+// SIMD unconditionally), OFF under no_std (fail-closed until firmware opts
+// in). `Relaxed` suffices — both paths are byte-identical by test, so a torn
+// read can at worst mix paths inside one frame, never corrupt it.
+#[cfg(feature = "simd")]
+use core::sync::atomic::{AtomicBool, Ordering};
+#[cfg(feature = "simd")]
+static SIMD_ENABLED: AtomicBool = AtomicBool::new(cfg!(feature = "std"));
+
+/// Enable (`true`) or disable (`false`) the wide-SIMD fast paths at runtime.
+/// No-op unless the `simd` feature is on, so callers need no `cfg`.
+pub fn set_simd_enabled(en: bool) {
+    #[cfg(feature = "simd")]
+    SIMD_ENABLED.store(en, Ordering::Relaxed);
+    #[cfg(not(feature = "simd"))]
+    let _ = en;
+}
+
+#[cfg(feature = "simd")]
+#[inline]
+fn simd_enabled() -> bool {
+    SIMD_ENABLED.load(Ordering::Relaxed)
+}
 
 /// Applies the deblocking with the given strength to the horizontal block edges.
 #[allow(non_snake_case)]
@@ -147,9 +179,11 @@ fn deblock_horiz(result: &mut [u8], width: usize, strength: u8) {
         let (row_c, rest) = rest.split_at_mut(width);
         let (row_d, _) = rest.split_at_mut(width);
 
-        // VENDOR(uefi-player): SIMD fast path (std only) — upstream verbatim.
-        #[cfg(feature = "std")]
-        {
+        // VENDOR(uefi-player): runtime dispatch — SIMD fast path when opted
+        // in, full-scalar twin otherwise. With `simd` off only the twin
+        // compiles and the branch folds away.
+        #[cfg(feature = "simd")]
+        if simd_enabled() {
             // the first N*8 samples (horizontally) are handled by the SIMD implementation
             let (row_a_chunks, row_a_rem) = row_a.as_chunks_mut::<8>();
             let (row_b_chunks, row_b_rem) = row_b.as_chunks_mut::<8>();
@@ -176,38 +210,51 @@ fn deblock_horiz(result: &mut [u8], width: usize, strength: u8) {
             {
                 process(A, B, C, D, strength);
             }
+        } else {
+            deblock_horiz_scalar(row_a, row_b, row_c, row_d, width, strength);
         }
-
-        // VENDOR(uefi-player): no_std scalar twin — same ABCD edge rows,
-        // every column filtered by `process` (covers the SIMD chunk range
-        // and the <=7 remainder alike).
-        #[cfg(not(feature = "std"))]
-        {
-            for x in 0..width {
-                let (mut A, mut B, mut C, mut D) = (row_a[x], row_b[x], row_c[x], row_d[x]);
-                process(&mut A, &mut B, &mut C, &mut D, strength);
-                row_a[x] = A;
-                row_b[x] = B;
-                row_c[x] = C;
-                row_d[x] = D;
-            }
-        }
+        #[cfg(not(feature = "simd"))]
+        deblock_horiz_scalar(row_a, row_b, row_c, row_d, width, strength);
 
         edge_y += 8;
+    }
+}
+
+// VENDOR(uefi-player): scalar twin of one horizontal edge — same ABCD edge
+// rows, every column filtered by `process` (covers the SIMD chunk range and
+// the <=7 remainder alike). Always compiled: the `simd`-off shape and the
+// runtime off-ramp both need it.
+#[allow(non_snake_case)]
+#[inline]
+fn deblock_horiz_scalar(
+    row_a: &mut [u8],
+    row_b: &mut [u8],
+    row_c: &mut [u8],
+    row_d: &mut [u8],
+    width: usize,
+    strength: u8,
+) {
+    for x in 0..width {
+        let (mut A, mut B, mut C, mut D) = (row_a[x], row_b[x], row_c[x], row_d[x]);
+        process(&mut A, &mut B, &mut C, &mut D, strength);
+        row_a[x] = A;
+        row_b[x] = B;
+        row_c[x] = C;
+        row_d[x] = D;
     }
 }
 
 /// Applies the deblocking with the given strength to the vertical block edges.
 #[allow(non_snake_case)]
 fn deblock_vert(result: &mut [u8], width: usize, strength: u8) {
-    // VENDOR(uefi-player): the octet helpers below feed the std-only SIMD
-    // loop; the no_std twin filters the same columns scalarly instead.
+    // VENDOR(uefi-player): the octet helpers below feed the `simd`-gated SIMD
+    // loop; the scalar twin filters the same columns instead.
 
-    // VENDOR(uefi-player): no_std scalar twin of one vertical-edge column
-    // quartet: filters the ABCD pixels at `row[x + 4 ..= x + 7]` in a single
-    // row. The caller below visits the same 8-wide chunks (from x = 2) as the
-    // SIMD path, so edge coverage is identical.
-    #[cfg(not(feature = "std"))]
+    // VENDOR(uefi-player): scalar twin of one vertical-edge column quartet:
+    // filters the ABCD pixels at `row[x + 4 ..= x + 7]` in a single row.
+    // Always compiled: the `simd`-off shape and the runtime off-ramp both
+    // need it. The caller below visits the same 8-wide chunks (from x = 2)
+    // as the SIMD path, so edge coverage is identical.
     #[allow(non_snake_case)]
     #[inline]
     fn process_vert_quartet(row: &mut [u8], x: usize, strength: u8) {
@@ -219,9 +266,42 @@ fn deblock_vert(result: &mut [u8], width: usize, strength: u8) {
         row[x + 7] = D;
     }
 
+    // VENDOR(uefi-player): scalar twin of one 8-row vertical pass — same
+    // 8-wide chunks from x = 2, same ABCD columns (+4..=7, i.e. edges at
+    // multiples of 8), one row at a time. Always compiled, like the quartet.
+    // Ten args mirror upstream's 8-tuple octet shape (borrowck can't take an
+    // array of `&mut` here); not worth a wrapper struct for one caller.
+    #[allow(non_snake_case, clippy::too_many_arguments)]
+    #[inline]
+    fn process_vert_octet(
+        row_0: &mut [u8],
+        row_1: &mut [u8],
+        row_2: &mut [u8],
+        row_3: &mut [u8],
+        row_4: &mut [u8],
+        row_5: &mut [u8],
+        row_6: &mut [u8],
+        row_7: &mut [u8],
+        width: usize,
+        strength: u8,
+    ) {
+        let mut x = 2;
+        while x + 8 <= width {
+            process_vert_quartet(row_0, x, strength);
+            process_vert_quartet(row_1, x, strength);
+            process_vert_quartet(row_2, x, strength);
+            process_vert_quartet(row_3, x, strength);
+            process_vert_quartet(row_4, x, strength);
+            process_vert_quartet(row_5, x, strength);
+            process_vert_quartet(row_6, x, strength);
+            process_vert_quartet(row_7, x, strength);
+            x += 8;
+        }
+    }
+
     /// Holds a bundle of 8 mutable references to 8-byte arrays.
     /// This is a tuple instead of an array due to `izip!` usage below.
-    #[cfg(feature = "std")]
+    #[cfg(feature = "simd")]
     type ByteArrayMutRefOctet<'a> = (
         &'a mut [u8; 8],
         &'a mut [u8; 8],
@@ -234,7 +314,7 @@ fn deblock_vert(result: &mut [u8], width: usize, strength: u8) {
     );
 
     /// Indexes into each array in a `ByteArrayMutRefOctet`, returning an array of the values.
-    #[cfg(feature = "std")]
+    #[cfg(feature = "simd")]
     #[inline]
     fn extract_column(arrays: &ByteArrayMutRefOctet, i: usize) -> [u8; 8] {
         [
@@ -250,7 +330,7 @@ fn deblock_vert(result: &mut [u8], width: usize, strength: u8) {
     }
 
     /// Sets a single value in each array in a `ByteArrayMutRefOctet` to the corresponding value in `a`.
-    #[cfg(feature = "std")]
+    #[cfg(feature = "simd")]
     #[inline]
     fn set_column(arrays: &mut ByteArrayMutRefOctet, i: usize, a: [u8; 8]) {
         arrays.0[i] = a[0];
@@ -286,9 +366,11 @@ fn deblock_vert(result: &mut [u8], width: usize, strength: u8) {
             // (this offset is done by the `[2..]` part). In the first halves of these
             // chunks are the "middle columns" of the 8x8 blocks, not to be touched.
             // This was easier than iterating over 4-wide chunks and skipping every odd one.
-            // VENDOR(uefi-player): SIMD path (std only) — upstream verbatim.
-            #[cfg(feature = "std")]
-            {
+            // VENDOR(uefi-player): runtime dispatch — SIMD transpose path
+            // when opted in (upstream verbatim), scalar octet twin otherwise.
+            // With `simd` off only the twin compiles and the branch folds away.
+            #[cfg(feature = "simd")]
+            if simd_enabled() {
                 let (row_0_chunks, _) = row_0[2..].as_chunks_mut::<8>();
             let (row_1_chunks, _) = row_1[2..].as_chunks_mut::<8>();
             let (row_2_chunks, _) = row_2[2..].as_chunks_mut::<8>();
@@ -323,26 +405,15 @@ fn deblock_vert(result: &mut [u8], width: usize, strength: u8) {
                 set_column(&mut arrays, 6, Cs);
                 set_column(&mut arrays, 7, Ds);
             }
+            } else {
+                process_vert_octet(
+                    row_0, row_1, row_2, row_3, row_4, row_5, row_6, row_7, width, strength,
+                );
             }
-
-            // VENDOR(uefi-player): no_std scalar twin — same 8-wide chunks
-            // from x = 2, same ABCD columns (+4..=7, i.e. edges at multiples
-            // of 8), one row at a time.
-            #[cfg(not(feature = "std"))]
-            {
-                let mut x = 2;
-                while x + 8 <= width {
-                    process_vert_quartet(row_0, x, strength);
-                    process_vert_quartet(row_1, x, strength);
-                    process_vert_quartet(row_2, x, strength);
-                    process_vert_quartet(row_3, x, strength);
-                    process_vert_quartet(row_4, x, strength);
-                    process_vert_quartet(row_5, x, strength);
-                    process_vert_quartet(row_6, x, strength);
-                    process_vert_quartet(row_7, x, strength);
-                    x += 8;
-                }
-            }
+            #[cfg(not(feature = "simd"))]
+            process_vert_octet(
+                row_0, row_1, row_2, row_3, row_4, row_5, row_6, row_7, width, strength,
+            );
         }
 
         // The remaining <=7 rows at the bottom are handled by the scalar implementation,
@@ -626,5 +697,48 @@ mod test {
         ];
         let result_12 = deblock(data, 11, 12);
         assert_eq!(result_12, expected_12);
+    }
+
+    // VENDOR(uefi-player): SIMD/scalar agreement. Runs under every shape with
+    // the `simd` feature, flipping the runtime switch so both paths filter
+    // the same frame in one binary and must agree byte for byte. Sizes sweep
+    // below the vertical fast path (< 10 wide), 8-aligned frames, remainder
+    // columns/rows, and heights with no horizontal edge at all; strengths
+    // sweep the full 1..=12 range corners. The exact-expectation `test_deblock`
+    // above keeps passing untouched under both paths; this test locks the two
+    // paths to each other. Only this test writes the switch, and the paths
+    // are interchangeable, so parallel test threads cannot disturb each other.
+    #[cfg(feature = "simd")]
+    #[test]
+    fn test_deblock_simd_scalar_agree() {
+        let prev = simd_enabled();
+        for &(width, height) in &[
+            (7usize, 20usize),
+            (8, 8),
+            (9, 9),
+            (10, 10),
+            (11, 17),
+            (16, 9),
+            (24, 24),
+        ] {
+            // Step edges in both directions so every filter branch fires.
+            let data: Vec<u8> = (0..width * height)
+                .map(|i| {
+                    let (x, y) = (i % width, i / width);
+                    ((x / 4 * 37 + y / 8 * 41 + x + y) % 251) as u8
+                })
+                .collect();
+            for strength in [1u8, 4, 8, 12] {
+                set_simd_enabled(true);
+                let via_simd = deblock(&data, width, strength);
+                set_simd_enabled(false);
+                let via_scalar = deblock(&data, width, strength);
+                assert_eq!(
+                    via_simd, via_scalar,
+                    "SIMD/scalar mismatch at {width}x{height} strength {strength}"
+                );
+            }
+        }
+        set_simd_enabled(prev);
     }
 }

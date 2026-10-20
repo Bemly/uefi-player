@@ -5,10 +5,53 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 // TODO: Replace with `std::simd` when it's stable
-// VENDOR(uefi-player): `wide` is std-only (see Cargo.toml); the no_std twin
-// below covers the same kernel in scalar integer math.
-#[cfg(feature = "std")]
+// VENDOR(uefi-player): `wide` is `simd`-gated (see Cargo.toml); without
+// `simd` the scalar twin below is the only kernel. `wide` itself is
+// `#![no_std]` — its `std` feature only speeds up float `sqrt`, which this
+// integer kernel never touches — so the SIMD path below also builds for
+// firmware (`--no-default-features --features simd`).
+#[cfg(feature = "simd")]
 use wide::{i32x4, u8x16};
+
+// VENDOR(uefi-player): firmware gate — the single-bit `[accel]` switch backer
+// (`scalar` => firmware calls `set_simd_enabled(false)`, any other level =>
+// `true` once `ensure_xsave_enabled` has run; see VENDOR.md for the wiring
+// contract — this crate never probes CPUID itself, it only obeys). The kernel
+// only ever emits SSE2-baseline integer math (x86-64 psABI guaranteed), so the
+// switch is config semantics, not a safety gate: ON under `std` (upstream ran
+// SIMD unconditionally), OFF under no_std (fail-closed until firmware opts
+// in). `Relaxed` suffices — both paths are byte-identical by test, so a torn
+// read can at worst mix paths inside one frame, never corrupt it.
+#[cfg(feature = "simd")]
+use core::sync::atomic::{AtomicBool, Ordering};
+#[cfg(feature = "simd")]
+static SIMD_ENABLED: AtomicBool = AtomicBool::new(cfg!(feature = "std"));
+
+/// Enable (`true`) or disable (`false`) the wide-SIMD fast path at runtime.
+/// No-op unless the `simd` feature is on, so callers need no `cfg`.
+pub fn set_simd_enabled(en: bool) {
+    #[cfg(feature = "simd")]
+    SIMD_ENABLED.store(en, Ordering::Relaxed);
+    #[cfg(not(feature = "simd"))]
+    let _ = en;
+}
+
+#[cfg(feature = "simd")]
+#[inline]
+fn simd_enabled() -> bool {
+    SIMD_ENABLED.load(Ordering::Relaxed)
+}
+
+// VENDOR(uefi-player): runtime dispatch — SIMD when firmware (or tests) opted
+// in, scalar twin otherwise. With `simd` off the branch folds away entirely.
+#[inline]
+fn yuv_to_rgba_4x(yuv: (&[u8; 4], &[u8; 2], &[u8; 2]), rgba: &mut [u8; 16]) {
+    #[cfg(feature = "simd")]
+    if simd_enabled() {
+        return yuv_to_rgba_4x_simd(yuv, rgba);
+    }
+    yuv_to_rgba_4x_scalar(yuv, rgba)
+}
 
 // Operates on 4 pixels at a time, one pixel per SIMD lane,
 // with 32 bits of intermediate per-component precision for
@@ -16,10 +59,10 @@ use wide::{i32x4, u8x16};
 // And i32x4 also allows the neat transpose trick at the end.
 // The output is an interleaved array of 4 RGBA pixels.
 //
-// VENDOR(uefi-player): std shape — upstream verbatim.
-#[cfg(feature = "std")]
+// VENDOR(uefi-player): simd shape — upstream verbatim, renamed for dispatch.
+#[cfg(feature = "simd")]
 #[inline]
-fn yuv_to_rgba_4x(yuv: (&[u8; 4], &[u8; 2], &[u8; 2]), rgba: &mut [u8; 16]) {
+fn yuv_to_rgba_4x_simd(yuv: (&[u8; 4], &[u8; 2], &[u8; 2]), rgba: &mut [u8; 16]) {
     let (y, cb, cr) = yuv;
 
     // Expanding the 4 bytes into a i32x4, and duplicating chroma samples horizontally.
@@ -68,14 +111,14 @@ fn yuv_to_rgba_4x(yuv: (&[u8; 4], &[u8; 2], &[u8; 2]), rgba: &mut [u8; 16]) {
     rgba.copy_from_slice(bytemuck::cast::<i32x4, u8x16>(rgba_4x).as_array())
 }
 
-// VENDOR(uefi-player): no_std scalar twin of `yuv_to_rgba_4x` above — same
+// VENDOR(uefi-player): scalar twin of `yuv_to_rgba_4x_simd` above — same
 // 16.16 fixed-point coefficients, same rounding (`+ 0.5` then arithmetic
-// shift), same clamp, same little-endian interleave. Operands stay far from
-// `i32` overflow (worst case ~35M), so plain operators match the wide
+// shift), same clamp, same little-endian interleave. Always compiled (both
+// the `simd`-off fallback and the runtime off-ramp need it). Operands stay
+// far from `i32` overflow (worst case ~35M), so plain operators match the wide
 // wrapping arithmetic exactly. Kept integer-only: no libm on any shape.
-#[cfg(not(feature = "std"))]
 #[inline]
-fn yuv_to_rgba_4x(yuv: (&[u8; 4], &[u8; 2], &[u8; 2]), rgba: &mut [u8; 16]) {
+fn yuv_to_rgba_4x_scalar(yuv: (&[u8; 4], &[u8; 2], &[u8; 2]), rgba: &mut [u8; 16]) {
     let (y, cb, cr) = yuv;
 
     for i in 0..4 {
@@ -568,4 +611,36 @@ fn test_yuv420_to_rgba_dual_path_reference() {
         }
     }
     assert_eq!(rgba, expected);
+}
+
+// VENDOR(uefi-player): SIMD/scalar agreement. Runs under every shape with the
+// `simd` feature (`cargo test`, `--no-default-features --features simd`,
+// `--no-default-features --features std`), flipping the runtime switch so
+// both kernels render the same frame in one binary and must agree byte for
+// byte. Widths cover the 4-wide main loop, the 2-wide chroma loop and the odd
+// remainder path; other tests never touch the switch, and the two paths are
+// interchangeable, so parallel test threads cannot disturb each other.
+#[cfg(feature = "simd")]
+#[test]
+fn test_yuv420_to_rgba_simd_scalar_agree() {
+    let prev = simd_enabled();
+    // Odd heights exercise chroma row halving; widths sweep all remainder classes.
+    for width in [1usize, 2, 3, 4, 5, 7, 8, 9] {
+        let height = 5usize;
+        let br_width = width.div_ceil(2);
+        let br_height = height.div_ceil(2);
+        let y: Vec<u8> = (0..width * height).map(|i| (i * 37 + 11) as u8).collect();
+        let cb: Vec<u8> = (0..br_width * br_height).map(|i| (i * 53 + 29) as u8).collect();
+        let cr: Vec<u8> = (0..br_width * br_height).map(|i| (i * 71 + 7) as u8).collect();
+
+        set_simd_enabled(true);
+        let via_simd = yuv420_to_rgba(&y, &cb, &cr, width);
+        set_simd_enabled(false);
+        let via_scalar = yuv420_to_rgba(&y, &cb, &cr, width);
+        assert_eq!(
+            via_simd, via_scalar,
+            "SIMD/scalar mismatch at width {width}"
+        );
+    }
+    set_simd_enabled(prev);
 }
