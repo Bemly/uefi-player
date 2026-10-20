@@ -50,7 +50,9 @@ x86 引导加载器（基于 sprout 扩展）+ SIMD 加速矩阵 + UEFI 播放�
 # 固件侧（根目录，`.cargo/config` + rust-toolchain 已配好 target）
 cargo build --target x86_64-unknown-uefi
 cargo clippy --target x86_64-unknown-uefi
-cargo fmt --all --check
+# `-p` 只查主包：`--all` 会连带 path 依赖箱一起查，vendored 上游箱
+# （third_party/rusty_h265*）为保合流能力豁免 stock rustfmt（见其 VENDOR.md）
+cargo fmt -p uefi-player --check
 
 # host GUI（独立包，不进 UEFI 构建；必须显式 host target，
 # 因为根 .cargo/config 把默认 target 钉成了 UEFI）

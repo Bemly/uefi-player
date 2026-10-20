@@ -16,6 +16,7 @@ pub mod fw_collect;
 pub mod get_cpu_info;
 pub mod get_multi_monitor;
 pub mod get_smbios;
+pub mod hevc_probe;
 pub mod input2_probe;
 pub mod mp_service;
 pub mod multi_core_draw;

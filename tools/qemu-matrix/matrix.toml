@@ -728,6 +728,34 @@ keys = [
 ]
 expect = ["avc: decoded 4 frames", "avc: PASS"]
 
+# HEVC 解码探针：内嵌 Main 小样片在固件里实解，帧数/几何/校验和 + PASS 全走串口。
+# 按键 `d`（菜单诊断项；弹窗侧 p/f/s/r/q 已占，d 只在纯播放器菜单里有效）。
+[[case]]
+name = "hevc-probe"
+covers = ["src/diag/hevc_probe.rs", "src/diag/data/hevc_probe_main.265"]
+timeout_sec = 240
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+workers = "bsp_only"
+dist = "static"
+vsync = "off"
+[play]
+fps = "max"
+[wallpaper]
+enable = false
+"""
+boot_expect = ["cfg: version=1", "idle: ready"]
+keys = [
+  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
+  { send = "p", wait_after = 3 },
+  { send = "d", wait_for = ["menu: ready"], wait_after = 5 },
+]
+expect = ["hevc: decoded 10 frames", "hevc: PASS"]
+
 # 弹窗导航：开弹窗 → q 回壁纸 → 再开（open 第二遍 = 待机循环没卡死）。
 [[case]]
 name = "boot-menu"

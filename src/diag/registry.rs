@@ -11,7 +11,7 @@
 use crate::diag::hw_bench;
 use crate::diag::{
     async_exec, avc_probe, avx_checker, fw_collect, get_cpu_info, get_multi_monitor, get_smbios,
-    input2_probe, mp_service, multi_core_draw, use_embedded_graphics_gop,
+    hevc_probe, input2_probe, mp_service, multi_core_draw, use_embedded_graphics_gop,
 };
 use crate::error::Result;
 use crate::graphics::Screen;
@@ -111,6 +111,13 @@ pub const ITEMS: &[Item] = &[
         name: "AVC decode",
         desc: "rusty_h264 baseline probe",
         run: Entry::Shared(avc_probe::run),
+        fatal_on_error: false,
+    },
+    Item {
+        key: 'd',
+        name: "HEVC decode",
+        desc: "rusty_h265 main probe",
+        run: Entry::Shared(hevc_probe::run),
         fatal_on_error: false,
     },
     #[cfg(target_arch = "x86_64")]

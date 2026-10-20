@@ -37,4 +37,5 @@
   自身保持小而集中。
 - 上游树本身不是 stock-rustfmt 干净的，**禁止对 vendor 树跑 `rustfmt`**
  （会产生数千行无关 diff，毁掉合 upstream 的能力）；移植行沿用文件局部风格。
-  根 `cargo fmt --all --check` 不覆盖 path 依赖箱，门禁不受影响。
+  根门禁因此用 `cargo fmt -p uefi-player --check`（`--all` 会连带 path 依赖
+  一起查；见根 AGENTS.md「双构建」注释）。
