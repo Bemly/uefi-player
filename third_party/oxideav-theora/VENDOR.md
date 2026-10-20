@@ -54,6 +54,42 @@
   根门禁因此用 `cargo fmt -p uefi-player --check`
   （`--all` 会连带 path 依赖一起查；见根 AGENTS.md「双构建」注释）。
 
+## SIMD 评估（2026-10-21）：标量已够，不做向量化
+
+- 热路（`src/lib.rs` 全整数；`f64` 仅 `granule_position_seconds` 一处除法，
+  无向量化对象；encoder 区 44k 行单文件中的前向/RD/码率机器属 `encoder`
+  门之后，decoder-only 构建已排除）：`inverse_dct_1d/2d`（§7.9.3.1 55 步
+  定点 butterfly，`wrapping` + `>>16` 语义逐字对照规范）→
+  `dequantize_block`（64 乘，zig-zag 查表串行）→ `reconstruct_block`
+  （PRED+RES 逐点加钳，8×8）→ `lflim` + `horizontal/vertical_loop_filter_edge`
+ （4-tap 响应 + 分段钳制，逐边 8 次分支；分支密集即 SIMD-hostile）；
+  熵解码/运动矢量分裂/帧内预测是串行分支，Amdahl 上不可向量化。
+- 轮子（与 mpeg2v 同一批实搜，结论相同：都不用）：
+  `wide 1.7.1`（83.8M 下载，Zlib OR Apache-2.0 OR MIT，MSRV 1.89，
+  `default-features=false` 可 no_std）——不用（h263“永不进固件”前例 +
+  内在函数 + 自带分发）。
+  `safe_arch 1.2.0`（82.6M 下载，同 license，MSRV 1.89，no-std 原生）——
+  不用（`core::arch` 薄包装 = 内在函数，违反 `asm!` 优先；无 XSAVE 集成）。
+  `pulp 0.22.3`（31.8M 下载，MIT，默认 `x86-v3` 基线）——不用
+  （AVX2 基线假设撞 UEFI SSE2 基线 + XSAVE 门控；自带分发禁）。
+- 自研同样不做：实测标量代价（host release，仓外 Rust harness 直测本箱
+  公开整数核，视频典型稀疏输入）：`inverse_dct_1d` 10ns/次，
+  `inverse_dct_2d` 90ns/块，`dequantize_block` 38ns/块，`lflim` 2ns/次；
+  外推 1080p 4:2:0 **全块 coded 最坏**：IDCT 4.4ms + 反量化 1.8ms +
+  环路滤波 2.6ms ≈ 8.8ms/帧（典型 30~50% coded + 跳边 ≈ 2~4ms），
+  相对 33ms 预算 headroom 充足；手写 55 步 butterfly 的 `asm!` 版本省
+  最多 ~2ms（6% 预算），但要逐位复刻 wrapping/截断语义，风险收益比为负。
+  `copy_block` 矩阵搬 BGRA 帧缓冲，与 i16 系数/u8 参考平面通路无关，无复用点。
+- 正确性证据：箱内嵌入式单测（规范逐字 IDCT 向量、zig-zag、dequant、
+  环路滤波足迹）双配置通过；整帧 ffmpeg 双解比对本次**未做**——被 OggS
+  拆帧卡住（本箱吃 packet，固件侧 Ogg 拆帧另立项，见下；无拆帧即无整帧
+  输入），列为遗留风险，待拆帧落地后按 mpeg2v 口径（Y 平面，max|Δ|≤4 /
+  PSNR≥58dB / 差异≤3% / 帧数精确）补做。
+- `framework`/`encoder` 门保持（decoder-only 口径不变），零 `src/` 改动，
+  故无新增 `VENDOR(uefi-player):` 注释、无 fmt 影响。
+  重启条件：Ogg 集成后实机 profile 显示本箱 >30% 帧预算，或上游自带
+  no_std SIMD twins（届时走 h263/vp9 的 std 门控主义）。
+
 ## Ogg  carriage（固件侧另立项，不在本箱）
 
 本箱只吃已拆帧 packet（§6.1 分类 + §A.2.3 granule 映射是公共 API，

@@ -63,6 +63,41 @@ MPEG-2 的 IDCT 按定义不是 bit-exact（任何 IEEE 1180 准确的 IDCT 都�
 帧数、显示序、图像类型、交织/场序精确。固件侧 probe 校验和**只取 Y 平面**
 （handover §7.3 血泪：host 拼帧输出含色度，固件侧只加 Y，口径不对先对口径）。
 
+## SIMD 评估（2026-10-21）：标量已够，不做向量化
+
+- 热路：`src/idct.rs`（`f32` 可分 2-D IDCT：行 8×(4+4) 乘 + 列 8 列×(8+8) 乘 +
+  `floorf` 落点，`dc_only` 快路）→ `src/slice.rs::block/macroblock`（每 MB 至多
+  6 块）→ `src/mc.rs::predict`（半像素平均，最大 16×16，即 `pavgb` 形状的整数
+  平均）；`vlc/bits/headers` 是串行熵解码，不可向量化。
+- 轮子（2026-10-21 实搜 crates.io API，结论：都不用）：
+  `wide 1.7.1`（累计 83.8M 下载，Zlib OR Apache-2.0 OR MIT，MSRV 1.89 ≤ 本仓
+  1.92，`default=["std"]` 即 `default-features=false` 可 no_std）——不用：
+  h263 前例“`wide` 无条件 SIMD，永不进固件”；内在函数实现违反本仓
+  `asm!` 优先纪律，自带分发等于第二套 CPUID（禁）。
+  `safe_arch 1.2.0`（累计 82.6M 下载，同 license，MSRV 1.89，`no-std` 分类零
+  特性即 no_std 原生）——不用：只是 `core::arch` 内在函数薄包装（同违反
+  `asm!` 优先），编译期 `target_feature` 门 = 第二套分发，不带 XSAVE 集成。
+  `pulp 0.22.3`（累计 31.8M 下载，MIT，`default=["std","x86-v3",…]`）——不用：
+  默认即假设 AVX2 基线（与 UEFI SSE2 基线 + XSAVE 门控直接冲突），自带运行
+  时分发（禁）。
+- 自研同样不做：① `f32` IDCT 的浮点向量按 AGENTS 纪律不执行（软浮点历史），
+  向量化只能走整数化/定点化 = 新算法进 vendor 树，需重验 IEEE 1180 + 像素
+  回归；② 实测标量代价（host release，仓外 Rust harness 直测本箱真实代码）：
+  720×480 全 intra+AC（最坏，每块 full-IDCT）0.91ms/帧，
+  64×64 I/P/B 混合 0.061ms/帧（→SD30 占比约 12%，十倍余量）；
+  MC 的 `predict` 是访存密集 sub-µs 行平均，向量化天花板是 ns 级。
+  ③ 本箱尚未接入固件播放热路（`src/` 零调用，probe 集成在后），先优化未
+  集成代码为时过早；`copy_block` 矩阵搬的是 BGRA 帧缓冲，与系数/参考平面
+  数据通路无关，无复用点。
+- 正确性证据（本次补齐 vendor 时欠下的 ffmpeg oracle）：ffmpeg 9.0.1 双解，
+  I-only testsrc 64×64×10：帧数精确一致，max|Δ|=1、PSNR 68.67dB、差异
+  0.88%；I/P/B 混合：max|Δ|=1、PSNR 67.90dB（MC 路同步验证）；
+  黑/中灰/白纯色：逐字节一致。口径教训：ffmpeg `gray` 引用会做
+  limited→full 拉伸，必须用 yuv420p 首平面取 Y（已钉死在本节）。
+- `threads` 恒关、`spin`/`libm` 现状不变，`framework/encoder` 不适用本箱。
+  重启条件：固件接入后实机 profile 显示本箱 >30% 帧预算，或上游自带 no_std
+  SIMD twins（届时走 h263/vp9 的 std 门控主义）。
+
 ## 同步上游
 
 `src/` 内 `// VENDOR(uefi-player):` 注释标出每一处移植点（crate 属性、
