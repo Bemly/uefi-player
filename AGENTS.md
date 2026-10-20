@@ -138,6 +138,10 @@ cargo run --manifest-path tools/config-gui/Cargo.toml --target "$(rustc -vV | se
 - GOP 是独占协议：`Shared` 借 `Screen`，`Exclusive` 先 `drop` 再重建
   （`registry.rs` 的两种 `Entry`，不要第三种）。
 - 诊断项可返回式报错，只生产路径（播视频）走 `handle_fatal`。
+- 单文件 ≤1000 行（`wc -l` 口径，含注释空行；UEFI 固件/host GUI/工具一视同仁，
+  数据文件如 `matrix.toml` 同理）：超了说明职责过载，必须按子分类拆模块，
+  不许继续往里堆。新文件落地即守，存量超限（`config-gui main`/`gop_simd`/
+  `graphics`/`config`/`video`/`gop_bench`/`matrix.toml`）按触达顺序拆。
 - 提交用 Conventional Commits（`feat/fix/docs`），不加 Agent 署名。
 - 版本号用 CalVer `YY.MM.DD`（如 `26.10.20`；
   主包与 `uefi-async` 各自独立按日期 bump，`tools/*` 内部工具保持 `0.1.0` 不动）。
