@@ -126,8 +126,10 @@ cargo run --manifest-path tools/config-gui/Cargo.toml --target "$(rustc -vV | se
   - QEMU 侧：`tools/qemu-matrix/matrix.toml`——每个 case 内联 `player.toml` +
     串口断言 + 按键脚本（事件驱动，`wait_for` 卡点，不靠裸睡；屏显-only 界面
     靠 `log::` 标记同步，见该目录 `README.md`）。
-- 新增/修改功能必同步更新两套矩阵（GUI 加表行，QEMU 加 case），提交前两套全绿；
+- 新增/修改功能必同步更新两套矩阵（GUI 加表行，QEMU 加 case 并写 `covers`），提交前两套全绿；
   固件新串口日志想想矩阵能不能用上，能用就地加断言。
+  迭代加速可用 `--changed` 只跑改动波及的 case（`--list --changed` 预览，menu-smoke 必带锚点），
+  它不替代提交门禁的全矩阵。
 
 ## 代码约定
 

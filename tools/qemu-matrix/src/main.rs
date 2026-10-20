@@ -79,6 +79,12 @@ struct Case {
     /// 本 case 的 CPU 模型：缺省跟全局/命令行；"host" 透传宿主特性，其它按名原样传。
     /// 命令行 `--cpu` 优先于此。
     cpu: Option<String>,
+    /// `--changed` 覆盖声明：本 case 锻炼到的仓库根相对路径前缀（文件或目录），
+    /// 改动落到其中即选中本 case；`"*"` = 任何改动都跑（只给 menu-smoke 锚点用）。
+    /// 缺省空 = 只靠隐式核心（见 CORE）选中，即“纯标定类”case。
+    /// 维护：改某子系统代码时顺手核对对应 case 的 covers（和 AGENTS 黑盒规则配套）。
+    #[serde(default)]
+    covers: Vec<String>,
     /// 附加卷（第二盘及以后）：多卷自动发现的测试夹具，按顺序挂 hd2、hd3…。
     #[serde(default)]
     extra_volumes: Vec<ExtraVolume>,
@@ -162,6 +168,9 @@ struct Args {
     include_slow: bool,
     keep: bool,
     no_build: bool,
+    /// 只跑改动波及的 case（迭代加速；提交门禁仍是全矩阵）。
+    /// 改动 = 工作区未提交（含 untracked）∪ 分支相对 origin/master 的已提交。
+    changed: bool,
     ovmf: Option<String>,
     /// 强制本轮全用指定 CPU（模型名或 "host"）；单 case `cpu` 与全局 `cpu` 照认，
     /// 优先级：命令行 > 单 case > 全局 > 缺省（不用 -cpu，即 qemu64 基线）。
@@ -177,6 +186,7 @@ fn parse_args() -> Args {
     while let Some(x) = it.next() {
         match x.as_str() {
             "--list" => a.list = true,
+            "--changed" => a.changed = true,
             "--include-slow" => a.include_slow = true,
             "--keep" => a.keep = true,
             "--no-build" => a.no_build = true,
@@ -191,6 +201,100 @@ fn parse_args() -> Args {
         }
     }
     a
+}
+
+/// `--changed` 隐式核心：这些文件动了等于全矩阵（所有 case 都走开机→解析→屏显）。
+/// 写进代码而不是逐 case 重复 8 遍，口径见 README 与 matrix.toml 头注释。
+const CORE: &[&str] = &[
+    "src/main.rs",
+    "src/menu.rs",
+    "src/idle.rs",
+    "src/graphics.rs",
+    "src/diag/common.rs",
+    "src/config.rs",
+    "src/fs.rs",
+    "src/error.rs",
+];
+
+/// 前缀命中：改动文件等于该前缀，或落在其目录下（`"src/boot/"` 盖住
+/// `src/boot/chainload.rs`；文件前缀如 `"src/video.rs"` 走等于分支）。
+fn prefixes_hit<'a>(covers: impl IntoIterator<Item = &'a str>, changed: &[String]) -> bool {
+    for cov in covers {
+        if cov == "*" {
+            return true;
+        }
+        // 尾斜杠容忍：`"src/boot/"` 与 `"src/boot"` 同义；边界走 "/" 分隔，
+        // `"src/video"` 盖不住 `"src/video.rs"`，也误伤不了 `"src/video2/"`。
+        let c = cov.strip_suffix('/').unwrap_or(cov);
+        for f in changed {
+            if f == cov || f == c || f.starts_with(&format!("{c}/")) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn case_hit(covers: &[String], changed: &[String]) -> bool {
+    prefixes_hit(covers.iter().map(String::as_str), changed)
+        || prefixes_hit(CORE.iter().copied(), changed)
+}
+
+/// 收集改动文件（仓库根相对路径）：工作区未提交（含 untracked `??` 与改名后者）
+/// ∪ 分支相对 origin/master 的已提交。git 不可用返回 `None`（调用方全跑）。
+/// `third_party/` 工作区恒脏（patches 叠加态）只在 status 侧忽略；
+/// 分支 diff 侧保留（pin 变更能被看见，见下 force_full_reason）。
+fn changed_files() -> Option<Vec<String>> {
+    fn push(out: &mut Vec<String>, raw: &str, filter_third_party: bool) {
+        let mut p = raw.trim();
+        if let Some(i) = p.find(" -> ") {
+            p = &p[i + 4..];
+        }
+        let p = p.strip_prefix('"').and_then(|s| s.strip_suffix('"')).unwrap_or(p);
+        if p.is_empty() {
+            return;
+        }
+        if filter_third_party && p.starts_with("third_party/") {
+            return;
+        }
+        if !out.iter().any(|e| e == p) {
+            out.push(p.to_string());
+        }
+    }
+    let status = run("git", &["-C", ROOT, "status", "--porcelain"]).ok()?;
+    let mut out = Vec::new();
+    for line in status.lines() {
+        if line.len() < 4 {
+            continue;
+        }
+        push(&mut out, &line[3..], true);
+    }
+    if let Ok(base) = run("git", &["-C", ROOT, "merge-base", "HEAD", "origin/master"]) {
+        let base = base.trim();
+        if !base.is_empty() {
+            if let Ok(diff) = run("git", &["-C", ROOT, "diff", "--name-only", base, "HEAD"]) {
+                for line in diff.lines() {
+                    push(&mut out, line, false);
+                }
+            }
+        }
+    }
+    Some(out)
+}
+
+/// 这些动了选择依据本身可能已过期，直接全跑（并打印原因）。
+fn force_full_reason(changed: &[String]) -> Option<&'static str> {
+    for f in changed {
+        if f.starts_with("tools/qemu-matrix/")
+            || f == "Cargo.toml"
+            || f.starts_with(".cargo/")
+            || f == "rust-toolchain.toml"
+            || f == "third_party/sprout"
+        {
+            return Some("runner/matrix/manifest/toolchain/sprout-pin changed");
+        }
+    }
+    None
 }
 
 /// `*` 通配（只够 `HWBENCH*.TXT` 这类前后缀用）。
@@ -784,22 +888,50 @@ fn main() {
         eprintln!("parse matrix.toml: {e}");
         std::process::exit(2);
     });
-    if args.list {
-        for c in &matrix.case {
-            let slow = if c.slow { " (slow)" } else { "" };
-            println!("  {}{}", c.name, slow);
-        }
-        return;
-    }
     let mut cases: Vec<&Case> = matrix.case.iter().collect();
     if let Some(ref name) = args.case {
+        if args.changed {
+            eprintln!("[changed] --case wins, --changed ignored");
+        }
         cases.retain(|c| &c.name == name);
         if cases.is_empty() {
             eprintln!("no such case: {name}");
             std::process::exit(2);
         }
+    } else if args.changed {
+        match changed_files() {
+            None => eprintln!("[changed] git unavailable, running full matrix"),
+            Some(changed) => {
+                if changed.is_empty() {
+                    println!("[changed] tree clean, nothing to run");
+                    return;
+                }
+                if let Some(reason) = force_full_reason(&changed) {
+                    println!("[changed] {reason}; running full matrix");
+                } else {
+                    println!("[changed] {} file(s): {}", changed.len(), changed.join(", "));
+                    let total = cases.len();
+                    cases.retain(|c| case_hit(&c.covers, &changed));
+                    println!("[changed] selected {total}->{len} cases", len = cases.len());
+                    if cases.is_empty() {
+                        println!("[changed] no case covers these files, nothing to run");
+                        return;
+                    }
+                }
+            }
+        }
+        if !args.include_slow {
+            cases.retain(|c| !c.slow);
+        }
     } else if !args.include_slow {
         cases.retain(|c| !c.slow);
+    }
+    if args.list {
+        for c in &cases {
+            let slow = if c.slow { " (slow)" } else { "" };
+            println!("  {}{} covers: [{}]", c.name, slow, c.covers.join(", "));
+        }
+        return;
     }
 
     let efi = match build_efi(!args.no_build) {
@@ -868,5 +1000,48 @@ fn main() {
     }
     if !allok {
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod selection_tests {
+    use super::{case_hit, force_full_reason, prefixes_hit};
+
+    fn chg(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn star_and_empty() {
+        assert!(prefixes_hit(["*"], &chg(&["anything.rs"])));
+        assert!(!prefixes_hit([], &chg(&["src/boot/x.rs"])));
+        assert!(!prefixes_hit(["src/boot/"], &chg(&[])));
+    }
+
+    #[test]
+    fn file_and_dir_prefixes() {
+        assert!(prefixes_hit(["src/video.rs"], &chg(&["src/video.rs"])));
+        assert!(prefixes_hit(["src/video/"], &chg(&["src/video/exec.rs"])));
+        // 文件与目录是两个条目："src/video" 盖不住 "src/video.rs"，
+        // 也不能误伤 "src/video2/"（边界走 "/" 分隔）。
+        assert!(!prefixes_hit(["src/video"], &chg(&["src/video.rs"])));
+        assert!(!prefixes_hit(["src/boot/"], &chg(&["src/boots.rs"])));
+    }
+
+    #[test]
+    fn core_implicit() {
+        // covers 为空的纯标定类 case：核心文件动了要跑，非核心不动不跑。
+        assert!(case_hit(&[], &chg(&["src/config.rs"])));
+        assert!(!case_hit(&[], &chg(&["src/video/exec.rs"])));
+        assert!(case_hit(&chg(&["src/video/"]), &chg(&["src/video/exec.rs"])));
+    }
+
+    #[test]
+    fn meta_forces_full() {
+        assert!(force_full_reason(&chg(&["tools/qemu-matrix/src/main.rs"])).is_some());
+        assert!(force_full_reason(&chg(&["Cargo.toml"])).is_some());
+        assert!(force_full_reason(&chg(&["third_party/sprout"])).is_some());
+        assert!(force_full_reason(&chg(&["src/boot/chainload.rs"])).is_none());
+        assert!(force_full_reason(&chg(&["tools/config-gui/src/app.rs"])).is_none());
     }
 }

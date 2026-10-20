@@ -1,6 +1,18 @@
 # QEMU 黑盒矩阵：case = 内联 player.toml + 串口断言 + 按键脚本。
 # 断言是字面包含匹配（非正则；runner 是纯 Rust std，无 regex 轮子）。
-# 新增配置项/路径时在这里加行（和 AGENTS「黑盒矩阵测试」规则配套）。
+# 新增配置项/路径时在这里加行（和 AGENTS「黑盒矩阵测试」规则配套），
+# 并给新 case 写 `covers`（改动→case 的选择依据，见下）。
+#
+# `--changed`（迭代加速）：只跑改动波及的 case。
+# 改动 = 工作区未提交（含 untracked）∪ 分支相对 origin/master 的已提交。
+# 选择规则：`covers` 前缀命中改动文件即跑；`covers` 写 `"*"` 的 menu-smoke
+# 是锚点（任何改动都带它，保开机底线）；`covers = []` = 纯标定类，只靠隐式核心。
+# 隐式核心（runner 里 CORE 常量，逐 case 写 8 遍太吵）：src/main.rs、menu.rs、
+# idle.rs、graphics.rs、diag/common.rs、config.rs、fs.rs、error.rs——这些动了等于全跑。
+# 以下动了直接全跑（选择依据本身可能已过期）：tools/qemu-matrix/**、
+# 根 Cargo.toml、.cargo/、rust-toolchain.toml、sprout pin（third_party/sprout
+# 工作区恒脏只看分支 diff，日常忽略）。提交门禁仍是全矩阵，`--changed` 只省迭代时间。
+# 预览选谁：`--list --changed`（不启 QEMU）。
 #
 # 固件双轨：`[global] ovmf` 缺省是 brew 瓶 DEBUG OVMF
 #（`/usr/local/share/qemu/edk2-x86_64-code.fd`，带 ASSERT，抓固件 bug 用）。
@@ -28,6 +40,7 @@ forbid = ["panicked at", "CpuDeadLoop", "No valid frames", "startup_all_aps fail
 # 冒烟：全显式最快配置，进纯播放器菜单后按 7，AVX 探针必须出数。
 [[case]]
 name = "menu-smoke"
+covers = ["*"]
 timeout_sec = 180
 config = """
 version = 1
@@ -55,6 +68,7 @@ expect = ["AVX is "]
 # 无按键：只验开机校准（待机即停，不断言菜单）。
 [[case]]
 name = "matrix-tiny"
+covers = []
 timeout_sec = 600
 config = """
 version = 1
@@ -79,6 +93,7 @@ forbid = ["panicked at", "CpuDeadLoop"]
 # 无按键：只验开机校准。
 [[case]]
 name = "matrix-dist-dynamic"
+covers = []
 timeout_sec = 180
 config = """
 version = 1
@@ -100,6 +115,7 @@ expect = ["reuse measured"]
 # half 定档：冠军计时取半，预算必须落串口。无按键：只验开机校准。
 [[case]]
 name = "matrix-vsync-half"
+covers = []
 timeout_sec = 300
 config = """
 version = 1
@@ -123,6 +139,7 @@ expect = ["half probe winner_ticks", "budget"]
 # 影子起用行必须出现（无上屏动作时环永不起，这是预期行为）。无按键。
 [[case]]
 name = "matrix-buffers"
+covers = []
 timeout_sec = 180
 config = """
 version = 1
@@ -146,6 +163,7 @@ expect = ["shadow: 2 bufs", "render auto:"]
 # 无按键：只验开机校准。
 [[case]]
 name = "matrix-blt-op"
+covers = []
 timeout_sec = 300
 config = """
 version = 1
@@ -169,6 +187,7 @@ expect = ["blt_op(VideoToBltBuffer)"]
 # 播放多核：弹窗 → p 进纯播放器 → 按 0 进 mp_draw， soak 20 秒只看红线（不断言画面）。
 [[case]]
 name = "video-mp"
+covers = ["src/video.rs", "src/video/", "usb_reports/1080p/video.qois"]
 timeout_sec = 180
 needs_video = true
 config = """
@@ -197,6 +216,7 @@ soak_sec = 20
 # 播放 Blt：弹窗 → p → 按 0 进 blt_loop，soak 15 秒。
 [[case]]
 name = "video-blt"
+covers = ["src/video.rs", "src/video/", "usb_reports/1080p/video.qois"]
 timeout_sec = 180
 needs_video = true
 config = """
@@ -226,6 +246,7 @@ soak_sec = 15
 # 统一 Clip 的 raw 分支证明：格式矩阵另一半不断播。
 [[case]]
 name = "video-raw"
+covers = ["src/video.rs", "src/video/"]
 timeout_sec = 180
 needs_rawvideo = 2
 config = """
@@ -255,6 +276,7 @@ soak_sec = 15
 # 调度后端 nano：单核执行器泵走渲染路径（direct 单核），workers/dist 忽略。
 [[case]]
 name = "video-nano"
+covers = ["src/video.rs", "src/video/", "usb_reports/1080p/video.qois"]
 timeout_sec = 180
 needs_video = true
 config = """
@@ -283,6 +305,7 @@ soak_sec = 15
 # 调度后端 dynamic：多核 steal 泵直写前台（Blt/影子/单核会回退，本矩阵直给合法组合）。
 [[case]]
 name = "video-dynamic"
+covers = ["src/video.rs", "src/video/", "usb_reports/1080p/video.qois"]
 timeout_sec = 180
 needs_video = true
 config = """
@@ -312,6 +335,7 @@ soak_sec = 20
 # 与旧 `[render]` 位置同语义（本用例直达 mp_draw；旧位置由其余 20+ case 覆盖）。
 [[case]]
 name = "video-manual-sched"
+covers = ["src/video.rs", "src/video/", "usb_reports/1080p/video.qois"]
 timeout_sec = 180
 needs_video = true
 config = """
@@ -344,6 +368,7 @@ soak_sec = 15
 # 非 clip 只读 qois（needs_video 供片）；raw 回落 clip 不在此覆盖。
 [[case]]
 name = "video-pipe-staged"
+covers = ["src/video.rs", "src/video/", "usb_reports/1080p/video.qois"]
 timeout_sec = 180
 needs_video = true
 config = """
@@ -370,6 +395,7 @@ soak_sec = 15
 
 [[case]]
 name = "video-pipe-zero-copy"
+covers = ["src/video.rs", "src/video/", "usb_reports/1080p/video.qois"]
 timeout_sec = 180
 needs_video = true
 config = """
@@ -396,6 +422,7 @@ soak_sec = 15
 
 [[case]]
 name = "video-pipe-stream"
+covers = ["src/video.rs", "src/video/", "usb_reports/1080p/video.qois"]
 timeout_sec = 180
 needs_video = true
 config = """
@@ -422,6 +449,7 @@ soak_sec = 15
 
 [[case]]
 name = "video-pipe-single"
+covers = ["src/video.rs", "src/video/", "usb_reports/1080p/video.qois"]
 timeout_sec = 180
 needs_video = true
 config = """
@@ -448,6 +476,7 @@ soak_sec = 15
 
 [[case]]
 name = "video-pipe-legacy-blt"
+covers = ["src/video.rs", "src/video/", "usb_reports/1080p/video.qois"]
 timeout_sec = 180
 needs_video = true
 config = """
@@ -474,6 +503,7 @@ soak_sec = 15
 
 [[case]]
 name = "video-pipe-legacy-direct"
+covers = ["src/video.rs", "src/video/", "usb_reports/1080p/video.qois"]
 timeout_sec = 180
 needs_video = true
 config = """
@@ -500,6 +530,7 @@ soak_sec = 15
 
 [[case]]
 name = "video-pipe-legacy-u64"
+covers = ["src/video.rs", "src/video/", "usb_reports/1080p/video.qois"]
 timeout_sec = 180
 needs_video = true
 config = """
@@ -527,6 +558,7 @@ soak_sec = 15
 # 诊断键：弹窗 → p 进纯播放器 → 1/4/7 各出数，q 回壁纸（pause_return 吞键）。
 [[case]]
 name = "diag-keys"
+covers = ["src/diag/get_cpu_info.rs", "src/diag/mp_service.rs", "src/diag/avx_checker.rs"]
 timeout_sec = 240
 config = """
 version = 1
@@ -558,6 +590,7 @@ expect = ["Total number of logic processors:", "Starting Multi-Processor", "AVX 
 # dynamic（spawn/cancel/retune）两条堆线必须 PASS。
 [[case]]
 name = "async-exec"
+covers = ["src/diag/async_exec.rs"]
 timeout_sec = 240
 config = """
 version = 1
@@ -584,6 +617,7 @@ expect = ["async-exec: nano ok", "async-exec: dynamic ok", "async-exec: PASS"]
 # 执行器线单档：nano 只跑单核线（无 dynamic 行），dynamic 只跑多核线。
 [[case]]
 name = "async-exec-nano"
+covers = ["src/diag/async_exec.rs"]
 timeout_sec = 240
 config = """
 version = 1
@@ -611,6 +645,7 @@ expect = ["async-exec: nano ok", "async-exec: PASS"]
 
 [[case]]
 name = "async-exec-dynamic"
+covers = ["src/diag/async_exec.rs"]
 timeout_sec = 240
 config = """
 version = 1
@@ -640,6 +675,7 @@ expect = ["async-exec: dynamic ok", "async-exec: PASS"]
 # Ex 协议必须回显键码 + 修饰/锁定状态，最后 PASS。
 [[case]]
 name = "input2-probe"
+covers = ["src/diag/input2_probe.rs"]
 timeout_sec = 240
 config = """
 version = 1
@@ -668,6 +704,7 @@ expect = ["input2: key=", "input2: PASS"]
 # 按键 `c`（菜单诊断项；弹窗侧 p/f/s/r/q 已占，c 只在纯播放器菜单里有效）。
 [[case]]
 name = "avc-probe"
+covers = ["src/diag/avc_probe.rs", "src/diag/data/avc_probe_baseline.264"]
 timeout_sec = 240
 config = """
 version = 1
@@ -694,6 +731,7 @@ expect = ["avc: decoded 4 frames", "avc: PASS"]
 # 弹窗导航：开弹窗 → q 回壁纸 → 再开（open 第二遍 = 待机循环没卡死）。
 [[case]]
 name = "boot-menu"
+covers = ["src/boot/"]
 ovmf = "release"
 timeout_sec = 180
 config = """
@@ -721,6 +759,7 @@ expect = ["popup: back to idle", { pat = "popup: open (frozen)", count = 2 }]
 # 壁纸开：2 帧黑场，无缺片警告；弹窗 → p → 7 照常响应。
 [[case]]
 name = "wallpaper-on"
+covers = ["src/wallpaper.rs"]
 timeout_sec = 180
 needs_wallpaper = 2
 config = """
@@ -750,6 +789,7 @@ forbid = ["panicked at", "CpuDeadLoop", "menu bg skipped"]
 # 壁纸 live：popup_freeze=false 时行区继续播（`popup: open (live)`），q 回壁纸。
 [[case]]
 name = "wallpaper-live"
+covers = ["src/wallpaper.rs"]
 timeout_sec = 180
 needs_wallpaper = 2
 config = """
@@ -780,6 +820,7 @@ forbid = ["panicked at", "CpuDeadLoop", "menu bg skipped"]
 # 统一 Clip 的 qois 分支在壁纸侧的证明（与 raw 的 wallpaper-on 对称）。
 [[case]]
 name = "wallpaper-qois"
+covers = ["src/wallpaper.rs", "src/video/", "usb_reports/1080p/video.qois"]
 timeout_sec = 180
 needs_wallpaper_qois = true
 config = """
@@ -811,6 +852,7 @@ forbid = ["panicked at", "CpuDeadLoop", "menu bg skipped"]
 # 串口 preloaded 计数即断言。无按键：只验开机预载（待机即停）。
 [[case]]
 name = "wallpaper-preload-full"
+covers = ["src/wallpaper.rs"]
 timeout_sec = 120
 needs_wallpaper = 3
 config = """
@@ -835,6 +877,7 @@ expect = ["wallpaper: preloaded 3 frames"]
 # 壁纸帧率 max：三态滑杆最右（不限速通路不断播；无按键，只验待机保活）。
 [[case]]
 name = "wallpaper-fps-max"
+covers = ["src/wallpaper.rs"]
 timeout_sec = 120
 needs_wallpaper = 2
 config = """
@@ -860,6 +903,7 @@ soak_sec = 10
 # 换个路径（单盘场景）；成功 = 同一串口出现第二遍 cfg + 待机就绪（计数断言）。
 [[case]]
 name = "boot-chainload"
+covers = ["src/boot/", "patches/", "third_party/sprout"]
 ovmf = "release"
 timeout_sec = 300
 needs_chainload = true
@@ -888,6 +932,7 @@ expect = ["boot: starting image", { pat = "cfg: version=1", count = 2 }, { pat =
 # 目录顺序是反的（aaa 在前），排完 [0] 必须是 New。
 [[case]]
 name = "boot-sort"
+covers = ["src/boot/", "patches/", "third_party/sprout"]
 ovmf = "release"
 timeout_sec = 180
 config = """
@@ -922,6 +967,7 @@ expect = ["boot: 2 entries", "boot: [0] New", "boot: [1] Old"]
 # UKI 回退标题：test.efi 无 .uname 区，标题取文件名，照样 chainload（count x2）。
 [[case]]
 name = "boot-uki"
+covers = ["src/boot/", "patches/", "third_party/sprout"]
 ovmf = "release"
 timeout_sec = 300
 config = """
@@ -954,6 +1000,7 @@ expect = ["boot: [0] test", "boot: starting image", { pat = "cfg: version=1", co
 # 上游 version-sort：新版本在前（third-kernel > second-kernel），故 [0] 是 Second。
 [[case]]
 name = "boot-uki-profiles"
+covers = ["src/boot/", "patches/", "third_party/sprout"]
 ovmf = "release"
 timeout_sec = 180
 config = """
@@ -982,6 +1029,7 @@ expect = ["boot: 2 entries", "boot: [0] testos (Second)", "boot: [1] testos (Fir
 # 慢：HW bench 落盘工件（默认跳过，--include-slow 才跑）。
 [[case]]
 name = "hwbench-artifact"
+covers = ["src/diag/hw_bench.rs", "src/diag/gop_bench.rs", "src/diag/gop_simd.rs"]
 slow = true
 timeout_sec = 1500
 config = """
@@ -1013,6 +1061,7 @@ artifact = { glob = "HWBENCH*.TXT", contains = ["ticks"] }
 # 按 0 直接交权，第二遍 cfg + 待机证明跨盘 DevicePath + 跨盘读都通了。
 [[case]]
 name = "boot-windows-crossvol"
+covers = ["src/boot/", "patches/", "third_party/sprout"]
 ovmf = "release"
 timeout_sec = 300
 config = """
@@ -1044,6 +1093,7 @@ expect = ["boot: starting image", { pat = "cfg: version=1", count = 2 }, { pat =
 # 第二卷 BLS：other.conf 指第二卷自己的 app.efi，跨盘 chainload。
 [[case]]
 name = "boot-bls-secondvol"
+covers = ["src/boot/", "patches/", "third_party/sprout"]
 ovmf = "release"
 timeout_sec = 300
 config = """
@@ -1079,6 +1129,7 @@ expect = ["boot: starting image", { pat = "cfg: version=1", count = 2 }, { pat =
 #（假内核不是有效 PE，起了也是 INVALID_IMAGE，不浪费时间）。
 [[case]]
 name = "boot-linux-detect"
+covers = ["src/boot/", "patches/", "third_party/sprout"]
 ovmf = "release"
 timeout_sec = 180
 config = """
@@ -1110,6 +1161,7 @@ expect = ["boot: 1 entries", "vmlinuz-test", "<linux>"]
 # UEFI Shell 发现 + chainload（shellx64.efi 就是我们的 efi，起了算数）。
 [[case]]
 name = "boot-shell"
+covers = ["src/boot/", "patches/", "third_party/sprout"]
 ovmf = "release"
 timeout_sec = 300
 config = """
@@ -1143,6 +1195,7 @@ expect = ["boot: starting image", { pat = "cfg: version=1", count = 2 }, { pat =
 # 不扫通用 BOOTX64.EFI（那可能是我们自己，会自举死循环），只认固定路径。
 [[case]]
 name = "boot-macos"
+covers = ["src/boot/", "patches/", "third_party/sprout"]
 ovmf = "release"
 timeout_sec = 300
 config = """
@@ -1177,6 +1230,7 @@ expect = ["boot: [0] OpenCore <efi>", "boot: starting image", { pat = "cfg: vers
 # 旧读旧写新删旧实现已删。工件在第二盘（artifact.volume = 2）。
 [[case]]
 name = "boot-counting"
+covers = ["src/boot/", "patches/", "third_party/sprout"]
 ovmf = "release"
 timeout_sec = 300
 config = """
@@ -1213,6 +1267,7 @@ artifact = { glob = "test+1-1.conf", contains = ["Chainload Counting"], volume =
 # 不加 strict 的话同一镜像会列出 2 项（other.conf 排第一），见 boot-bls-secondvol。
 [[case]]
 name = "boot-strict"
+covers = ["src/boot/", "patches/", "third_party/sprout"]
 ovmf = "release"
 timeout_sec = 180
 config = """

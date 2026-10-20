@@ -25,6 +25,12 @@ cargo run --manifest-path tools/qemu-matrix/Cargo.toml --target "$(rustc -vV | s
 cargo run --manifest-path tools/qemu-matrix/Cargo.toml --target "$(rustc -vV | sed -n 's/^host: //p')" -- --include-slow
 cargo run --manifest-path tools/qemu-matrix/Cargo.toml --target "$(rustc -vV | sed -n 's/^host: //p')" -- --case video-mp --keep
 
+# 只跑改动波及的 case（迭代加速）：按各 case `covers` 前缀 + 隐式核心
+#（main/menu/idle/graphics/common/config/fs/error，见 matrix.toml 头注释）匹配
+# 工作区未提交 ∪ 分支相对 origin/master 的改动；menu-smoke 是必带锚点；
+# runner/matrix/manifest/toolchain/pin 动了则自动全跑。`--list --changed`
+# 只预览选中谁（不启 QEMU）。提交门禁仍是上面的全量，两套矩阵都要绿。
+
 # 固件双轨：默认 brew 瓶 DEBUG OVMF（带 ASSERT，门禁口径）；
 # --ovmf-set release 全切 RELEASE（`assets/ovmf-release-x86_64-code.fd`），
 # --ovmf-set both 双轨全跑（`-release` 后缀，比视频性能用它）。
