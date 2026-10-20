@@ -8,7 +8,7 @@ description = "player.toml 跨平台可视化编辑器（host 工具，与 UEFI 
 # - eframe 0.35 + egui 0.35 + wgpu 29：egui_glass 官方测过的组合，eframe 的 `wgpu`
 #   特性即 wgpu 驱动（glow 不被 egui_glass 支持，故强制 Renderer::Wgpu）。
 # - egui_glass 0.1.5：液态玻璃面板/按钮（crates.io 现货，不自研模糊管线）。
-# - rfd 0.15：原生打开/保存对话框（不手写平台 dialog）。
+# - rfd 0.17：原生打开/保存对话框（不手写平台 dialog）。
 # - toml 1 + serde：与固件侧 config.rs 同 schema 解析/回写。
 # - egui-wgpu 0.35：只为存 RenderState（深浅色切换时重传 backdrop），版本与 eframe 拉齐。
 # - rust-i18n 4：400 万下载的现货（YAML 编译期进二进制，t! + set_locale）。
@@ -24,6 +24,6 @@ egui = "0.35"
 egui-wgpu = "0.35"
 egui_glass = "0.1.5"
 rust-i18n = "4"
-rfd = "0.15"
+rfd = "0.17"
 serde = { version = "1", features = ["derive"] }
 toml = "1"

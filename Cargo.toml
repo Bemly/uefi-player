@@ -6,10 +6,10 @@ edition = "2024"
 [dependencies]
 # 视频解码类
 less-avc = { version = "0.1.5", default-features = false }
-shiguredo_mp4 = { version = "2025.4.0", default-features = false }
+shiguredo_mp4 = { version = "2026.5.0", default-features = false }
 # 图像处理类
 qoicoubeh = { version = "0.5.0", default-features = false, features = ["alloc"] }
-u8g2-fonts = { version = "0.7.2", features = ["embedded_graphics_textstyle"] }
+u8g2-fonts = { version = "0.8.0", features = ["embedded_graphics_textstyle"] }
 embedded-graphics = "0.8.1"
 # 基础框架类（版本与 Sprout 对齐：uefi 0.41.0 / uefi-raw 0.17.0）
 uefi = { version = "0.41.0", features = ["logger", "alloc", "global_allocator", "panic_handler"] }

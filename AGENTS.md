@@ -81,7 +81,7 @@ cargo run --manifest-path tools/config-gui/Cargo.toml --target "$(rustc -vV | se
 
 | 侧 | 组合 |
 |---|---|
-| host GUI | `eframe 0.35`（`wgpu` 特性做驱动）+ `egui 0.35` + `egui-wgpu 0.35` + `egui_glass 0.1.5` + `wgpu 29` + `rfd 0.15` + `toml 1` + `rust-i18n 4` |
+| host GUI | `eframe 0.35`（`wgpu` 特性做驱动）+ `egui 0.35` + `egui-wgpu 0.35` + `egui_glass 0.1.5` + `wgpu 29` + `rfd 0.17` + `toml 1` + `rust-i18n 4` |
 | 固件 | `uefi 0.41 / uefi-raw 0.17` + `toml 1.x no_std` + `serde alloc` |
 
 `egui_glass` 硬性要求：`eframe::Renderer::Wgpu`，glow 不可用；
