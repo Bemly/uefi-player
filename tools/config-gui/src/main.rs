@@ -581,6 +581,7 @@ impl Default for FileConfig {
 enum Page {
     File,
     Accel,
+    Player,
     Wallpaper,
     Boot,
     Summary,
@@ -1486,6 +1487,20 @@ impl App {
                     }
                 });
                 ui.add_space(10.0);
+                ui.label(t!("async.executor"));
+                ui.horizontal(|ui| {
+                    for v in AsyncExecutor::ALL {
+                        if self.option_button(ui, self.cfg.r#async.executor == v, v.file_str()) {
+                            self.cfg.r#async.executor = v;
+                        }
+                    }
+                });
+                ui.small(async_desc(self.cfg.r#async.executor));
+            }
+            Page::Player => {
+                ui.heading(t!("play.heading"));
+                ui.small(t!("play.page_hint"));
+                ui.add_space(4.0);
                 ui.label(t!("play.fps"));
                 // 三段滑杆：0 = auto，1-240 = 限速，241 = max。
                 // 文本先算好：滑杆拿 &mut play_f 时不能再借 self。
@@ -1539,15 +1554,6 @@ impl App {
                 });
                 ui.small(t!("play.pipeline_hint"));
                 ui.add_space(10.0);
-                ui.label(t!("async.executor"));
-                ui.horizontal(|ui| {
-                    for v in AsyncExecutor::ALL {
-                        if self.option_button(ui, self.cfg.r#async.executor == v, v.file_str()) {
-                            self.cfg.r#async.executor = v;
-                        }
-                    }
-                });
-                ui.small(async_desc(self.cfg.r#async.executor));
                 ui.horizontal(|ui| {
                     ui.label(self.measured_line());
                     if egui_glass::GlassButton::new(t!("play.rebench"))
@@ -1752,6 +1758,7 @@ impl eframe::App for App {
                 ui.horizontal(|ui| {
                     ui.selectable_value(&mut self.page, Page::File, t!("nav.file"));
                     ui.selectable_value(&mut self.page, Page::Accel, t!("nav.accel"));
+                    ui.selectable_value(&mut self.page, Page::Player, t!("nav.player"));
                     ui.selectable_value(&mut self.page, Page::Wallpaper, t!("nav.wallpaper"));
                     ui.selectable_value(&mut self.page, Page::Boot, t!("nav.boot"));
                     ui.selectable_value(&mut self.page, Page::Summary, t!("nav.summary"));
@@ -1827,6 +1834,7 @@ impl eframe::App for App {
                     ui.heading(t!("nav.sections"));
                     self.nav_button(ui, Page::File, t!("nav.file").into_owned());
                     self.nav_button(ui, Page::Accel, t!("nav.accel").into_owned());
+                    self.nav_button(ui, Page::Player, t!("nav.player").into_owned());
                     self.nav_button(ui, Page::Wallpaper, t!("nav.wallpaper").into_owned());
                     self.nav_button(ui, Page::Boot, t!("nav.boot").into_owned());
                     self.nav_button(ui, Page::Summary, t!("nav.summary").into_owned());
