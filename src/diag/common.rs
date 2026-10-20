@@ -51,28 +51,49 @@ fn key_to_char(key: Key) -> Option<(char, u16)> {
 
 /// 排空输入队列里的陈旧按键，避免菜单刚画出来就被之前的按键误触发。
 ///
-/// 用系统表 ConIn（`with_stdin`）而非 `get_handle_for_protocol` 的“第一个
-/// Input 句柄”：多键盘机器上后者可能拿到非控制台句柄，读不到真实按键
-/// （此前菜单在部分真机上全线 Unknown key 的嫌疑之一）。
+/// 传输走 `uefi-input2`（Ex 协议 `reset` 清键码缓存），Ex 缺席回落 legacy ConIn。
+/// 双协议各自排队，两边都排空——只清一边会在另一边留下幽灵键。
+/// 多键盘机器上仍只取首个句柄（与旧 `with_stdin` 语义一致，见下）。
 pub fn flush_keys() {
+    let _ = uefi_input2::with_stdin(|input| input.reset(false));
     uefi::system::with_stdin(|input| while matches!(input.read_key(), Ok(Some(_))) {});
 }
 
-/// 阻塞等待一个可打印按键，返回 (归一化小写字符, 原始 u16)。
-pub fn wait_key_ex() -> (char, u16) {
-    uefi::system::with_stdin(|input| {
-        // 先排空陈旧按键，再阻塞轮询。
-        while matches!(input.read_key(), Ok(Some(_))) {}
-        loop {
-            if let Ok(Some(key)) = input.read_key() {
-                if let Some((c, raw)) = key_to_char(key) {
-                    return (c.to_ascii_lowercase(), raw);
-                }
-                // 功能键（方向键/Fx/ESC 等）：继续等可打印字符。
-            }
-            boot::stall(Duration::from_millis(50));
-        }
+/// 归一化：小写 + 保留原始码（固件往 unicode 里塞扫描码时靠后者容错，见 `key_match`）。
+fn normalize(k: (char, u16)) -> (char, u16) {
+    (k.0.to_ascii_lowercase(), k.1)
+}
+
+/// Ex 单次非阻塞读（`None` = 无键或 Ex 缺席；调用方回落 legacy）。
+fn poll_ex() -> Option<(char, u16)> {
+    uefi_input2::with_stdin(|input| {
+        Ok(input
+            .read_key_stroke_ex()
+            .and_then(|kd| key_to_char(kd.key)))
     })
+    .ok()
+    .flatten()
+    .map(normalize)
+}
+
+/// legacy ConIn 单次非阻塞读（Ex 缺席时的回落；与旧实现一字不动）。
+fn poll_legacy() -> Option<(char, u16)> {
+    uefi::system::with_stdin(|input| match input.read_key() {
+        Ok(Some(key)) => key_to_char(key).map(normalize),
+        _ => None,
+    })
+}
+
+/// 阻塞等待一个可打印按键，返回 (归一化小写字符, 原始 u16)。
+/// Ex 优先、legacy 兜底（见 `poll_key`）；初始排空 + 50ms 轮询与旧语义一致。
+pub fn wait_key_ex() -> (char, u16) {
+    flush_keys();
+    loop {
+        if let Some(k) = poll_key() {
+            return k;
+        }
+        boot::stall(Duration::from_millis(50));
+    }
 }
 
 /// 只要字符的调用方用这个（丢弃原始码）。
@@ -81,12 +102,11 @@ pub fn wait_key() -> char {
 }
 
 /// 非阻塞探一个可打印按键（菜单壁纸 idle 循环用）：有键返回，无键立即 `None`。
-/// 归一化规则与 `wait_key_ex` 一致（小写 + 原始码），不排空队列、不 stall。
+/// Ex 优先（`ReadKeyStrokeEx` 本就是非阻塞）、legacy 兜底；归一化规则与旧实现一致
+/// （小写 + 原始码），不排空队列、不 stall。修饰键独敲（如纯 Shift）在 Ex 下
+/// 落成不可恢复键码，直接过滤（与旧 Special 路一致）。
 pub fn poll_key() -> Option<(char, u16)> {
-    uefi::system::with_stdin(|input| match input.read_key() {
-        Ok(Some(key)) => key_to_char(key).map(|(c, raw)| (c.to_ascii_lowercase(), raw)),
-        _ => None,
-    })
+    poll_ex().or_else(poll_legacy)
 }
 
 /// 子项跑完后的统一收尾：提示 + 等任意键回菜单。
