@@ -178,7 +178,7 @@ mod blackbox_matrix {
             },
             wallpaper: WallpaperConfig {
                 enable: true,
-                fps: 20,
+                fps: String::from("20"),
                 frames: 30,
                 preload: 4,
                 format: MediaFormat::Qois,
@@ -280,6 +280,24 @@ mod blackbox_matrix {
         }
         let legacy: FileConfig = toml::from_str("version = 1\n").unwrap();
         assert_eq!(legacy.wallpaper.preload, 8);
+    }
+
+    /// 壁纸帧率三态字符串照读照写（与播放 `fps_string_matrix` 同构；
+    /// 整数老文件（`fps = 15`）照读为 `"15"`，不断旧配置）。
+    #[test]
+    fn wallpaper_fps_string_matrix() {
+        for s in ["auto", "max", "15", "60", "240", "999", "abc", ""] {
+            let text = format!("[wallpaper]\nfps = \"{s}\"\n");
+            let cfg: FileConfig = toml::from_str(&text).unwrap();
+            assert_eq!(cfg.wallpaper.fps, s);
+            let back: FileConfig = toml::from_str(&toml::to_string(&cfg).unwrap()).unwrap();
+            assert_eq!(back.wallpaper.fps, s);
+        }
+        // 整数即字符串（固件 `de_wallpaper_fps` 同款，host/guest 隔离故各测一遍）。
+        let cfg: FileConfig = toml::from_str("[wallpaper]\nfps = 15\n").unwrap();
+        assert_eq!(cfg.wallpaper.fps, "15");
+        let back: FileConfig = toml::from_str(&toml::to_string(&cfg).unwrap()).unwrap();
+        assert_eq!(back.wallpaper.fps, "15");
     }
 
     /// 播放管线八档位回写（clip/staged/zero_copy/stream/single/legacy 三档，

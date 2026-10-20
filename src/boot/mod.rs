@@ -196,7 +196,10 @@ fn play_transition(screen: &mut Screen, wp: &Option<Clip>, tps: u64) {
     } else {
         cap.min(set.len())
     };
-    let budget = tps.max(1) / crate::config::wallpaper_fps().max(1) as u64;
+    // 三态帧率：None = 不限速（budget 0 即帧间不自旋）。
+    let budget = crate::config::effective_wallpaper_fps()
+        .map(|f| tps.max(1) / f.max(1) as u64)
+        .unwrap_or(0);
     screen.draw_str(&format!("wallpaper: transition {} frames...", n));
     for i in 0..n {
         let fstart = tsc();

@@ -64,7 +64,7 @@ third_party/sprout 只读 submodule，只依赖 5 个 lib
      旧文件兼容、读盘/落盘钳制、`bench_pending`/`tune_visible` 表格断言。
      纯规则已抽成无 display 依赖的自由函数（`coerce_loaded/clamp_tune/
      bench_pending/tune_visible`），UI 只是薄调用——新规则先加表再接 UI。
-   - QEMU 侧 `tools/qemu-matrix/`（纯 Rust runner + `matrix.toml`，41 case（video-dynamic 宿主吃紧时例外，见 §4））：
+   - QEMU 侧 `tools/qemu-matrix/`（纯 Rust runner + `matrix.toml`，42 case（video-dynamic 宿主吃紧时例外，见 §4））：
      每个 case 独立 FAT 镜像 + 独立 QEMU（pflash 挂 OVMF code，`-bios` 拒载
      3.5MB 非对齐文件），串口断言 + `sendkey` 按键（`wait_for` 事件驱动，
      `push_gen` 同款思想），`needs_video/wallpaper/extra_volumes/artifact/soak`齐全。

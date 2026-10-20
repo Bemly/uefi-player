@@ -58,7 +58,10 @@ fn idle_wait(screen: &mut Screen, clip: &Option<Clip>, tps: u64) {
             false
         }
     };
-    let budget = tps.max(1) / crate::config::wallpaper_fps().max(1) as u64;
+    // 三态帧率：None = 不限速（budget 0 即每轮都画，`>=` 恒成立）。
+    let budget = crate::config::effective_wallpaper_fps()
+        .map(|f| tps.max(1) / f.max(1) as u64)
+        .unwrap_or(0);
     let mut idx = 0usize;
     let mut last = tsc();
     flush_keys();
@@ -96,7 +99,10 @@ fn popup(mut screen: Screen, clip: &Option<Clip>, tps: u64) -> Result<Screen> {
     let anim_top = WP_TOP.max(text_end);
     log::warn!("popup: open ({})", if frozen { "frozen" } else { "live" });
 
-    let budget = tps.max(1) / crate::config::wallpaper_fps().max(1) as u64;
+    // 三态帧率：None = 不限速（budget 0 即每轮都画，`>=` 恒成立）。
+    let budget = crate::config::effective_wallpaper_fps()
+        .map(|f| tps.max(1) / f.max(1) as u64)
+        .unwrap_or(0);
     let mut idx = 0usize;
     let mut last = tsc();
     // 注意：这里不 flush——开弹窗的键已被待机 poll 消耗，列表枚举期间到达的

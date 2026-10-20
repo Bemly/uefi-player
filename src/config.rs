@@ -34,7 +34,9 @@
 //! [wallpaper]
 //! enable = false          # 菜单背景 + 引导过渡总开关（默认关）
 //! format = "raw"          # 片源格式："raw"（wallpaper/frameNNNN.raw）| "qois"（wallpaper/wall.qois）
-//! fps = 15                # 背景循环帧率（低帧即可）
+//! fps = "15"               # 背景帧率三态（与 [play] fps 同构）："auto"（最左，
+//!                         # 跟 vsync；vsync 关则不限速）| "max"（最右，不限速）
+//!                         # | "1".."240"（中间显式封顶）；默认 "15"，老文件整数照读
 //! frames = 0              # B 过渡封顶帧数（0 = 全播预载集）
 //! preload = 8             # 预载帧数上限（1-32；0 = 不封顶，和播片一样拉满；
 //!                         # 1080p BGRA 单帧约 8MB，长动画注意内存）
@@ -58,7 +60,7 @@
 //! ```
 
 use alloc::format;
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use core::sync::atomic::{AtomicU8, AtomicU32, Ordering};
 
 use serde::{Deserialize, Serialize};
@@ -519,12 +521,38 @@ impl Default for BootConfig {
     }
 }
 
-const fn default_wallpaper_fps() -> u32 {
-    15
+fn default_wallpaper_fps() -> String {
+    String::from("15")
 }
 
 const fn default_wallpaper_preload() -> u32 {
     8
+}
+
+/// `[wallpaper] fps` 反序列化：字符串三态（`"auto"`/`"max"`/`"15"`）+
+/// 兼容老文件整数（`fps = 15` 照读为 `"15"`，不断旧配置）。
+/// `toml` 标量经 `deserialize_any` 进 `visit_i64/u64/str`，no_std 可用。
+fn de_wallpaper_fps<'de, D>(d: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct V;
+    impl<'de> serde::de::Visitor<'de> for V {
+        type Value = String;
+        fn expecting(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
+            f.write_str("wallpaper fps as string or integer")
+        }
+        fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<String, E> {
+            Ok(v.to_string())
+        }
+        fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<String, E> {
+            Ok(v.to_string())
+        }
+        fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<String, E> {
+            Ok(String::from(v))
+        }
+    }
+    d.deserialize_any(V)
 }
 
 /// `[wallpaper]`：动态壁纸开关（P4）。片源双格式（`format` 矩阵，见 `MediaFormat`）：
@@ -532,12 +560,17 @@ const fn default_wallpaper_preload() -> u32 {
 /// - `qois`：`wallpaper/wall.qois`（与视频同格式），开机预解码。
 /// `popup_freeze`：选项弹窗弹出时冻结壁纸（默认 true；false 则行区继续播，
 /// 选项画在文字区，见 `idle.rs`）。缺键老配置按默认（关/raw/冻结）处理。
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WallpaperConfig {
     pub enable: bool,
-    #[serde(default = "default_wallpaper_fps")]
-    pub fps: u32,
+    /// 背景循环帧率三态（与 `[play] fps` 同构：`"auto"` 最左 / `"max"` 最右 /
+    /// 中间 `1`-`240` 显式封顶；默认 `"15"`，老文件整数照读）。
+    #[serde(
+        default = "default_wallpaper_fps",
+        deserialize_with = "de_wallpaper_fps"
+    )]
+    pub fps: String,
     /// B 过渡封顶帧数（0 = 全播预载集）。
     #[serde(default)]
     pub frames: u32,
@@ -768,7 +801,9 @@ static MEASURED_CORES: AtomicU32 = AtomicU32::new(0);
 /// 盘上 `measured_vsync_fps`（0 = 未测）。
 static MEASURED_VSYNC_FPS: AtomicU32 = AtomicU32::new(0);
 static WALLPAPER_ENABLE: AtomicU8 = AtomicU8::new(0);
-static WALLPAPER_FPS: AtomicU32 = AtomicU32::new(default_wallpaper_fps());
+/// 0 = auto，1 = capped，2 = max（`wallpaper.fps` 的解析结果，与 `PLAY_MODE` 同构）。
+static WALLPAPER_MODE: AtomicU8 = AtomicU8::new(1);
+static WALLPAPER_CAP: AtomicU32 = AtomicU32::new(15);
 static WALLPAPER_FRAMES: AtomicU32 = AtomicU32::new(0);
 static WALLPAPER_PRELOAD: AtomicU32 = AtomicU32::new(default_wallpaper_preload());
 static WALLPAPER_POPUP_FREEZE: AtomicU8 = AtomicU8::new(1);
@@ -853,7 +888,14 @@ pub fn load() -> Option<String> {
     PLAY_PIPELINE.store(cfg.play.pipeline.as_u8(), Ordering::Relaxed);
     WALLPAPER_FORMAT.store(cfg.wallpaper.format.as_u8(), Ordering::Relaxed);
     WALLPAPER_ENABLE.store(cfg.wallpaper.enable as u8, Ordering::Relaxed);
-    WALLPAPER_FPS.store(cfg.wallpaper.fps.clamp(1, 60).max(1), Ordering::Relaxed);
+    match parse_fps(&cfg.wallpaper.fps) {
+        FpsPolicy::Auto => WALLPAPER_MODE.store(0, Ordering::Relaxed),
+        FpsPolicy::Capped(n) => {
+            WALLPAPER_MODE.store(1, Ordering::Relaxed);
+            WALLPAPER_CAP.store(n, Ordering::Relaxed);
+        }
+        FpsPolicy::Max => WALLPAPER_MODE.store(2, Ordering::Relaxed),
+    }
     WALLPAPER_FRAMES.store(cfg.wallpaper.frames, Ordering::Relaxed);
     WALLPAPER_PRELOAD.store(cfg.wallpaper.preload.min(32), Ordering::Relaxed);
     WALLPAPER_POPUP_FREEZE.store(cfg.wallpaper.popup_freeze as u8, Ordering::Relaxed);
@@ -1151,9 +1193,30 @@ pub fn wallpaper_format() -> MediaFormat {
 pub fn wallpaper_popup_freeze() -> bool {
     WALLPAPER_POPUP_FREEZE.load(Ordering::Relaxed) != 0
 }
-/// 壁纸循环帧率（1-60，已钳制）。
-pub fn wallpaper_fps() -> u32 {
-    WALLPAPER_FPS.load(Ordering::Relaxed).max(1)
+/// 开机解析出的壁纸帧率开关（与 `play_policy` 同构）。
+pub fn wallpaper_fps_policy() -> FpsPolicy {
+    match WALLPAPER_MODE.load(Ordering::Relaxed) {
+        1 => FpsPolicy::Capped(WALLPAPER_CAP.load(Ordering::Relaxed).max(1)),
+        2 => FpsPolicy::Max,
+        _ => FpsPolicy::Auto,
+    }
+}
+
+/// 实际生效的壁纸帧预算（`None` = 不限速）：`capped` 直接用（1-240 钳制）；
+/// `max` 不限；`auto` 跟 vsync（开则按 `effective_vsync_fps()`，关则不限）。
+/// 调用方（待机/弹窗/菜单背景/引导过渡）只认这个数，预算 0 即不限速。
+pub fn effective_wallpaper_fps() -> Option<u32> {
+    match wallpaper_fps_policy() {
+        FpsPolicy::Max => None,
+        FpsPolicy::Capped(n) => Some(n.clamp(1, 240).max(1)),
+        FpsPolicy::Auto => {
+            if vsync_enabled() {
+                Some(effective_vsync_fps())
+            } else {
+                None
+            }
+        }
+    }
 }
 /// B 过渡封顶帧数（0 = 全播预载集）。
 pub fn wallpaper_frames() -> u32 {

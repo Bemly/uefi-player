@@ -120,6 +120,8 @@ wallpaper.format_hint: "raw reads wallpaper/frameNNNN.raw; qois reads wallpaper/
 wallpaper.popup_freeze: "Freeze on popup"
 wallpaper.popup_freeze_hint: "On = still menu behind the option window; off = rows keep playing."
 wallpaper.fps: "Background fps"
+wallpaper.text_auto: "Auto (follow vsync)"
+wallpaper.fps_hint: "Leftmost auto follows vsync (uncapped when vsync is off); rightmost max uncapped; middle caps 1-240."
 wallpaper.frames: "Transition cap (0 = all preloaded)"
 wallpaper.frames_all: "all preloaded"
 wallpaper.frames_hint: "B transition plays at most this many frames."

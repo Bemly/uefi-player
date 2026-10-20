@@ -120,6 +120,8 @@ wallpaper.format_hint: "raw 读 wallpaper/frameNNNN.raw；qois 读 wallpaper/wal
 wallpaper.popup_freeze: "弹窗时冻结"
 wallpaper.popup_freeze_hint: "开 = 选项窗背后静止；关 = 行区继续播。"
 wallpaper.fps: "背景帧率"
+wallpaper.text_auto: "自动（跟 vsync）"
+wallpaper.fps_hint: "最左自动跟 vsync（vsync 关则不限速）；最右不限速；中间限速 1–240。"
 wallpaper.frames: "过渡封顶（0 = 全播预载）"
 wallpaper.frames_all: "全播预载"
 wallpaper.frames_hint: "B 过渡最多播这么多帧。"

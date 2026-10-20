@@ -54,7 +54,8 @@ dist = "auto"           # manual 后端分工：auto | static | tile | dynamic�
 enable = false          # 菜单背景 + 引导过渡总开关
 format = "raw"          # 片源格式：raw（wallpaper/frameNNNN.raw，默认）| qois（wallpaper/wall.qois，开机预解码）
 popup_freeze = true     # 选项弹窗时冻结壁纸（false 则行区继续播；GUI 有开关）
-fps = 15                # 背景循环帧率（1-60，已钳制）
+fps = "15"               # 背景帧率三态（与 [play] fps 同构）：auto（最左，跟 vsync；
+                          # vsync 关则不限速）| max（最右，不限速）| 1-240（中间显式封顶）
 frames = 0              # B 过渡封顶帧数（0 = 全播预载集）
 preload = 8             # 预载帧数上限（1-32；0 = 不封顶，和播片一样拉满；
                           # 1080p BGRA 单帧约 8MB，长动画注意内存）

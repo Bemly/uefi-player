@@ -177,8 +177,8 @@ pub(crate) fn default_fps() -> String {
     String::from("auto")
 }
 
-pub(crate) fn default_wallpaper_fps() -> u32 {
-    15
+pub(crate) fn default_wallpaper_fps() -> String {
+    String::from("15")
 }
 
 pub(crate) fn default_wallpaper_preload() -> u32 {
@@ -453,15 +453,41 @@ pub(crate) struct AsyncConfig {
     pub(crate) executor: AsyncExecutor,
 }
 
+/// `[wallpaper] fps` 反序列化：字符串三态 + 兼容老文件整数（固件侧同款，
+/// host/guest 隔离故各一份，见固件 `config.rs::de_wallpaper_fps`）。
+fn de_wallpaper_fps<'de, D>(d: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct V;
+    impl<'de> serde::de::Visitor<'de> for V {
+        type Value = String;
+        fn expecting(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
+            f.write_str("wallpaper fps as string or integer")
+        }
+        fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<String, E> {
+            Ok(v.to_string())
+        }
+        fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<String, E> {
+            Ok(v.to_string())
+        }
+        fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<String, E> {
+            Ok(v.to_owned())
+        }
+    }
+    d.deserialize_any(V)
+}
+
 /// `[wallpaper]`：与固件 `WallpaperConfig` 同构。无校准记忆，纯开关。
 /// `format` 切片源：raw 读 `wallpaper/frameNNNN.raw`，qois 读 `wallpaper/wall.qois`。
 /// `popup_freeze`：选项弹窗时冻结壁纸（false 则行区继续播）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// `fps` 三态（与 `[play] fps` 同构）：`"auto"` 最左 / `"max"` 最右 / 中间 `1`-`240`。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub(crate) struct WallpaperConfig {
     pub(crate) enable: bool,
-    #[serde(default = "default_wallpaper_fps")]
-    pub(crate) fps: u32,
+    #[serde(default = "default_wallpaper_fps", deserialize_with = "de_wallpaper_fps")]
+    pub(crate) fps: String,
     #[serde(default)]
     pub(crate) frames: u32,
     #[serde(default = "default_wallpaper_preload")]
@@ -602,13 +628,13 @@ mod schema_tests {
     pub(crate) fn wallpaper_roundtrip() {
         let mut cfg = FileConfig::default();
         cfg.wallpaper.enable = true;
-        cfg.wallpaper.fps = 20;
+        cfg.wallpaper.fps = String::from("20");
         cfg.wallpaper.frames = 30;
         cfg.wallpaper.format = MediaFormat::Qois;
         let text = toml::to_string(&cfg).unwrap();
         let back: FileConfig = toml::from_str(&text).unwrap();
         assert!(back.wallpaper.enable);
-        assert_eq!(back.wallpaper.fps, 20);
+        assert_eq!(back.wallpaper.fps, "20");
         assert_eq!(back.wallpaper.frames, 30);
         assert_eq!(back.wallpaper.format, MediaFormat::Qois);
     }

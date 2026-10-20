@@ -366,8 +366,9 @@ impl App {
                     ui.small(t!("wallpaper.popup_freeze_hint"));
                     ui.add_space(10.0);
                     ui.label(t!("wallpaper.fps"));
-                    let fps_label = format!("{} fps", self.cfg.wallpaper.fps);
-                    egui_glass::GlassSlider::new(&mut self.wp_fps_f, 1.0..=30.0)
+                    // 三段滑杆（与播放帧率同构）：0 = auto（跟 vsync），1-240 = 限速，241 = max。
+                    let fps_label = self.wp_fps_text();
+                    egui_glass::GlassSlider::new(&mut self.wp_fps_f, 0.0..=241.0)
                         .text(fps_label)
                         .step_by(1.0)
                         .style(if self.dark {
@@ -376,7 +377,13 @@ impl App {
                             egui_glass::GlassStyle::regular()
                         })
                         .show(ui);
-                    self.cfg.wallpaper.fps = self.wp_fps_f.round().clamp(1.0, 30.0) as u32;
+                    let pos = self.wp_fps_f.round().clamp(0.0, 241.0) as u32;
+                    self.cfg.wallpaper.fps = match pos {
+                        0 => String::from("auto"),
+                        241 => String::from("max"),
+                        n => n.to_string(),
+                    };
+                    ui.small(t!("wallpaper.fps_hint"));
                     ui.add_space(10.0);
                     ui.label(t!("wallpaper.frames"));
                     let frames_label = if self.cfg.wallpaper.frames == 0 {
@@ -475,9 +482,9 @@ impl App {
                     "sum.wallpaper",
                     v = if self.cfg.wallpaper.enable {
                         format!(
-                            "on {}/{}fps/{}f/pre{}/fz{}",
+                            "on {}/{}/{}f/pre{}/fz{}",
                             self.cfg.wallpaper.format.file_str(),
-                            self.cfg.wallpaper.fps,
+                            self.wp_fps_text(),
                             self.cfg.wallpaper.frames,
                             self.cfg.wallpaper.preload,
                             self.cfg.wallpaper.popup_freeze as u8,

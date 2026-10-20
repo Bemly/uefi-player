@@ -68,7 +68,10 @@ fn load_background(screen: &mut Screen) -> Option<WpState> {
         return None;
     }
     let tps = calibrate_tps();
-    let budget = tps.max(1) / crate::config::wallpaper_fps().max(1) as u64;
+    // 三态帧率：None = 不限速（budget 0 即每轮都画，`>=` 恒成立）。
+    let budget = crate::config::effective_wallpaper_fps()
+        .map(|f| tps.max(1) / f.max(1) as u64)
+        .unwrap_or(0);
     Some(WpState {
         set,
         idx: 0,

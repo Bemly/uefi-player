@@ -110,7 +110,7 @@ impl App {
             page: Page::File,
             play_f: 0.0,
             accel_f: AccelLevel::Auto.index() as f32,
-            wp_fps_f: default_wallpaper_fps() as f32,
+            wp_fps_f: 15.0,
             wp_frames_f: 0.0,
             wp_preload_f: default_wallpaper_preload() as f32,
             tune_frames_f: default_frames() as f32,
@@ -138,9 +138,13 @@ impl App {
             FpsPolicy::Max => 241.0,
             FpsPolicy::Capped(n) => n as f32,
         };
-        self.wp_fps_f = self.cfg.wallpaper.fps.clamp(1, 30) as f32;
+        self.wp_fps_f = match parse_fps(&self.cfg.wallpaper.fps) {
+            FpsPolicy::Auto => 0.0,
+            FpsPolicy::Max => 241.0,
+            FpsPolicy::Capped(n) => n.min(240).max(1) as f32,
+        };
         self.wp_frames_f = self.cfg.wallpaper.frames.min(120) as f32;
-        self.wp_preload_f = self.cfg.wallpaper.preload.clamp(1, 16) as f32;
+        self.wp_preload_f = self.cfg.wallpaper.preload.min(32) as f32;
         self.tune_frames_f = self.cfg.render.tune.frames.clamp(1, 120) as f32;
         self.tune_tile_f = self.cfg.render.tune.tile_rows.clamp(8, 512) as f32;
         self.tune_vsync_fps_f = self.cfg.render.tune.vsync_fps.clamp(15, 240) as f32;
@@ -155,6 +159,15 @@ impl App {
             FpsPolicy::Capped(n) => format!("{} fps", n),
         };
         format!("{} {}", base, self.cfg.play.format.file_str())
+    }
+
+    /// 壁纸帧率滑杆文本（三态与播放同构；auto 跟 vsync，详见固件 `effective_wallpaper_fps`）。
+    pub(crate) fn wp_fps_text(&self) -> String {
+        match parse_fps(&self.cfg.wallpaper.fps) {
+            FpsPolicy::Auto => t!("wallpaper.text_auto").into_owned(),
+            FpsPolicy::Max => t!("play.text_max").into_owned(),
+            FpsPolicy::Capped(n) => format!("{} fps", n.min(240).max(1)),
+        }
     }
 
     /// 片源格式行（两颗玻璃按钮，qois/raw 二选一，壁纸/播放共用形状）。
