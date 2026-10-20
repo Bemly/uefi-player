@@ -151,7 +151,7 @@ third_party/sprout 只读 submodule，只依赖 5 个 lib
 ```bash
 cargo build --target x86_64-unknown-uefi
 cargo clippy --target x86_64-unknown-uefi
-cargo fmt --all --check
+cargo fmt -p uefi-player --check   # 不是 --all：path 依赖的 vendor 树豁免（见 §7）
 T="$(rustc -vV | sed -n 's/^host: //p')"
 cargo test --manifest-path tools/config-gui/Cargo.toml --target "$T"
 cargo run  --manifest-path tools/qemu-matrix/Cargo.toml --target "$T" -- [--case X] [--include-slow]
@@ -160,3 +160,64 @@ cargo run  --manifest-path tools/config-gui/Cargo.toml  --target "$T"   # GUI �
 
 QEMU 手动看屏（矩阵默认无头）：去 `tools/qemu-matrix/runs/<case>/usb.img`，
 把 `-- -display none` 换掉直接起，键盘直敲；或 monitor 里 `screendump a.ppm`。
+
+## 7. HEVC 适配心得（2026-10-21，rusty_h265 vendor + no_std 标量移植）
+
+背景：播放器/壁纸要加 mp4 格式，先验 H.265 轮子（`rusty_h265`），
+结论可用后 vendor 进 `third_party/` 并自 port 标量 no_std，
+最后落诊断项 `hevc_probe`（键 `d`）+ QEMU `hevc-probe` case。
+下次再接同类纯 Rust 编解码轮子，直接照这套流程走。
+
+### 7.1 选型（一句话：h265 就是年轻版的 h264，早 4 个月）
+
+- 采用 `rusty_h265 0.6.2`：同门作者，Apache-2.0，rust 1.85（< 本仓 1.92），
+  无 C/FFI，JCT-VC 一致性套件门控。缺点：下载量 1.3k、上游自己还没 no_std。
+- `less-avc`（树里已有的）是**编码器**，不能解码，别被 `Cargo.toml` 注释里的
+  “视频解码类”骗了（它名下只有这一项时更要核实）。
+- `openh264` 系是 C 绑定：UEFI 无 C 工具链 + 非 no_std 友好，出局。
+- h264 兄弟（`rusty_h264-decoder`）已有 `std/global-alloc/libm` 分层，
+  h265 还没长出来——结构更干净（纯整数，连 `libm` 都不要；也没有全局
+  分配器坑），port 反而比 h264 省事。
+
+### 7.2 移植方法（审计 → 分类 → 编译器驱动，三板斧）
+
+1. `grep -rn "std::" src/` 列全量（本轮 h265 共 67 处），先剔 test/bin/
+   `#[cfg(test)]`/`#[cfg(feature)]` 门控内的——真生产依赖只剩约 60 处。
+2. 分类只有 7 种，无一例外都有机械解（详见 `VENDOR.md`）：
+   env 开关 → 抄 h264-common 的 knob 主义（无 std 恒读作未设置）；
+   `eprintln!` → 同文件 shim 成 no-op；`Arc/VecDeque/原子量` →
+   `alloc`/`core` 同类型路径替换；`Display/Error` → `core::{fmt,error}`；
+   `Vec/String/vec!/format!` → 按文件补 `alloc` 前奏；
+   `OnceLock` 缓存 → std 侧原样保留、no_std 侧折成常量（perf 与行为双保）。
+3. 剩下的交给编译器：`--no-default-features` host 先过，
+   再过 `--target x86_64-unknown-uefi`，报错全是缺 import，一轮补齐。
+   纪律：`VENDOR(uefi-player):` 逐处标改动点，合上游时按注释重放；
+   只改必要行，不顺手“美化”上游代码。
+
+### 7.3 三个坑（都是实锤，不是推测）
+
+1. **`cargo check` 能过 ≠ 能用**：本机新工具链自带 UEFI 的 `libstd`，
+   纯 `std` 代码 check 照过。真门槛在线下三处——链接（lang 件冲突）、
+   运行（std 运行时在 UEFI 上不可用）、仓规（固件禁 `std` 依赖）。
+   以后验轮子 no_std，先看源码有没有 `#![no_std]` + 特性门，再谈编译。
+2. **`cargo fmt --all` 会扫 path 依赖**：vendor 树（上游风格，300+ 处
+   fmt 差异）直接炸门禁。解法不是格式化 vendor 树（毁掉合流能力），
+   而是门禁收窄为 `cargo fmt -p uefi-player --check`
+   （AGENTS/roadmap/本文件 §6 已同步改；`rustfmt.toml` 的 `ignore`
+   是 nightly-only，stable 上用了只会告警，无用，别加）。
+3. **校验和口径要在设计时定死**：首版 `hevc_probe` 期望值把 host 拼帧
+   输出里的色度也加了进去，固件侧只加 Y——数字对不上，第一反应别怀疑
+   轮子，先对口径（本轮：`aa91d…` 整文件 md5 对上、Y 和一致才是真一致）。
+
+另：`accel` 箱的 `OnceLock` planner 在标量构建下全是死代码
+（调用点被 `simd` 门控），shim 写成什么都不影响行为——放心写最简单的。
+`video-dynamic` 的 QEMU 红与本次无关（宿主压力 flake，见 §4），
+重跑策略不变：宿主空闲单跑该 case。
+
+### 7.4 验证链（下次照单全收）
+
+host 像素级回归（ffmpeg md5 + 标量/SIMD 双路一致）→
+4 配置 check（默认/无默认/无默认+std/UEFI）→ 箱内单测
+（decoder 39 + accel 30 通过）→ QEMU 矩阵（`hevc-probe` 首跑即绿）。
+`simd`+无 `std` 组合明确不支持（ twins 没 port，唯一非机械点是
+运行时 ISA 检测对接固件 CPUID 门禁），留待上游或另立项。
