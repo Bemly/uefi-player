@@ -9,7 +9,12 @@ less-avc = { version = "0.1.5", default-features = false }
 shiguredo_mp4 = { version = "2026.5.0", default-features = false }
 # H.264 解码（mp4/壁纸片源用；pure-Rust，no_std 经 `alloc` + `libm`，见 diag/avc_probe.rs 头注释轮子结论；
 # 不开上游 `global-alloc`：它会装轮子自带的进程全局分配器，与 uefi 的 `#[global_allocator]` 撞车，
-# 上游文档明示自带分配器的下游用 `default-features = false`）
+# 上游文档明示自带分配器的下游用 `default-features = false`；
+# 不开上游 `asm`（SIMD）：accel 箱源码无条件 `use std::`（无 no_std 门），终链时 std 的
+# panic_impl 与 uefi 的 `panic_handler` 撞车（E0152，`cargo check` 能过、`cargo build`  binary 才炸；
+# 另裸 UEFI 默认 flags 下 accel codegen 还会 LLVM ICE，必须本仓 flags——两道门皆实锤，见 avc_probe 头注释）。
+# 解禁条件：上游 accel 去 std 化（其作者 4 个月发 18 版、正把 asm 往可移植迁，可期）；
+# 到时 `[accel]` 矩阵经 `scalar`=关/`else`=开做单比特开关（设计已论证，见 simd.md）。）
 rusty_h264-decoder = { version = "0.16", default-features = false, features = ["libm"] }
 # 图像处理类
 qoicoubeh = { version = "0.5.0", default-features = false, features = ["alloc"] }
