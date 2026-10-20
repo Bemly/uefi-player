@@ -1,0 +1,42 @@
+[package]
+name = "filmcraft-mpeg2v"
+version = "0.10.0"
+edition = "2024"
+# VENDOR(uefi-player): upstream declares 1.95; measured floor on this tree is
+# 1.92 (checked 2026-10-21, both feature shapes + tests), so the vendor pins
+# the lower value per repo MSRV policy. Re-measure on every upstream sync.
+rust-version = "1.92"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/storytold/filmcraft"
+description = "Clean-room MPEG-2 video (ITU-T H.262 | ISO/IEC 13818-2) and MPEG-1 video (ISO/IEC 11172-2) decoder"
+
+# NOTE(uefi-player vendor): vendored from git 70f0fc7a (2026-10-20) + no_std port
+# (scalar). See VENDOR.md. `std` (default on) preserves upstream behavior exactly;
+# `default-features = false` is the firmware shape: no_std + alloc, threads off.
+# Upstream is not on crates.io, so this is a path vendor, not a registry version.
+
+[features]
+default = ["std", "threads"]
+# Standard library. Off => `#![no_std]` + `alloc`.
+std = []
+# Slice-row parallelism via rayon (MPEG-2 slices; MPEG-1 slices always decode in
+# order). The firmware scalar port leaves this off; `threads` without `std` is
+# rejected below by `compile_error!` (rayon needs std). There is no SIMD concept
+# in this crate (pure scalar `f32` IDCT), so `default-features = false` is
+# immediately firmware-usable.
+threads = ["dep:rayon"]
+
+[dependencies]
+# Unconditional `default-features = false`: only `String` payloads are formatted,
+# so the `std` feature (Path/PathBuf conveniences) changes nothing.
+thiserror = { version = "2", default-features = false }
+# Unconditional: the two IDCT table sites call `libm::cos` in both std and no_std
+# builds (identical tables, minimal diff; already in the firmware closure via
+# rusty_h264-decoder).
+libm = "0.2"
+# Unconditional `Sync` one-time cells for the IDCT/VLC lookup tables
+# (`core::cell::OnceCell` is not `Sync`, so `static`s reject it; `spin::Once`
+# is behavior-identical single-init semantics in both builds; MIT, MSRV 1.38,
+# zero transitive deps with this feature set).
+spin = { version = "0.9", default-features = false, features = ["once"] }
+rayon = { version = "1", optional = true }
