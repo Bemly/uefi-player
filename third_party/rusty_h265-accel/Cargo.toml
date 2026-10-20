@@ -1,0 +1,23 @@
+[package]
+name = "rusty_h265-accel"
+version = "0.6.2"
+edition = "2021"
+rust-version = "1.85"
+license = "Apache-2.0"
+repository = "https://github.com/Remade-With-Rust/rusty_h265"
+description = "SIMD kernels for the rusty_h265 HEVC decoder: the one crate allowed `unsafe`, behind a runtime-dispatched seam."
+
+# NOTE(uefi-player vendor): vendored from crates.io 0.6.2 + no_std port (scalar
+# arm only). See ../rusty_h265/VENDOR.md. `std` (default on) preserves upstream
+# behavior exactly; `default-features = false` (hence no `simd`) is the firmware
+# shape: no_std scalar twins + dispatchers only.
+
+[features]
+default = ["std", "simd"]
+std = []
+simd = []
+census = []
+
+[lib]
+name = "rusty_h265_accel"
+path = "src/lib.rs"

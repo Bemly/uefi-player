@@ -8,5 +8,7 @@ Cargo.lock
 
 # host GUI 独立包构建产物（tools/config-gui 有自己的 target）
 tools/**/target/
+# vendored 上游箱构建产物（third_party/rusty_h265* 独立包，按需本地验证用）
+third_party/**/target/
 # QEMU 黑盒矩阵运行产物（串口日志/镜像，按 case 即用即建，不入库）
 tools/qemu-matrix/runs/

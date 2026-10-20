@@ -1,0 +1,42 @@
+[package]
+name = "rusty_h265"
+version = "0.6.2"
+edition = "2021"
+rust-version = "1.85"
+license = "Apache-2.0"
+repository = "https://github.com/Remade-With-Rust/rusty_h265"
+description = "Pure-Rust HEVC / H.265 video decoder, no C/FFI, written from the ITU-T H.265 spec and gated on the JCT-VC conformance suite."
+
+# NOTE(uefi-player vendor): vendored from crates.io 0.6.2 + no_std port (scalar).
+# See VENDOR.md. `std` (default on) preserves upstream behavior exactly;
+# `default-features = false` is the firmware shape: no_std + scalar.
+
+[features]
+default = ["std", "simd"]
+# Standard library. Off => `#![no_std]` + `alloc`; env knobs read as unset and
+# diagnostic prints become no-ops (shipped defaults — the doctrine upstream
+# documents for its own no_std consumers).
+std = ["rusty_h265-accel/std"]
+# Portable SIMD kernels in rusty_h265-accel (SSE2/AVX2/NEON). The firmware
+# scalar port leaves this off. `simd` implies accel `std`: the SIMD twins were
+# not ported to no_std (out of scope — scalar arm only), so `simd` without
+# `std` is NOT a supported combination.
+simd = ["rusty_h265-accel/simd", "rusty_h265-accel/std"]
+census = ["rusty_h265-accel/census"]
+cabac-trace = []
+prof = []
+# Upstream pins this exactly (allocator identity for measurement arms); optional
+# dep, never enabled in firmware builds.
+bench-alloc = ["dep:rusty_alloc-api"]
+
+[dependencies]
+rusty_h265-accel = { path = "../rusty_h265-accel", default-features = false }
+rusty_alloc-api = { version = "=2.2.6", optional = true }
+
+[[bin]]
+name = "rusty_h265"
+path = "src/bin/rusty_h265.rs"
+
+[lib]
+name = "rusty_h265"
+path = "src/lib.rs"
