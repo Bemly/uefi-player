@@ -139,8 +139,8 @@ cargo run --manifest-path tools/config-gui/Cargo.toml --target "$(rustc -vV | se
   （`registry.rs` 的两种 `Entry`，不要第三种）。
 - 诊断项可返回式报错，只生产路径（播视频）走 `handle_fatal`。
 - 提交用 Conventional Commits（`feat/fix/docs`），不加 Agent 署名。
-- 版本号用 CalVer `YYYY.MM.MICRO`（如 `2026.10.0`；同月递增 MICRO，换月归零；
-  主包与 `uefi-async` 各自独立，`tools/*` 内部工具保持 `0.1.0` 不动）。
+- 版本号用 CalVer `YY.MM.DD`（如 `26.10.20`；
+  主包与 `uefi-async` 各自独立按日期 bump，`tools/*` 内部工具保持 `0.1.0` 不动）。
 - 每次改完自动提交并推送到 GitHub：`check/clippy/fmt` 全绿就 `commit + push`，
   不必等用户开口；以用户最新说明为准。
 - 本机 sudo 口令只存登录钥匙串（服务名 `uefi-player-sudo`），取用

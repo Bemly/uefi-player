@@ -1,6 +1,6 @@
 [package]
 name = "uefi-player"
-version = "2026.10.0"
+version = "26.10.20"
 edition = "2024"
 
 [dependencies]
@@ -27,7 +27,7 @@ dmidecode = { version = "1.0.0", default-features = false }
 # 不开 uefi-async 的 global-allocator（双全局链接不过）。
 # 用法：nano（单核借用节点）/ dynamic-alloc（多核 work-stealing）同词汇；
 # static（无堆 Embassy 式）后继早启驱动再按需开。
-uefi-async = { version = "2026.10", git = "https://github.com/Bemly/uefi-async", package = "uefi-async", default-features = false, features = ["nano-alloc", "alloc"] }
+uefi-async = { version = "26.10", git = "https://github.com/Bemly/uefi-async", package = "uefi-async", default-features = false, features = ["nano-alloc", "alloc"] }
 # 引导/加载逻辑复用 Sprout（git submodule，pin 原 commit 不 fork）。
 # 注意上游 edera-sprout-boot 是纯 bin（无 lib target），path 依赖会被 cargo
 # 静默忽略；本仓用 patches/sprout-boot-lib.patch 叠加 [lib]（只加 src/lib.rs +
