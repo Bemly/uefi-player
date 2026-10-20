@@ -20,6 +20,11 @@ rusty_h264-decoder = { version = "0.16", default-features = false, features = ["
 # 本仓 vendor 到 third_party/rusty_h265(+accel) 后自 port 标量路，
 # 见该目录 VENDOR.md；纯整数运算，连 libm 都不要；`simd` 未 port 用不得）。
 rusty_h265 = { path = "third_party/rusty_h265", default-features = false }
+# VP9 解码（mp4/壁纸片源用；pure-Rust clean-room，上游 0.1.1 尚无 no_std 分层，
+# 本仓 vendor 到 third_party/vp9dec 后自 port 标量路，见该目录 VENDOR.md；
+# 零依赖、无 C/FFI、无全局分配器；`simd` 未 port 用不得，
+# 线程并行（tile/loop_filter）恒走顺序路；输出 Y/U/V 三平面行优先）。
+vp9dec = { path = "third_party/vp9dec", default-features = false }
 # 图像处理类
 qoicoubeh = { version = "0.5.0", default-features = false, features = ["alloc"] }
 u8g2-fonts = { version = "0.8.0", features = ["embedded_graphics_textstyle"] }

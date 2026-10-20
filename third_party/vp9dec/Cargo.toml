@@ -1,0 +1,42 @@
+[package]
+name = "vp9dec"
+version = "0.1.1"
+edition = "2021"
+# NOTE(uefi-player vendor): 上游未声明 MSRV；本仓按仓线 1.92 声明
+#（实际用到的最高语言/库特性约 OnceLock 1.70，见 VENDOR.md）。
+rust-version = "1.92"
+description = "A from-scratch, clean-room VP9 video decoder (Rust, zero dependency crates)"
+license = "MIT"
+repository = "https://github.com/ChanyaVRC/vp9dec"
+documentation = "https://docs.rs/vp9dec"
+readme = "README.upstream.md"
+keywords = ["vp9", "video", "codec", "decoder", "webm"]
+categories = ["multimedia::video", "multimedia::encoding"]
+
+# NOTE(uefi-player vendor): vendored from upstream 0.1.1 + no_std port (scalar).
+# See VENDOR.md. `std` (default on) preserves upstream behavior exactly;
+# `default-features = false` is the firmware shape: no_std + alloc, scalar-only.
+[features]
+default = ["std"]
+# Standard library. Off => `#![no_std]` + `alloc`. Thread-pool Tile/LoopFilter
+# drivers and AVX2 runtime detection need `std`; without it the sequential /
+# scalar paths (bit-identical, officially gated) always run.
+std = []
+# Per-stage wall-clock accounting (src/bench_timing.rs). Zero-cost when off.
+bench-timing = []
+# Encoder-side mirrors of the bit/bool coders for synthetic round-trip tests.
+# The unit tests under tests/unit need it; enabled implicitly for `cargo test`
+# via the self dev-dependency below (upstream original scope).
+test-support = []
+
+[dependencies]
+
+# Upstream original scope: self-referential dev-dep so plain `cargo test`
+# enables `test-support` (the unit tests need it). Versionless path dev-deps
+# never leak into downstream builds; the firmware shape is unaffected.
+[dev-dependencies]
+vp9dec = { path = ".", features = ["test-support"] }
+
+# NOTE(uefi-player vendor): upstream `[[test]]` (conformance/sweep/cross-check,
+# 需要包外向量文件或 ffmpeg) 在此去掉；`tests/unit/` 随树保留，箱内单测用。
+# `[[example]]` 随 examples/ 一起去掉（host 调试看屏另行处理，不进 vendor）。
