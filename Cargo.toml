@@ -28,6 +28,10 @@ dmidecode = { version = "1.0.0", default-features = false }
 # 用法：nano（单核借用节点）/ dynamic-alloc（多核 work-stealing）同词汇；
 # static（无堆 Embassy 式）后继早启驱动再按需开。
 uefi-async = { version = "26.10", git = "https://github.com/Bemly/uefi-async", package = "uefi-async", default-features = false, features = ["nano-alloc", "alloc"] }
+# 扩展键盘输入（自家轮子 Bemly/uefi-input2；EFI_SIMPLE_TEXT_INPUT_EX：
+# shift/toggle 状态 + 多键盘 + 按键语义机；未发 crates.io 故走 git；
+# default-features=false + alloc：与 uefi-async 同口径）。
+uefi-input2 = { version = "26.10", git = "https://github.com/Bemly/uefi-input2", default-features = false, features = ["alloc"] }
 # 引导/加载逻辑复用 Sprout（git submodule，pin 原 commit 不 fork）。
 # 注意上游 edera-sprout-boot 是纯 bin（无 lib target），path 依赖会被 cargo
 # 静默忽略；本仓用 patches/sprout-boot-lib.patch 叠加 [lib]（只加 src/lib.rs +

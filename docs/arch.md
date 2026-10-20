@@ -22,6 +22,7 @@ src/fs.rs        卷 IO：open/read/write（删后建防残留）+ open_dir/list
 src/error.rs     NyaStatus + handle_fatal（仅生产路径）
 src/diag/        真机诊断项（非 cargo test）：registry 注册 + common（emit!/按键/报告/XSAVE）
                  + async_exec（uefi-async 自举：nano/dynamic 两线 smoke）
+                 + input2_probe（uefi-input2 自举：Ex 键 + shift 状态）
 ```
 
 ## GOP 独占模型

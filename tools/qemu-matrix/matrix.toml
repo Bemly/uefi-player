@@ -309,6 +309,34 @@ keys = [
 ]
 expect = ["async-exec: nano ok", "async-exec: dynamic ok", "async-exec: PASS"]
 
+# uefi-input2 交互探测：进菜单按 b（等键 10s），矩阵发 z，
+# Ex 协议必须回显键码 + 修饰/锁定状态，最后 PASS。
+[[case]]
+name = "input2-probe"
+timeout_sec = 240
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+workers = "bsp_only"
+dist = "static"
+vsync = "off"
+[play]
+fps = "max"
+[wallpaper]
+enable = false
+"""
+boot_expect = ["cfg: version=1", "idle: ready"]
+keys = [
+  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
+  { send = "p", wait_after = 3 },
+  { send = "b", wait_for = ["menu: ready"], wait_after = 3 },
+  { send = "z", wait_for = ["input2: waiting"], wait_after = 5 },
+]
+expect = ["input2: key=", "input2: PASS"]
+
 # 弹窗导航：开弹窗 → q 回壁纸 → 再开（open 第二遍 = 待机循环没卡死）。
 [[case]]
 name = "boot-menu"

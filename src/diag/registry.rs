@@ -8,8 +8,8 @@
 //!   embedded-graphics 中文演示是这种形态。
 
 use crate::diag::{
-    async_exec, avx_checker, fw_collect, get_cpu_info, get_multi_monitor, get_smbios, mp_service,
-    multi_core_draw, use_embedded_graphics_gop,
+    async_exec, avx_checker, fw_collect, get_cpu_info, get_multi_monitor, get_smbios, input2_probe,
+    mp_service, multi_core_draw, use_embedded_graphics_gop,
 };
 #[cfg(target_arch = "x86_64")]
 use crate::diag::hw_bench;
@@ -97,6 +97,13 @@ pub const ITEMS: &[Item] = &[
         name: "Async exec",
         desc: "uefi-async nano+dynamic smoke",
         run: Entry::Shared(async_exec::run),
+        fatal_on_error: false,
+    },
+    Item {
+        key: 'b',
+        name: "Input2 probe",
+        desc: "uefi-input2 Ex key + shift state",
+        run: Entry::Shared(input2_probe::run),
         fatal_on_error: false,
     },
     #[cfg(target_arch = "x86_64")]

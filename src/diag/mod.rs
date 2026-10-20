@@ -14,6 +14,7 @@ pub mod avx_checker;
 pub mod get_cpu_info;
 pub mod get_multi_monitor;
 pub mod get_smbios;
+pub mod input2_probe;
 pub mod mp_service;
 pub mod multi_core_draw;
 pub mod use_embedded_graphics_gop;
