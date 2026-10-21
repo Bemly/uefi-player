@@ -26,10 +26,11 @@ buffers = 0
 fps = "auto"
 measured_max_fps = 0
 format = "qois"
+pipeline = "clip"
 
 [wallpaper]
 enable = false
-fps = 15
+fps = "15"
 frames = 0
 preload = 8
 format = "raw"
