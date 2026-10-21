@@ -36,7 +36,7 @@ pub(crate) struct App {
     /// 播放帧率滑杆镜像：0 = auto，1-240 = 限速，241 = max。
     /// `GlassSlider` 只要 `f32`，每帧写回 `cfg.play.fps`。
     pub(crate) play_f: f32,
-    /// 加速档位滑杆镜像：0-28 对应 `AccelLevel::ALL` 下标（`sync_widgets` 随读盘同步，
+    /// 加速档位滑杆镜像：0-30 对应 `AccelLevel::ALL` 下标（`sync_widgets` 随读盘同步，
     /// 否则开档文件载入后滑杆仍停在旧位，下一帧会把已载入的档位盖掉）。
     pub(crate) accel_f: f32,
     /// 壁纸滑杆镜像：fps 1-30，frames 0-120（0 = 全播），preload 0-32（0 = 不封顶）。

@@ -7,8 +7,9 @@ use alloc::string::{String, ToString};
 use serde::{Deserialize, Serialize};
 
 /// 指令集加速档位。`Auto` = 运行时探 CPUID/XCR0 取最高可用。
-/// 全集按 CPUID 叶序排（`ALL` 下标即滑杆档位）：x86 UEFI 可探的 28 档；
-/// `tbm`/`sse4a` 为 AMD 专有（QEMU `qemu64` 无），明确不收（见 `docs/simd.md`）。
+/// 全集按 CPUID 叶序排（`ALL` 下标即滑杆档位）：x86 UEFI 可探的 30 档 + `auto`
+/// = 31 档；`tbm`/`sse4a` 为 AMD 专有（扩展叶 8000_0001H ECX bit 21/6，
+/// QEMU `qemu64` 无此叶，显式配了即按 X128 钳住用，见 `docs/simd.md`）。
 /// 老文件 `"avx512"` 按 `avx512f` 照读（`alias`，不断旧配置）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
@@ -44,6 +45,10 @@ pub enum AccelLevel {
     Avx512bw,
     Avx512vl,
     Avxvnni,
+    // AMD 扩展叶档（8000_0001H ECX：bit 21 tbm / bit 6 sse4a，`target_feature`
+    // 小写无点形已有 `sse4a` 先例，`tbm` 同式）：放末尾，叶序上扩展叶本就排最后。
+    Tbm,
+    Sse4a,
 }
 
 impl AccelLevel {
@@ -78,6 +83,8 @@ impl AccelLevel {
             Self::Avx512bw => 26,
             Self::Avx512vl => 27,
             Self::Avxvnni => 28,
+            Self::Tbm => 29,
+            Self::Sse4a => 30,
         }
     }
     pub(crate) fn from_u8(v: u8) -> Self {
@@ -110,6 +117,8 @@ impl AccelLevel {
             26 => Self::Avx512bw,
             27 => Self::Avx512vl,
             28 => Self::Avxvnni,
+            29 => Self::Tbm,
+            30 => Self::Sse4a,
             _ => Self::Auto,
         }
     }

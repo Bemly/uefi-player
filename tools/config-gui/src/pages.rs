@@ -27,10 +27,10 @@ impl App {
                 ui.heading(t!("accel.heading"));
                 ui.add_space(4.0);
                 ui.label(t!("accel.level"));
-                // 档位滑杆：0-28 拨 `ALL` 下标，文本行同步显示当前档 + 说明。
+                // 档位滑杆：0-30 拨 `ALL` 下标，文本行同步显示当前档 + 说明。
                 let cur = self.cfg.accel.level;
                 let accel_label = format!("{}: {}", cur.file_str(), level_desc(cur));
-                egui_glass::GlassSlider::new(&mut self.accel_f, 0.0..=28.0)
+                egui_glass::GlassSlider::new(&mut self.accel_f, 0.0..=30.0)
                     .text(accel_label)
                     .step_by(1.0)
                     .style(if self.dark {
@@ -40,7 +40,7 @@ impl App {
                     })
                     .show(ui);
                 self.cfg.accel.level =
-                    AccelLevel::ALL[self.accel_f.round().clamp(0.0, 28.0) as usize];
+                    AccelLevel::ALL[self.accel_f.round().clamp(0.0, 30.0) as usize];
                 ui.small(t!("accel.auto_level"));
                 ui.add_space(10.0);
                 ui.label(t!("accel.mode"));

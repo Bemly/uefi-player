@@ -38,12 +38,16 @@ pub(crate) enum AccelLevel {
     Avx512bw,
     Avx512vl,
     Avxvnni,
+    // AMD 扩展叶档（8000_0001H ECX：bit 21 tbm / bit 6 sse4a）：放末尾，
+    // 叶序上扩展叶本就排最后；`target_feature` 小写无点形（`sse4a` 先例，`tbm` 同式）。
+    Tbm,
+    Sse4a,
 }
 
 impl AccelLevel {
-    /// 全集（CPUID 叶序，`target_feature` 小写无点形；`tbm`/`sse4a` 为 AMD 专有，
-    /// QEMU `qemu64` 无，明确不收，见 `docs/simd.md`）。
-    pub(crate) const ALL: [Self; 29] = [
+    /// 全集（CPUID 叶序，`target_feature` 小写无点形；`tbm`/`sse4a` 为 AMD 专有
+    /// 扩展叶档，QEMU `qemu64` 无此叶，显式配了即按 X128 钳住用，见 `docs/simd.md`）。
+    pub(crate) const ALL: [Self; 31] = [
         Self::Auto,
         Self::Scalar,
         Self::Sse,
@@ -73,9 +77,11 @@ impl AccelLevel {
         Self::Avx512bw,
         Self::Avx512vl,
         Self::Avxvnni,
+        Self::Tbm,
+        Self::Sse4a,
     ];
     /// 主笛卡尔代表集（9 档，旧全集口径：`avx512`→`avx512f` 改名后仍占一位；
-    /// 全量 29 档进 `accel_levels_roundtrip` 表，不进主笛卡尔，避 3 倍膨胀）。
+    /// 全量 31 档进 `accel_levels_roundtrip` 表，不进主笛卡尔，避 3 倍膨胀）。
     pub(crate) const REPRESENTATIVE: [Self; 9] = [
         Self::Auto,
         Self::Scalar,
@@ -118,9 +124,11 @@ impl AccelLevel {
             Self::Avx512bw => "avx512bw",
             Self::Avx512vl => "avx512vl",
             Self::Avxvnni => "avxvnni",
+            Self::Tbm => "tbm",
+            Self::Sse4a => "sse4a",
         }
     }
-    /// 滑杆档位 0-28（`ALL` 的下标，`Auto=0`）。
+    /// 滑杆档位 0-30（`ALL` 的下标，`Auto=0`）。
     pub(crate) fn index(self) -> usize {
         Self::ALL.iter().position(|&v| v == self).unwrap_or(0)
     }

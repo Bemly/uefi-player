@@ -112,7 +112,7 @@ mod blackbox_matrix {
     /// 全档位笛卡尔回写：9 代表档 × 3 render × 3 workers × 4 dist × 4 vsync × 4 blt × 3 async × 3 sched，
     /// 序列化再解析必须逐字节等价（顺序/缺键都由 serde 保证，不许丢字段）。
     /// 代表集见 `AccelLevel::REPRESENTATIVE`（旧 9 档口径，`avx512`→`avx512f` 改名后仍占一位）；
-    /// 全量 29 档另见 `accel_levels_roundtrip` 表，不进主笛卡尔，避 3 倍膨胀。
+    /// 全量 31 档另见 `accel_levels_roundtrip` 表，不进主笛卡尔，避 3 倍膨胀。
     #[test]
     fn schema_roundtrip_matrix() {
         let mut n = 0;
@@ -684,7 +684,7 @@ mod blackbox_matrix {
         assert_eq!(kept.render.workers, WorkersMode::All);
     }
 
-    /// 加速全量 29 档回写（`ALL` 逐档 `file_str` 照读照写，不丢字段；
+    /// 加速全量 31 档回写（`ALL` 逐档 `file_str` 照读照写，不丢字段；
     /// 老文件 `"avx512"` 按 `avx512f` 照读，不断旧配置）。
     #[test]
     fn accel_levels_roundtrip() {
@@ -699,7 +699,7 @@ mod blackbox_matrix {
             assert_eq!(back, cfg);
             n += 1;
         }
-        assert_eq!(n, 29);
+        assert_eq!(n, 31);
         // 老文件 `"avx512"`（改名前的写法）按 `avx512f` 照读。
         let legacy: FileConfig =
             toml::from_str("version = 1\n[accel]\nlevel = \"avx512\"\n").unwrap();

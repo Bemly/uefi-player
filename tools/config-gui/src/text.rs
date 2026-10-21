@@ -35,6 +35,8 @@ pub(crate) fn level_desc(v: AccelLevel) -> String {
         AccelLevel::Avx512bw => t!("accel.desc_avx512bw"),
         AccelLevel::Avx512vl => t!("accel.desc_avx512vl"),
         AccelLevel::Avxvnni => t!("accel.desc_avxvnni"),
+        AccelLevel::Tbm => t!("accel.desc_tbm"),
+        AccelLevel::Sse4a => t!("accel.desc_sse4a"),
     }
     .into_owned()
 }
