@@ -302,6 +302,31 @@ mod codecs_tests {
         assert_eq!((decoded[0].width, decoded[0].height), (64, 48));
     }
 
+    /// AVC 非对齐几何 roundtrip（64x40：高 40 不是 16 倍数，走补齐 +
+    /// SPS `frame_cropping` 路径；解码器必须裁回原几何，否则固件的
+    /// 1920x1080 几何校验会拒收）。
+    #[test]
+    fn avc_odd_height_crop_roundtrip() {
+        let frames = vec![
+            solid_yuv(64, 40, 16, 128, 128),
+            solid_yuv(64, 40, 235, 128, 128),
+        ];
+        let out = encode_avc(&frames).expect("avc encode");
+        let mut annexb = Vec::new();
+        for nalu in [&out.sps, &out.pps]
+            .into_iter()
+            .chain(out.samples.iter().flat_map(|s| &s.nalus))
+        {
+            annexb.extend_from_slice(&[0, 0, 0, 1]);
+            annexb.extend_from_slice(nalu);
+        }
+        let decoded = rusty_h264_decoder::Decoder::new()
+            .decode_stream(&annexb)
+            .expect("avc decode");
+        assert_eq!(decoded.len(), 2, "{}", decoded.len());
+        assert_eq!((decoded[0].width, decoded[0].height), (64, 40));
+    }
+
     /// VP9 编码→固件同版本解码 roundtrip。
     #[test]
     fn vp9_encode_decode_roundtrip() {
@@ -446,32 +471,84 @@ fn drive_encoder(
     Ok(out)
 }
 
-fn yuv_to_less_avc(f: &Yuv420) -> less_avc::ycbcr_image::YCbCrImage<'_> {
-    use less_avc::ycbcr_image::{DataPlane, Planes, YCbCrImage};
-    use less_avc::BitDepth;
-    YCbCrImage {
-        planes: Planes::YCbCr((
-            DataPlane {
-                data: &f.y,
-                stride: f.w as usize,
-                bit_depth: BitDepth::Depth8,
-            },
-            DataPlane {
-                data: &f.u,
-                stride: f.w.div_ceil(2) as usize,
-                bit_depth: BitDepth::Depth8,
-            },
-            DataPlane {
-                data: &f.v,
-                stride: f.w.div_ceil(2) as usize,
-                bit_depth: BitDepth::Depth8,
-            },
-        )),
-        width: f.w,
-        height: f.h,
+/// 平面补齐到 stride/行数满足 less-avc `check_sizes`（边缘复制；
+/// pic 尺寸不变，轮内 `frame_cropping` 按原尺寸写 SPS 裁剪）。
+fn pad_plane_16(src: &[u8], w: usize, h: usize) -> (Vec<u8>, usize) {
+    let dw = w.next_multiple_of(16).max(16);
+    let dh = h.next_multiple_of(16).max(16);
+    if dw == w && dh == h {
+        return (src.to_vec(), w);
     }
+    let mut out = vec![0u8; dw * dh];
+    for y in 0..dh {
+        let sy = y.min(h.saturating_sub(1));
+        for x in 0..dw {
+            let sx = x.min(w.saturating_sub(1));
+            out[y * dw + x] = *src.get(sy * w + sx).unwrap_or(&0);
+        }
+    }
+    (out, dw)
 }
 
+/// AVC 输入帧（owned 缓冲 + 原 pic 几何；less-avc 要求缓冲按 16 对齐，
+/// `width`/`height` 报原尺寸，轮内 `frame_cropping` 写 SPS 裁剪，
+/// 合规解码器恢复原几何，见 `pad_plane_16` 与 1920x1080 回读测试）。
+struct AvcInputFrame {
+    y: Vec<u8>,
+    ystride: usize,
+    u: Vec<u8>,
+    ustride: usize,
+    v: Vec<u8>,
+    vstride: usize,
+    w: u32,
+    h: u32,
+}
+
+impl AvcInputFrame {
+    fn from_yuv420(f: &Yuv420) -> Self {
+        let (y, ystride) = pad_plane_16(&f.y, f.w as usize, f.h as usize);
+        let uvw = f.w.div_ceil(2) as usize;
+        let uvh = f.h.div_ceil(2) as usize;
+        let (u, ustride) = pad_plane_16(&f.u, uvw, uvh);
+        let (v, vstride) = pad_plane_16(&f.v, uvw, uvh);
+        Self {
+            y,
+            ystride,
+            u,
+            ustride,
+            v,
+            vstride,
+            w: f.w,
+            h: f.h,
+        }
+    }
+
+    fn view(&self) -> less_avc::ycbcr_image::YCbCrImage<'_> {
+        use less_avc::ycbcr_image::{DataPlane, Planes, YCbCrImage};
+        use less_avc::BitDepth;
+        YCbCrImage {
+            planes: Planes::YCbCr((
+                DataPlane {
+                    data: &self.y,
+                    stride: self.ystride,
+                    bit_depth: BitDepth::Depth8,
+                },
+                DataPlane {
+                    data: &self.u,
+                    stride: self.ustride,
+                    bit_depth: BitDepth::Depth8,
+                },
+                DataPlane {
+                    data: &self.v,
+                    stride: self.vstride,
+                    bit_depth: BitDepth::Depth8,
+                },
+            )),
+            width: self.w,
+            height: self.h,
+        }
+    }
+}
 /// AVC 样片（MP4 封装用：NAL 裸负载 + 关键帧标记）。
 pub(crate) struct AvcSample {
     pub(crate) keyframe: bool,
@@ -486,12 +563,14 @@ pub(crate) struct AvcStream {
 }
 
 /// AVC 编码（`less-avc` baseline；组内逐帧，首帧出 SPS/PPS）。
-/// 1080 高非 16 倍数由轮内 `frame_cropping` 兜底（见其 encoder.rs）。
+/// 非 16 对齐几何（如 1920x1080）先补齐缓冲、pic 报原尺寸，
+/// 轮内 `frame_cropping` 写 SPS 裁剪（见 `AvcInputFrame`）。
 pub(crate) fn encode_avc(frames: &[Yuv420]) -> Result<AvcStream, String> {
     if frames.is_empty() {
         return Err(String::from("avc: no frames"));
     }
-    let first = yuv_to_less_avc(&frames[0]);
+    let padded: Vec<AvcInputFrame> = frames.iter().map(AvcInputFrame::from_yuv420).collect();
+    let first = padded[0].view();
     let (init, mut enc) =
         less_avc::LessEncoder::new(&first).map_err(|e| format!("avc init: {e:?}"))?;
     let mut sps = Vec::new();
@@ -525,8 +604,8 @@ pub(crate) fn encode_avc(frames: &[Yuv420]) -> Result<AvcStream, String> {
         }
         samples.push(AvcSample { keyframe, nalus });
     }
-    for f in &frames[1..] {
-        let img = yuv_to_less_avc(f);
+    for f in &padded[1..] {
+        let img = f.view();
         let nalu = enc.encode(&img).map_err(|e| format!("avc encode: {e:?}"))?;
         let bytes = nalu.to_annex_b_data();
         let mut nalus = Vec::new();

@@ -71,6 +71,9 @@ avc/hevc/vp9 三档同名 `video.mp4`（播哪个由 `[play] format` 开关决�
   `oxideav-h265` 有 `H265Encoder`（inter/intra/pcm + registry）；
   `oxideav-mpeg12video` 有 MPEG-1/2 双编码器 + runtime。
   `rusty_h264`（同门 H.264 编码器）存在，但用户点名 `less-avc`，故不用。
+- `less-avc` 要调用方给 16 对齐缓冲：GUI 侧补齐（边缘复制）+ pic 报原尺寸，
+  轮内 `frame_cropping` 写 SPS 裁剪（`AvcInputFrame`；64x40 回读裁回原几何，
+  测试锁死，故 1920x1080 同理可播）。
 - 搜过缩放：`image`（0.25，大轮子，一次覆盖静帧解码 + `Triangle` 缩放；
   平面 420 按平面手写双线性——image 只吃打包 RGBA；QOI 编码走独立 `qoi` 箱，
   不绕 image）。
@@ -90,7 +93,12 @@ avc/hevc/vp9 三档同名 `video.mp4`（播哪个由 `[play] format` 开关决�
 - `transcode_tests`：avc/hevc/vp9 三路 mp4 roundtrip（编码→同轮子 mux→
   同轮子 demux：样片数 + 关键帧 + 首 entry 種別 avc1/hvc1/vp09，
   即“固件 demux 视角”）；探针测试（mux 产物再探，轨种/几何/样片数对得上）；
-  目标输出路径矩阵（avc/hevc/vp9 同名 video.mp4，其余 == 固件片源名）。
+  目标输出路径矩阵（avc/hevc/vp9 同名 video.mp4，其余 == 固件片源名）；
+  端到端冒烟（合成小 mp4 → 完整 `run_transcode_job` → 产物可被同轮子解回）。
+- UI 健壮性（“解码中 0/0 卡死”教训）：转码页运行时每帧 `request_repaint`
+  （否则 eframe 按需重绘，进度/完成/报错永远刷不出来）；worker 包
+  `catch_unwind`，panic 落袋为 `Finished(Err)`；`try_recv` 遇
+  `Disconnected` 直接判失败，不装活。
 - 已知残留口径差（诚实记录）：h263/mpeg2v 的 GUI 自测是**本家编解码**
   自 roundtrip，固件侧是异箱解码器（h263-rs / filmcraft-mpeg2v）；
   跨箱一致性靠 U 盘真机/QEMU 人工闭环（待补：把 GUI 产物拷进矩阵镜像跑一遍

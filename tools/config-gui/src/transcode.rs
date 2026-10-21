@@ -520,6 +520,11 @@ impl App {
         use rust_i18n::t;
         // 先收 worker 进度（UI 线程只 try_recv，不阻塞）。
         self.poll_transcode_job();
+        // 任务跑着就一直要帧：eframe 按需重绘，不主动要就永远停在
+        // 点击那一帧，进度/完成/报错全都刷不出来（“0/0 卡死”的真凶之一）。
+        if self.transcode.running() {
+            ui.ctx().request_repaint();
+        }
         ui.heading(t!("transcode.heading"));
         ui.small(t!("transcode.hint"));
         ui.add_space(8.0);
@@ -632,21 +637,30 @@ impl App {
     /// worker 进度轮询 + 收尾（worker 线程落盘，UI 只报状态）。
     pub(crate) fn poll_transcode_job(&mut self) {
         use rust_i18n::t;
+        use std::sync::mpsc::TryRecvError;
         let mut finished: Option<Result<JobOut, String>> = None;
         let mut progress = None;
+        let mut dead = false;
         if let Some(job) = self.transcode.job.as_mut() {
-            while let Ok(msg) = job.rx.try_recv() {
-                match msg {
-                    JobMsg::Progress { done, total } => progress = Some((done, total)),
-                    JobMsg::Stage(s) => {
+            loop {
+                match job.rx.try_recv() {
+                    Ok(JobMsg::Progress { done, total }) => progress = Some((done, total)),
+                    Ok(JobMsg::Stage(s)) => {
                         self.transcode.status = match s {
                             JobStage::Decode => t!("transcode.stage_decode").into_owned(),
                             JobStage::Encode => t!("transcode.stage_encode").into_owned(),
                             JobStage::Mux => t!("transcode.stage_mux").into_owned(),
                         };
                     }
-                    JobMsg::Finished(r) => {
+                    Ok(JobMsg::Finished(r)) => {
                         finished = Some(r);
+                        break;
+                    }
+                    Err(TryRecvError::Empty) => break,
+                    // 发送端没了但没发 Finished = worker 线程 panic 或提前退出，
+                    // 不能停在“取消/解码中”装活。
+                    Err(TryRecvError::Disconnected) => {
+                        dead = true;
                         break;
                     }
                 }
@@ -654,6 +668,11 @@ impl App {
         }
         if let Some(p) = progress {
             self.transcode.progress = Some(p);
+        }
+        if dead && finished.is_none() {
+            finished = Some(Err(String::from(
+                "transcode worker gone without finish (likely panicked; see log)",
+            )));
         }
         if let Some(r) = finished {
             // 线程已发 Finished 即将退出，join 不阻塞；句柄收走免 detached 堆积。
@@ -714,13 +733,22 @@ impl App {
         let (tx, rx): (Sender<JobMsg>, Receiver<JobMsg>) = std::sync::mpsc::channel();
         let cancel = Arc::new(AtomicBool::new(false));
         let cancel_w = cancel.clone();
+        let tx2 = tx.clone();
+        let tx3 = tx.clone();
         let handle = std::thread::spawn(move || {
-            let stage = |s: JobStage| {
-                let _ = tx.send(JobMsg::Stage(s));
+            let stage = move |s: JobStage| {
+                let _ = tx2.send(JobMsg::Stage(s));
             };
-            let r = run_transcode_job(&source, target, &out_full, &cancel_w, stage, |d, t| {
-                let _ = tx.send(JobMsg::Progress { done: d, total: t });
-            });
+            let progress = move |d: usize, t: usize| {
+                let _ = tx3.send(JobMsg::Progress { done: d, total: t });
+            };
+            // panic 也必须落袋为 Finished(Err)，否则 UI 永远停在“解码中”。
+            let r = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                run_transcode_job(&source, target, &out_full, &cancel_w, stage, progress)
+            })) {
+                Ok(inner) => inner,
+                Err(_) => Err(String::from("transcode worker panicked")),
+            };
             let _ = tx.send(JobMsg::Finished(r));
         });
         self.transcode.job = Some(TranscodeJob {
@@ -849,8 +877,8 @@ pub(crate) fn run_transcode_job(
     target: TranscodeTarget,
     out_path: &str,
     cancel: &AtomicBool,
-    stage: impl Fn(JobStage),
-    progress: impl Fn(usize, usize),
+    mut stage: impl FnMut(JobStage),
+    mut progress: impl FnMut(usize, usize),
 ) -> Result<JobOut, String> {
     let bytes = std::fs::read(source).map_err(|e| format!("read source: {e}"))?;
     let lower = source.to_ascii_lowercase();
@@ -1486,5 +1514,58 @@ mod transcode_tests {
         assert_eq!(info.codec, "avc");
         assert_eq!((info.w, info.h), (64, 48));
         assert_eq!(info.n, 2);
+    }
+
+    /// 端到端冒烟：合成小 mp4 落盘 → 走完整 `run_transcode_job`（解复用→
+    /// 流式解码→缩放→编码→mux→落盘）→ 产物可被同轮子 demux 回读。
+    /// 覆盖生产路径的编排逻辑（进度/阶段/收尾），编解码正确性由各单项
+    /// roundtrip 锁死。
+    #[test]
+    fn run_job_end_to_end_avc() {
+        use std::sync::atomic::AtomicBool;
+        let dir = std::env::temp_dir().join(format!("uefi-player-tc-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let src = dir.join("in.mp4");
+        let out = dir.join("out").join("video.mp4");
+        // 源：2 帧 avc → mp4（与固件 demux 同 parser 可读）。
+        let st = encode_avc(&two_frames()).expect("avc");
+        let entry = avc_entry(&st.sps, &st.pps, 64, 48);
+        let samples: Vec<Mp4OutSample> = st
+            .samples
+            .iter()
+            .map(|x| Mp4OutSample {
+                keyframe: x.keyframe,
+                payload: length_prefixed_nals(&x.nalus),
+            })
+            .collect();
+        let mp4 = mux_mp4_video(entry, &samples, 64, 48, 30).expect("mux");
+        std::fs::write(&src, &mp4).expect("write src");
+        // 整管线（阶段/进度回调只计数，不卡线程）。
+        let mut stages = 0;
+        let mut last = (0usize, 0usize);
+        let cancel = AtomicBool::new(false);
+        let r = run_transcode_job(
+            &src.display().to_string(),
+            TranscodeTarget::Avc,
+            &out.display().to_string(),
+            &cancel,
+            |_| {
+                stages += 1;
+            },
+            |d, t| {
+                last = (d, t);
+            },
+        );
+        let out_info = r.expect("run_transcode_job");
+        assert!(stages >= 2, "want decode+encode/mux stages");
+        assert_eq!(last.0, last.1);
+        assert!(last.0 >= 2, "want frame-level progress, got {last:?}");
+        let produced = std::fs::read(&out_info.path).expect("read output");
+        assert!(produced.len() > 1024, "output too small");
+        // 产物回读：2 样片 avc1。
+        let (n, keys) = demux_check(&produced, "avc1");
+        assert_eq!(n, 2);
+        assert!(keys >= 1);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
