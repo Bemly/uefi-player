@@ -789,10 +789,12 @@ impl App {
         }
     }
 
-    /// 右下悬浮动作条：圆形像素图标按钮（用户拍板：文字改图标，最边上是明暗开关）。
+    /// 右下悬浮动作条：圆形像素图标按钮（用户拍板：文字改图标）。
     /// 轮子结论：`GlassButton` 只吃文本，库内无图标件；故空文本圆钮（`icon()`
     /// 方垫 + `accessible_name` + 悬停提示保可访问性）+ 原语线条图标，
     /// 图标色取描边字同色（暗白/亮黑），注释说明。
+    /// 布局（用户拍板，像图二）：5 图标连体胶囊（打开→保存→另存为→重置→语言），
+    /// 明暗开关单独成圆、隔 8px 摆最边上。
     pub(crate) fn action_buttons(&mut self, ui: &mut egui::Ui) -> Action {
         let mut act = Action::None;
         let col = if self.dark {
@@ -800,33 +802,39 @@ impl App {
         } else {
             egui::Color32::BLACK
         };
-        // 顺序：打开 → 保存 → 另存为 → 重置 → 语言 → 明暗（最边上）。
-        if Self::icon_btn(ui, t!("toolbar.open").into_owned(), icon_folder, col).clicked() {
-            act = Action::Open;
-        }
-        if Self::icon_btn(ui, t!("toolbar.save").into_owned(), icon_save, col).clicked() {
-            act = Action::Save;
-        }
-        if Self::icon_btn(ui, t!("toolbar.save_as").into_owned(), icon_save_as, col).clicked() {
-            act = Action::SaveAs;
-        }
-        if Self::icon_btn(ui, t!("toolbar.reset").into_owned(), icon_reset, col).clicked() {
-            act = Action::Reset;
-        }
-        ui.add_space(6.0);
-        let lang = if self.zh { "EN" } else { "中文" }.to_owned();
-        if Self::icon_btn(ui, lang, icon_globe, col).clicked() {
-            act = Action::ToggleLang;
-        }
-        // 明暗开关摆最边上：深色下给太阳（切浅色），浅色下给月亮（切深色）。
-        let (theme_tip, theme_icon) = if self.dark {
-            (t!("toolbar.to_light").into_owned(), icon_sun as IconPaint)
-        } else {
-            (t!("toolbar.to_dark").into_owned(), icon_moon as IconPaint)
-        };
-        if Self::icon_btn(ui, theme_tip, theme_icon, col).clicked() {
-            act = Action::ToggleTheme;
-        }
+        ui.horizontal(|ui| {
+            egui_glass::GlassToolbar::new(self.bar_style()).show(ui, |ui| {
+                // 连体胶囊：打开 → 保存 → 另存为 → 重置 → 语言。
+                if Self::icon_btn(ui, t!("toolbar.open").into_owned(), icon_folder, col).clicked() {
+                    act = Action::Open;
+                }
+                if Self::icon_btn(ui, t!("toolbar.save").into_owned(), icon_save, col).clicked() {
+                    act = Action::Save;
+                }
+                if Self::icon_btn(ui, t!("toolbar.save_as").into_owned(), icon_save_as, col)
+                    .clicked()
+                {
+                    act = Action::SaveAs;
+                }
+                if Self::icon_btn(ui, t!("toolbar.reset").into_owned(), icon_reset, col).clicked() {
+                    act = Action::Reset;
+                }
+                let lang = if self.zh { "EN" } else { "中文" }.to_owned();
+                if Self::icon_btn(ui, lang, icon_globe, col).clicked() {
+                    act = Action::ToggleLang;
+                }
+            });
+            ui.add_space(8.0);
+            // 明暗开关单独成圆：深色下给太阳（切浅色），浅色下给月亮（切深色）。
+            let (theme_tip, theme_icon) = if self.dark {
+                (t!("toolbar.to_light").into_owned(), icon_sun as IconPaint)
+            } else {
+                (t!("toolbar.to_dark").into_owned(), icon_moon as IconPaint)
+            };
+            if Self::icon_btn(ui, theme_tip, theme_icon, col).clicked() {
+                act = Action::ToggleTheme;
+            }
+        });
         act
     }
 
@@ -1119,9 +1127,7 @@ impl eframe::App for App {
             .order(egui::Order::Foreground)
             .anchor(egui::Align2::RIGHT_BOTTOM, egui::vec2(-16.0, -64.0))
             .show(ui.ctx(), |ui| {
-                egui_glass::GlassToolbar::new(self.bar_style()).show(ui, |ui| {
-                    act = self.action_buttons(ui);
-                });
+                act = self.action_buttons(ui);
             });
 
         self.do_action(ui.ctx(), act);
