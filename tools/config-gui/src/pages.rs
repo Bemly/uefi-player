@@ -354,7 +354,7 @@ impl App {
                     ui.add_space(10.0);
                     ui.label(t!("wallpaper.format"));
                     self.cfg.wallpaper.format = self.format_row(ui, self.cfg.wallpaper.format);
-                    ui.small(t!("wallpaper.format_hint"));
+                    ui.small(format_desc(self.cfg.wallpaper.format));
                     ui.add_space(10.0);
                     ui.label(t!("wallpaper.popup_freeze"));
                     let froze = self.switch_row(
