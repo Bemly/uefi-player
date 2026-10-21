@@ -27,10 +27,10 @@ impl App {
                 ui.heading(t!("accel.heading"));
                 ui.add_space(4.0);
                 ui.label(t!("accel.level"));
-                // 档位滑杆：0-8 拨 `ALL` 下标，文本行同步显示当前档 + 说明。
+                // 档位滑杆：0-28 拨 `ALL` 下标，文本行同步显示当前档 + 说明。
                 let cur = self.cfg.accel.level;
                 let accel_label = format!("{}: {}", cur.file_str(), level_desc(cur));
-                egui_glass::GlassSlider::new(&mut self.accel_f, 0.0..=8.0)
+                egui_glass::GlassSlider::new(&mut self.accel_f, 0.0..=28.0)
                     .text(accel_label)
                     .step_by(1.0)
                     .style(if self.dark {
@@ -40,24 +40,8 @@ impl App {
                     })
                     .show(ui);
                 self.cfg.accel.level =
-                    AccelLevel::ALL[self.accel_f.round().clamp(0.0, 8.0) as usize];
+                    AccelLevel::ALL[self.accel_f.round().clamp(0.0, 28.0) as usize];
                 ui.small(t!("accel.auto_level"));
-                ui.add_space(10.0);
-                ui.label(t!("accel.decode"));
-                ui.small(t!("accel.decode_hint"));
-                ui.add_space(4.0);
-                // 三家各一行：三态单选用 GlassButton 行（与同页 workers 三态同形）。
-                ui.label("hevc");
-                self.cfg.accel.decode.hevc = self.decode_row(ui, self.cfg.accel.decode.hevc);
-                ui.small(decode_desc(self.cfg.accel.decode.hevc));
-                ui.add_space(4.0);
-                ui.label("vp9");
-                self.cfg.accel.decode.vp9 = self.decode_row(ui, self.cfg.accel.decode.vp9);
-                ui.small(decode_desc(self.cfg.accel.decode.vp9));
-                ui.add_space(4.0);
-                ui.label("h263");
-                self.cfg.accel.decode.h263 = self.decode_row(ui, self.cfg.accel.decode.h263);
-                ui.small(decode_desc(self.cfg.accel.decode.h263));
                 ui.add_space(10.0);
                 ui.label(t!("accel.mode"));
                 ui.horizontal(|ui| {
@@ -485,15 +469,6 @@ impl App {
                 ui.small(t!("sum.hint"));
                 ui.add_space(8.0);
                 ui.label(t!("sum.accel", v = self.cfg.accel.level.file_str()));
-                ui.label(t!(
-                    "sum.decode",
-                    v = format!(
-                        "{}/{}/{}",
-                        self.cfg.accel.decode.hevc.file_str(),
-                        self.cfg.accel.decode.vp9.file_str(),
-                        self.cfg.accel.decode.h263.file_str(),
-                    )
-                ));
                 ui.label(t!("sum.render", v = self.cfg.render.mode.file_str()));
                 if self.cfg.render.mode == RenderMode::Blt {
                     ui.label(t!("sum.blt", v = self.cfg.render.blt_op.file_str()));

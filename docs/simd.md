@@ -1,4 +1,4 @@
-# SIMD 矩阵（`accel.level` 真分发 + `[accel.decode]` 三键）
+# SIMD 矩阵（`accel.level` 真分发；解码三家单比特跟随全局）
 
 > P2 落点：`config::copy_width()`。bench 只出数（`HWBENCH`），矩阵做选择；
 > `auto` = CPUID/XCR0 探最高可用（`resolve_accel`，开机一次）。
@@ -8,12 +8,19 @@
 | `accel.level` | 搬运位宽 | 实现 |
 |---|---|---|
 | `scalar` | u64 步进 | `copy_block_u64`（纯标量，最兼容） |
-| `sse2`/`ssse3`/`sse41`/`sse42` | 128 位 | `copy_block_x128`（`movdqu`，同宽） |
-| `avx` | 128 位 VEX | `copy_block_v128`（`vmovdqu` + `vzeroupper`） |
-| `avx2` | 256 位 | `copy_block_y256`（`vmovdqu` + `vzeroupper`） |
-| `avx512` | 512 位 | `copy_block_z512`（`vmovdqu8` + `vzeroupper`） |
+| `sse`/`sse2`/`sse3`/`ssse3`/`sse41`/`sse42` | 128 位 | `copy_block_x128`（`movdqu`，同宽） |
+| `popcnt`/`aes`/`pclmulqdq`/`lzcnt`/`movbe`/`rdrand`/`rdseed`/`sha`/`gfni` | 128 位 | 同上（标量/密码类不加宽搬运，按基线下限同宽处理） |
+| `avx`/`f16c` | 128 位 VEX | `copy_block_v128`（`vmovdqu` + `vzeroupper`） |
+| `fma`/`avx2`/`bmi1`/`bmi2`/`avxvnni` | 256 位 | `copy_block_y256`（`vmovdqu` + `vzeroupper`） |
+| `avx512f`/`avx512cd`/`avx512dq`/`avx512bw`/`avx512vl` | 512 位 | `copy_block_z512`（`vmovdqu8` + `vzeroupper`） |
 
-- 显式档位超硬件：警告 + 钳到硬件最大，不断 boot（`resolve_accel`）。
+- 全集 29 档（含 `auto`，按 CPUID 叶序排，`target_feature` 小写无点形命名，
+  老 `"avx512"` 按 `avx512f` 照读）；`tbm`/`sse4a` 为 AMD 专有指令
+  （QEMU `qemu64` 无对应 CPUID 位），明确不收——收了也探不到，恒钳住。
+- 标量/密码类（`popcnt`/`aes`/`pclmulqdq`/`sha`/`gfni`/`lzcnt`/`movbe`/
+  `rdrand`/`rdseed`）与 BMI（`bmi1`/`bmi2`）本身不加宽向量搬运：
+  前者按下限 X128 处理，后者按时代下限 Y256 处理（缺 AVX2 即被钳住）。
+  显式档位超硬件：警告 + 钳到硬件最大，不断 boot（`resolve_accel`）。
 - `auto` 取硬件最大；`effective_accel` = `min(配置, 硬件)` 语义经 `copy_width` 落地。
 
 ## 选路位置
@@ -24,16 +31,17 @@
 - `blt_loop` / `direct_loop`：经 `upload_frame` 自动分发。
 - `hw_bench` / `gop_simd`：保持全矩阵实测（bench 用，不参与选择）。
 
-## 解码 SIMD 接线（`[accel.decode]` 三键，`resolve_accel` 末尾同推）
+## 解码 SIMD 接线（三家单比特跟随全局，无独立开关）
 
-> 单比特语义：各家 `auto` = 跟随全局（`level=scalar` 则关，其余开）；
-> 显式 `scalar`/`max` 覆盖全局。`max` 用硬件探到的最高推（无视全局钳制，
-> 搬运与解码独立选路）。串口 `accel: decode simd hevc=… vp9=… h263=…`
-> 供 QEMU 矩阵断言（`accel-decode-switches` + `hevc-probe` 的 boot_expect）。
+> 单比特语义：`copy_width() == U64`（即 `level=scalar`）则三家全关，其余全开。
+> 串口 `accel: decode simd hevc=… vp9=… h263=…` 值全跟随全局，
+> 供 QEMU 矩阵断言（`hevc-probe` 的 boot_expect）。
+> ee2ccad 的 `[accel.decode]` 三键新区已回滚（GUI/固件/schema/矩阵同步摘除；
+> 窗口期写出的旧表直接忽略，不断解析）。
 
 | 家 | 开关接收端 | 开时上限 | 关时 | 硬件门 |
 |---|---|---|---|---|
-| `hevc` | `rusty_h265::accel::{force_scalar,force_isa}` | `Baseline`/`Sse41`/`Avx2`（`auto` 按 `copy_width()`，`max` 按硬件最高） | 标量双胞胎 | 固件门（轮内无第二套 CPUID/XCR0 探） |
+| `hevc` | `rusty_h265::accel::{force_scalar,force_isa}` | `Baseline`/`Sse41`/`Avx2`（按 `copy_width()` 推；`V128` 取下最高档 `Sse41`） | 标量双胞胎 | 固件门（轮内无第二套 CPUID/XCR0 探） |
 | `vp9` | `vp9dec::simd::set_simd_allowed` | 轮子 AVX2 max（`avx2_enabled` 再验硬件） | 顺序标量 | 轮内 CPUID/XCR0 镜像门（含首探幂等自开 XSAVE；std 另有 env knob） |
 | `h263` | `h263_rs_yuv::bt601` + `h263_rs_deblock::deblock` 的 `set_simd_enabled`（两开关同推） | wide SSE2 基线核 | 标量 twin（`simd` 特性关时调用即 no-op） | 无（SSE2 是 x86-64 psABI 基线，无 XCR0 依赖；双路逐字节一致已锁死） |
 
@@ -41,7 +49,8 @@
   首解前各保一次；vp9 轮内首探自保第三道，h263 不需要）。
 - 悬空历史：此前 vp9 的 `set_simd_allowed` 与 h263 两 `set_simd_enabled`
   在固件侧零调用——vp9 缺省开（轮内默认 true，自带硬件门故正确但不受控），
-  h263 缺省关（no_std fail-closed，静默标量）。本轮接上线后三家皆受控。
+  h263 缺省关（no_std fail-closed，静默标量）。接上线后三家皆受控
+  （单比特跟随全局，无独立开关可拧）。
 
 ## AVC 解码（标量 shipped；SIMD 待上游解禁）
 

@@ -40,16 +40,16 @@ filmcraft-mpeg2v = { path = "third_party/filmcraft-mpeg2v", default-features = f
 # VP9 解码（mp4/壁纸片源用；pure-Rust clean-room，上游 0.1.1 尚无 no_std 分层，
 # 本仓 vendor 到 third_party/vp9dec 后自 port 标量路 + AVX2 整数核（x86_64 常编，
 # 无特性门，`avx2_enabled` 运行时门），见该目录 VENDOR.md；
-# 零依赖、无 C/FFI、无全局分配器；`[accel.decode] vp9` 做单比特开关
-# （`scalar`=关/其余=开，`resolve_accel` 按 `copy_width()` 单比特语义，
-# 显式键覆盖），AVX2 跑前过轮内 CPUID/XCR0 门（含首探幂等自开 XSAVE）；
+# 零依赖、无 C/FFI、无全局分配器；解码 SIMD 单比特跟随全局 `[accel] level`
+# （`scalar`=关/其余=开，`resolve_accel` 按 `copy_width()` 推，无独立开关），
+# AVX2 跑前过轮内 CPUID/XCR0 门（含首探幂等自开 XSAVE）；
 # 线程并行（tile/loop_filter）恒走顺序路；输出 Y/U/V 三平面行优先）。
 vp9dec = { path = "third_party/vp9dec", default-features = false }
 # H.263 解码（FLV Sorenson Spark/壁纸片源用；pure-Rust，上游未发 crates.io，
 # 本仓 vendor 到 third_party/h263-rs 后自 port 标量路 + `simd` 下 wide 整数核，
-# 见该目录 VENDOR.md；`simd` 开：`[accel.decode] h263` 做 `yuv`+`deblock` 两开关
-# 同推（`scalar`=关/其余=开，`resolve_accel` 按 `copy_width()` 单比特语义，
-# 显式键覆盖），SSE2 基线无 XSAVE 门；
+# 见该目录 VENDOR.md；`simd` 开：`yuv`+`deblock` 两开关同推，
+# 单比特跟随全局 `[accel] level`（`scalar`=关/其余=开，无独立开关），
+# SSE2 基线无 XSAVE 门；
 # 帧输出 planar YUV（DecodedPicture::as_yuv）+ RGBA（yuv420_to_rgba），校验和
 # 口径先定死为 md5(Y 平面)+md5(RGBA 输出)，QEMU h263-probe 与 diag 项后继再接。
 h263-rs = { path = "third_party/h263-rs/h263", default-features = false }

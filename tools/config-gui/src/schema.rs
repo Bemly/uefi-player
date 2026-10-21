@@ -10,17 +10,73 @@ pub(crate) enum AccelLevel {
     #[default]
     Auto,
     Scalar,
+    Sse,
     Sse2,
+    Sse3,
     Ssse3,
     Sse41,
     Sse42,
+    Popcnt,
+    Aes,
+    Pclmulqdq,
     Avx,
+    F16c,
+    Fma,
     Avx2,
-    Avx512,
+    Bmi1,
+    Bmi2,
+    Lzcnt,
+    Movbe,
+    Rdrand,
+    Rdseed,
+    Sha,
+    Gfni,
+    #[serde(alias = "avx512")]
+    Avx512f,
+    Avx512cd,
+    Avx512dq,
+    Avx512bw,
+    Avx512vl,
+    Avxvnni,
 }
 
 impl AccelLevel {
-    pub(crate) const ALL: [Self; 9] = [
+    /// 全集（CPUID 叶序，`target_feature` 小写无点形；`tbm`/`sse4a` 为 AMD 专有，
+    /// QEMU `qemu64` 无，明确不收，见 `docs/simd.md`）。
+    pub(crate) const ALL: [Self; 29] = [
+        Self::Auto,
+        Self::Scalar,
+        Self::Sse,
+        Self::Sse2,
+        Self::Sse3,
+        Self::Ssse3,
+        Self::Sse41,
+        Self::Sse42,
+        Self::Popcnt,
+        Self::Aes,
+        Self::Pclmulqdq,
+        Self::Avx,
+        Self::F16c,
+        Self::Fma,
+        Self::Avx2,
+        Self::Bmi1,
+        Self::Bmi2,
+        Self::Lzcnt,
+        Self::Movbe,
+        Self::Rdrand,
+        Self::Rdseed,
+        Self::Sha,
+        Self::Gfni,
+        Self::Avx512f,
+        Self::Avx512cd,
+        Self::Avx512dq,
+        Self::Avx512bw,
+        Self::Avx512vl,
+        Self::Avxvnni,
+    ];
+    /// 主笛卡尔代表集（9 档，旧全集口径：`avx512`→`avx512f` 改名后仍占一位；
+    /// 全量 29 档进 `accel_levels_roundtrip` 表，不进主笛卡尔，避 3 倍膨胀）。
+    pub(crate) const REPRESENTATIVE: [Self; 9] = [
         Self::Auto,
         Self::Scalar,
         Self::Sse2,
@@ -29,47 +85,44 @@ impl AccelLevel {
         Self::Sse42,
         Self::Avx,
         Self::Avx2,
-        Self::Avx512,
+        Self::Avx512f,
     ];
     pub(crate) fn file_str(self) -> &'static str {
         match self {
             Self::Auto => "auto",
             Self::Scalar => "scalar",
+            Self::Sse => "sse",
             Self::Sse2 => "sse2",
+            Self::Sse3 => "sse3",
             Self::Ssse3 => "ssse3",
             Self::Sse41 => "sse41",
             Self::Sse42 => "sse42",
+            Self::Popcnt => "popcnt",
+            Self::Aes => "aes",
+            Self::Pclmulqdq => "pclmulqdq",
             Self::Avx => "avx",
+            Self::F16c => "f16c",
+            Self::Fma => "fma",
             Self::Avx2 => "avx2",
-            Self::Avx512 => "avx512",
+            Self::Bmi1 => "bmi1",
+            Self::Bmi2 => "bmi2",
+            Self::Lzcnt => "lzcnt",
+            Self::Movbe => "movbe",
+            Self::Rdrand => "rdrand",
+            Self::Rdseed => "rdseed",
+            Self::Sha => "sha",
+            Self::Gfni => "gfni",
+            Self::Avx512f => "avx512f",
+            Self::Avx512cd => "avx512cd",
+            Self::Avx512dq => "avx512dq",
+            Self::Avx512bw => "avx512bw",
+            Self::Avx512vl => "avx512vl",
+            Self::Avxvnni => "avxvnni",
         }
     }
-    /// 滑杆档位 0-8（`ALL` 的下标，`Auto=0`）。
+    /// 滑杆档位 0-28（`ALL` 的下标，`Auto=0`）。
     pub(crate) fn index(self) -> usize {
         Self::ALL.iter().position(|&v| v == self).unwrap_or(0)
-    }
-}
-
-/// `[accel.decode]` 单家解码 SIMD 开关（与固件 `DecodeSimd` 同构）：
-/// `Auto` = 跟随全局 `level`（scalar 关/其余开），`Scalar` = 强制标量，
-/// `Max` = 强制轮子上限。老文件缺表缺键按 `Auto` 照读。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub(crate) enum DecodeSimd {
-    #[default]
-    Auto,
-    Scalar,
-    Max,
-}
-
-impl DecodeSimd {
-    pub(crate) const ALL: [Self; 3] = [Self::Auto, Self::Scalar, Self::Max];
-    pub(crate) fn file_str(self) -> &'static str {
-        match self {
-            Self::Auto => "auto",
-            Self::Scalar => "scalar",
-            Self::Max => "max",
-        }
     }
 }
 
@@ -243,27 +296,14 @@ pub(crate) fn parse_fps(s: &str) -> FpsPolicy {
 #[serde(default)]
 pub(crate) struct AccelConfig {
     pub(crate) level: AccelLevel,
-    /// 细粒度解码开关（`[accel.decode]` 三键；缺表缺键全 `Auto`=跟随 `level`）。
-    #[serde(default)]
-    pub(crate) decode: AccelDecode,
 }
 
 impl Default for AccelConfig {
     fn default() -> Self {
         Self {
             level: AccelLevel::Auto,
-            decode: AccelDecode::default(),
         }
     }
-}
-
-/// `[accel.decode]`：三家解码器各一键（与固件 `AccelDecode` 同构）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(default)]
-pub(crate) struct AccelDecode {
-    pub(crate) hevc: DecodeSimd,
-    pub(crate) vp9: DecodeSimd,
-    pub(crate) h263: DecodeSimd,
 }
 
 /// `[render.tune]`：矩阵全部数字旋钮（无 auto 维度，改完存盘即生效）。

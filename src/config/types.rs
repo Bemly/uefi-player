@@ -7,19 +7,43 @@ use alloc::string::{String, ToString};
 use serde::{Deserialize, Serialize};
 
 /// 指令集加速档位。`Auto` = 运行时探 CPUID/XCR0 取最高可用。
+/// 全集按 CPUID 叶序排（`ALL` 下标即滑杆档位）：x86 UEFI 可探的 28 档；
+/// `tbm`/`sse4a` 为 AMD 专有（QEMU `qemu64` 无），明确不收（见 `docs/simd.md`）。
+/// 老文件 `"avx512"` 按 `avx512f` 照读（`alias`，不断旧配置）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum AccelLevel {
     #[default]
     Auto,
     Scalar,
+    Sse,
     Sse2,
+    Sse3,
     Ssse3,
     Sse41,
     Sse42,
+    Popcnt,
+    Aes,
+    Pclmulqdq,
     Avx,
+    F16c,
+    Fma,
     Avx2,
-    Avx512,
+    Bmi1,
+    Bmi2,
+    Lzcnt,
+    Movbe,
+    Rdrand,
+    Rdseed,
+    Sha,
+    Gfni,
+    #[serde(alias = "avx512")]
+    Avx512f,
+    Avx512cd,
+    Avx512dq,
+    Avx512bw,
+    Avx512vl,
+    Avxvnni,
 }
 
 impl AccelLevel {
@@ -27,70 +51,68 @@ impl AccelLevel {
         match self {
             Self::Auto => 0,
             Self::Scalar => 1,
-            Self::Sse2 => 2,
-            Self::Ssse3 => 3,
-            Self::Sse41 => 4,
-            Self::Sse42 => 5,
-            Self::Avx => 6,
-            Self::Avx2 => 7,
-            Self::Avx512 => 8,
+            Self::Sse => 2,
+            Self::Sse2 => 3,
+            Self::Sse3 => 4,
+            Self::Ssse3 => 5,
+            Self::Sse41 => 6,
+            Self::Sse42 => 7,
+            Self::Popcnt => 8,
+            Self::Aes => 9,
+            Self::Pclmulqdq => 10,
+            Self::Avx => 11,
+            Self::F16c => 12,
+            Self::Fma => 13,
+            Self::Avx2 => 14,
+            Self::Bmi1 => 15,
+            Self::Bmi2 => 16,
+            Self::Lzcnt => 17,
+            Self::Movbe => 18,
+            Self::Rdrand => 19,
+            Self::Rdseed => 20,
+            Self::Sha => 21,
+            Self::Gfni => 22,
+            Self::Avx512f => 23,
+            Self::Avx512cd => 24,
+            Self::Avx512dq => 25,
+            Self::Avx512bw => 26,
+            Self::Avx512vl => 27,
+            Self::Avxvnni => 28,
         }
     }
     pub(crate) fn from_u8(v: u8) -> Self {
         match v {
             1 => Self::Scalar,
-            2 => Self::Sse2,
-            3 => Self::Ssse3,
-            4 => Self::Sse41,
-            5 => Self::Sse42,
-            6 => Self::Avx,
-            7 => Self::Avx2,
-            8 => Self::Avx512,
+            2 => Self::Sse,
+            3 => Self::Sse2,
+            4 => Self::Sse3,
+            5 => Self::Ssse3,
+            6 => Self::Sse41,
+            7 => Self::Sse42,
+            8 => Self::Popcnt,
+            9 => Self::Aes,
+            10 => Self::Pclmulqdq,
+            11 => Self::Avx,
+            12 => Self::F16c,
+            13 => Self::Fma,
+            14 => Self::Avx2,
+            15 => Self::Bmi1,
+            16 => Self::Bmi2,
+            17 => Self::Lzcnt,
+            18 => Self::Movbe,
+            19 => Self::Rdrand,
+            20 => Self::Rdseed,
+            21 => Self::Sha,
+            22 => Self::Gfni,
+            23 => Self::Avx512f,
+            24 => Self::Avx512cd,
+            25 => Self::Avx512dq,
+            26 => Self::Avx512bw,
+            27 => Self::Avx512vl,
+            28 => Self::Avxvnni,
             _ => Self::Auto,
         }
     }
-}
-
-/// `[accel.decode]` 单家解码 SIMD 开关（`hevc`/`vp9`/`h263` 三键，各自独立）。
-/// - `Auto`（默认，老文件缺键照此）：跟随全局 `level`，`scalar`=关、其余=开；
-/// - `Scalar`：强制标量路（哪怕全局开了高档）；
-/// - `Max`：强制轮子上限（哪怕全局是 `scalar`，取硬件探到的最高可用）。
-/// 注意这不是第二套 ISA 档位：`vp9`/`h263` 只有开关语义（开=轮子 max，
-/// 关=标量双胞胎），`hevc` 开时取的上限仍是既有映射
-/// （`copy_width`/`hw_max` → `Baseline`/`Sse41`/`Avx2`）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum DecodeSimd {
-    #[default]
-    Auto,
-    Scalar,
-    Max,
-}
-
-impl DecodeSimd {
-    pub(crate) fn as_u8(self) -> u8 {
-        match self {
-            Self::Auto => 0,
-            Self::Scalar => 1,
-            Self::Max => 2,
-        }
-    }
-    pub(crate) fn from_u8(v: u8) -> Self {
-        match v {
-            1 => Self::Scalar,
-            2 => Self::Max,
-            _ => Self::Auto,
-        }
-    }
-}
-
-/// `[accel.decode]`：三家解码器各一键（缺表/缺键全按 `Auto` 照读，不断旧配置）。
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
-#[serde(default)]
-pub struct AccelDecode {
-    pub hevc: DecodeSimd,
-    pub vp9: DecodeSimd,
-    pub h263: DecodeSimd,
 }
 
 /// 渲染路径。
@@ -157,7 +179,9 @@ impl WorkersMode {
 }
 
 /// 帧搬运位宽（P2 真分发的落点）：`accel.level` 只管“档位语义”，
-/// 真正上屏/播放走这个位宽。128 位档（SSE2~SSE4.2）同宽，AVX 是 VEX-128。
+/// 真正上屏/播放走这个位宽。SSE 系同宽 128（标量/密码类档按基线下限同宽处理），
+/// AVX/F16C 是 VEX-128，AVX2/FMA/BMI/AVXVNNI 是 256，AVX512 系是 512。
+/// 档位→位宽映射见 `super::level_width`。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CopyWidth {
     U64 = 1,
@@ -349,9 +373,6 @@ pub enum BltOpKind {
 #[serde(default)]
 pub struct AccelConfig {
     pub level: AccelLevel,
-    /// 细粒度解码开关（`[accel.decode]` 三键；缺表缺键全 `Auto`=跟随 `level`）。
-    #[serde(default)]
-    pub decode: AccelDecode,
 }
 
 pub(crate) const fn default_frames() -> u32 {

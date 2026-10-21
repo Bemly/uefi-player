@@ -8,13 +8,33 @@ pub(crate) fn level_desc(v: AccelLevel) -> String {
     match v {
         AccelLevel::Auto => t!("accel.desc_auto"),
         AccelLevel::Scalar => t!("accel.desc_scalar"),
+        AccelLevel::Sse => t!("accel.desc_sse"),
         AccelLevel::Sse2 => t!("accel.desc_sse2"),
+        AccelLevel::Sse3 => t!("accel.desc_sse3"),
         AccelLevel::Ssse3 => t!("accel.desc_ssse3"),
         AccelLevel::Sse41 => t!("accel.desc_sse41"),
         AccelLevel::Sse42 => t!("accel.desc_sse42"),
+        AccelLevel::Popcnt => t!("accel.desc_popcnt"),
+        AccelLevel::Aes => t!("accel.desc_aes"),
+        AccelLevel::Pclmulqdq => t!("accel.desc_pclmulqdq"),
         AccelLevel::Avx => t!("accel.desc_avx"),
+        AccelLevel::F16c => t!("accel.desc_f16c"),
+        AccelLevel::Fma => t!("accel.desc_fma"),
         AccelLevel::Avx2 => t!("accel.desc_avx2"),
-        AccelLevel::Avx512 => t!("accel.desc_avx512"),
+        AccelLevel::Bmi1 => t!("accel.desc_bmi1"),
+        AccelLevel::Bmi2 => t!("accel.desc_bmi2"),
+        AccelLevel::Lzcnt => t!("accel.desc_lzcnt"),
+        AccelLevel::Movbe => t!("accel.desc_movbe"),
+        AccelLevel::Rdrand => t!("accel.desc_rdrand"),
+        AccelLevel::Rdseed => t!("accel.desc_rdseed"),
+        AccelLevel::Sha => t!("accel.desc_sha"),
+        AccelLevel::Gfni => t!("accel.desc_gfni"),
+        AccelLevel::Avx512f => t!("accel.desc_avx512f"),
+        AccelLevel::Avx512cd => t!("accel.desc_avx512cd"),
+        AccelLevel::Avx512dq => t!("accel.desc_avx512dq"),
+        AccelLevel::Avx512bw => t!("accel.desc_avx512bw"),
+        AccelLevel::Avx512vl => t!("accel.desc_avx512vl"),
+        AccelLevel::Avxvnni => t!("accel.desc_avxvnni"),
     }
     .into_owned()
 }
@@ -90,15 +110,6 @@ pub(crate) fn vsync_desc(v: VsyncMode) -> String {
         VsyncMode::Static => t!("accel.desc_vsync_static"),
         VsyncMode::Half => t!("accel.desc_vsync_half"),
         VsyncMode::Off => t!("accel.desc_vsync_off"),
-    }
-    .into_owned()
-}
-
-pub(crate) fn decode_desc(v: DecodeSimd) -> String {
-    match v {
-        DecodeSimd::Auto => t!("accel.desc_decode_auto"),
-        DecodeSimd::Scalar => t!("accel.desc_decode_scalar"),
-        DecodeSimd::Max => t!("accel.desc_decode_max"),
     }
     .into_owned()
 }

@@ -222,28 +222,41 @@ host 像素级回归（ffmpeg md5 + 标量/SIMD 双路一致）→
 `simd`+无 `std` 组合明确不支持（ twins 没 port，唯一非机械点是
 运行时 ISA 检测对接固件 CPUID 门禁），留待上游或另立项。
 
-### 7.5 解码 SIMD 细粒度开关（2026-10-21，`[accel.decode]` 三键）
+### 7.5 解码 SIMD 开关回滚 + 加速全量 29 档（2026-10-21，用户拍板）
 
-背景：全局 `[accel] level` 单滑杆只推了 hevc（`force_scalar`/`force_isa`）；
-vp9 的 `set_simd_allowed`、h263 yuv/deblock 的 `set_simd_enabled` 在固件侧
-零调用——vp9 缺省开（轮内默认 true，自带硬件门故正确但不受全局钳制），
-h263 缺省关（no_std fail-closed，静默标量）。
+背景：ee2ccad 加了 `[accel.decode]` 三键新区（hevc/vp9/h263 各一键，
+`auto`/`scalar`/`max`）；vp9 的 `set_simd_allowed`、h263 yuv/deblock 的
+`set_simd_enabled` 在固件侧此前零调用（vp9 缺省开、h263 缺省关），本轮才接上线。
 
-- 固件 `src/config.{mod,types}`：本轮把存量超限的 `src/config.rs`（1467 行）
-  按“schema 类型 vs 运行时生效值”拆成 `types.rs`（schema 枚举/结构体）+
-  `mod.rs`（原子存储/`load`/`resolve_accel`），各 <900 行。
-  新增 `DecodeSimd`（`auto`/`scalar`/`max`，小写序列化）+
-  `AccelDecode{hevc,vp9,h263}`（`#[serde(default)]`，老文件缺表缺键全 `auto`）。
-  `resolve_accel` 末尾按 `copy_width()` 单比特语义同推三家
-  （`auto`=跟随全局，显式键覆盖；`max` 用硬件探到的最高推，无视全局钳制），
-  串口 `accel: decode simd hevc=on/off vp9=… h263=…` 供矩阵断言。
-  固件 `Cargo.toml` 给 `h263-rs-yuv`/`h263-rs-deblock` 开 `simd` 特性
-  （wide 本就 `#![no_std]`，UEFI 构建已验）；vp9dec 无需特性（x86_64 核常编）。
-- GUI：加速页全局滑杆下方加三行（hevc/vp9/h263），三态单选用 GlassButton 行
-  （与同页 workers 三态同形，不用滑杆、故无 `*_f` 镜像），文案走 `locales/`，
-  摘要页加 `sum.decode` 行。`schema.rs` 与固件同构（字段名/枚举字符串一致）。
-- 矩阵：GUI `decode_roundtrip_matrix`（27 组合 + 老文件/半表兼容，不进主笛卡尔
-  避 27 倍膨胀）；QEMU 新 `accel-decode-switches` case（显式覆盖断言）+
-  `hevc-probe` boot_expect 加默认全开断言；runner `CORE` 的 `src/config.rs`
-  改为 `src/config/`（目录拆分后前缀仍命中）。
-- 接线语义表见 `docs/simd.md`“解码 SIMD 接线”节；`docs/config.md` 同步更新。
+- 回滚（用户拍板①）：ee2ccad 的三键新区全摘——固件 `DecodeSimd`/`AccelDecode`/
+  `DECODE_*` 原子存储/`decode_*()` 取值器、`load` 落盘三行、`cfg:` 日志三键段；
+  GUI `schema.rs` 同构对、`pages.rs` 加速页三行 + 摘要 `sum.decode` 行、
+  `text.rs::decode_desc`、`app.rs::decode_row`、中英 locales 各 6 键、
+  `rules decode_roundtrip_matrix`（主笛卡尔从未进三键，无 27 倍膨胀之忧）、
+  `docs/config.md`/`simd.md` 的 decode 小节、`matrix.toml accel-decode-switches`
+  case。保留：`resolve_accel` 末尾三家单比特跟随全局（`scalar`=关/其余=开，
+  按 `copy_width()` 推，`V128` 取 hevc 下最高档 `Sse41`）+ 串口
+  `accel: decode simd hevc=on/off vp9=… h263=…` 行（值全跟随全局，
+  `hevc-probe` boot_expect 断言保留，语义已是全局）；`load` 日志去三键段。
+  窗口期写出的 `[accel.decode]` 表双边直接忽略（serde 默认跳未知键），不断解析。
+- 全量 29 档（用户拍板②，“全部都要”）：`accel.level` 从 9 档扩到 28 档 + `auto`
+  （`scalar/sse/sse2/sse3/ssse3/sse41/sse42/popcnt/aes/pclmulqdq/avx/f16c/fma/
+  avx2/bmi1/bmi2/lzcnt/movbe/rdrand/rdseed/sha/gfni/avx512f/cd/dq/bw/vl/avxvnni`，
+  按 CPUID 叶序排，`target_feature` 小写无点形；老 `"avx512"` 按 `avx512f` 照读；
+  `tbm`/`sse4a` 为 AMD 专有、QEMU `qemu64` 无，明确不收）。
+  固件 `types.rs` ≡ GUI `schema.rs` 同构（`ALL`/`file_str`/`index`/`as_u8`/`from_u8`
+  全同步）；GlassSlider 改 `0.0..=28.0`/`step 1.0`，`accel_f` 镜像照旧
+  （另补 `sync_widgets` 漏掉的 `accel_f` 同步：读盘后滑杆不动会盖掉已载入档位）。
+  位宽映射（`level_width`，见 `docs/simd.md` 档位→位宽表）：sse 系→X128，
+  标量/密码类（popcnt/aes/pclmulqdq/lzcnt/movbe/rdrand/rdseed/sha/gfni）按下限
+  X128，avx/f16c→V128，avx2/fma/bmi/avxvnni→Y256，avx512 系→Z512。
+  `probe_max_width` 按 CPUID/XCR0 逐叶补全（复用 `avx_checker`/`common` 门控，
+  缺叶恒钳住，不断 boot）。
+- 矩阵：GUI 主笛卡尔保持 9 档代表集（`REPRESENTATIVE`，`avx512`→`avx512f` 改名
+  后仍占一位）不膨胀；全量 29 档进新 `accel_levels_roundtrip` 表（含 alias +
+  回滚兼容断言）。`matrix.toml` 头注释同步（`[accel] level` 全档口径）。
+- 分拆保持：回滚后 `src/config` 合计仍 >1000 行（`mod.rs` ~870 + `types.rs` ~745），
+  按行数口径不合回单文件。
+- 遗留：固件 `cargo build/clippy/fmt` 被 sibling 未提交的
+  `third_party/filmcraft-mpeg2v` 改动挡住（`idct.rs:48` `.round()` 在软浮点
+  no_std 下无此方法），本轮只改了注释未碰其代码，待其合入后重验固件侧。

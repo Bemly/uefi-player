@@ -36,7 +36,8 @@ pub(crate) struct App {
     /// 播放帧率滑杆镜像：0 = auto，1-240 = 限速，241 = max。
     /// `GlassSlider` 只要 `f32`，每帧写回 `cfg.play.fps`。
     pub(crate) play_f: f32,
-    /// 加速档位滑杆镜像：0-8 对应 `AccelLevel::ALL` 下标。
+    /// 加速档位滑杆镜像：0-28 对应 `AccelLevel::ALL` 下标（`sync_widgets` 随读盘同步，
+    /// 否则开档文件载入后滑杆仍停在旧位，下一帧会把已载入的档位盖掉）。
     pub(crate) accel_f: f32,
     /// 壁纸滑杆镜像：fps 1-30，frames 0-120（0 = 全播），preload 0-32（0 = 不封顶）。
     /// 库内滑杆只吃 `f32`，整数档用 round 镜像（见 Accel 页 `*_f` 字段）。
@@ -133,6 +134,7 @@ impl App {
     }
 
     pub(crate) fn sync_widgets(&mut self) {
+        self.accel_f = self.cfg.accel.level.index() as f32;
         self.play_f = match parse_fps(&self.cfg.play.fps) {
             FpsPolicy::Auto => 0.0,
             FpsPolicy::Max => 241.0,
@@ -179,20 +181,6 @@ impl App {
             }
             if self.option_button(ui, cur == MediaFormat::Raw, &t!("format.raw")) {
                 next = MediaFormat::Raw;
-            }
-        });
-        next
-    }
-
-    /// 解码开关行（三颗玻璃按钮，auto/scalar/max 三选一；hevc/vp9/h263 共用形状，
-    /// 与同页 workers 三态同式——单选用 GlassButton，不用滑杆，故无 `*_f` 镜像）。
-    pub(crate) fn decode_row(&mut self, ui: &mut egui::Ui, cur: DecodeSimd) -> DecodeSimd {
-        let mut next = cur;
-        ui.horizontal(|ui| {
-            for v in DecodeSimd::ALL {
-                if self.option_button(ui, cur == v, v.file_str()) {
-                    next = v;
-                }
             }
         });
         next

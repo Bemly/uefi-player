@@ -6,11 +6,13 @@
 //! ```toml
 //! version = 1
 //! [accel]
-//! level = "auto"
-//! [accel.decode]            # 三家解码 SIMD 各一键（缺表缺键全 auto=跟随 level）
-//! hevc = "auto"             # auto（scalar=关/其余=开）| scalar（强制标量）| max（强制轮子上限）
-//! vp9 = "auto"              # 同上（单比特开关：开=轮子 max，关=标量双胞胎）
-//! h263 = "auto"             # 同上（yuv/deblock 两开关同推）
+//! level = "auto"  # auto | scalar | sse | sse2 | sse3 | ssse3 | sse41 | sse42
+//!                 # | popcnt | aes | pclmulqdq | avx | f16c | fma | avx2
+//!                 # | bmi1 | bmi2 | lzcnt | movbe | rdrand | rdseed | sha | gfni
+//!                 # | avx512f | avx512cd | avx512dq | avx512bw | avx512vl | avxvnni
+//!                 # auto = 开机探最高可用；显式超硬件警告+钳住；老 "avx512" 按 avx512f 照读
+//!                 # 解码 SIMD 无独立开关：三家（hevc/vp9/h263）单比特跟随全局
+//!                 #（level=scalar 则关，其余开），见 `resolve_accel` 末尾
 //! [render]
 //! mode    = "auto"        # "auto" | "direct" | "blt"
 //! workers = "auto"        # "auto" | "bsp_only" | "all"（多核开关）
@@ -122,10 +124,6 @@ pub fn parse() -> (Config, Option<String>, bool) {
 // ---------- 生效值（原子存储；AP/任意处可读，无需 OnceLock） ----------
 
 static ACCEL: AtomicU8 = AtomicU8::new(0);
-/// `[accel.decode]` 三键生效值（各 0 = auto，1 = scalar，2 = max；缺键按 auto 照读）。
-static DECODE_HEVC: AtomicU8 = AtomicU8::new(0);
-static DECODE_VP9: AtomicU8 = AtomicU8::new(0);
-static DECODE_H263: AtomicU8 = AtomicU8::new(0);
 static RENDER: AtomicU8 = AtomicU8::new(0);
 static WORKERS: AtomicU8 = AtomicU8::new(0);
 static DIST: AtomicU8 = AtomicU8::new(0);
@@ -191,9 +189,6 @@ static MAX_ACCEL: AtomicU8 = AtomicU8::new(0);
 pub fn load() -> Option<String> {
     let (cfg, warn, has_schedule) = parse();
     ACCEL.store(cfg.accel.level.as_u8(), Ordering::Relaxed);
-    DECODE_HEVC.store(cfg.accel.decode.hevc.as_u8(), Ordering::Relaxed);
-    DECODE_VP9.store(cfg.accel.decode.vp9.as_u8(), Ordering::Relaxed);
-    DECODE_H263.store(cfg.accel.decode.h263.as_u8(), Ordering::Relaxed);
     RENDER.store(cfg.render.mode.as_u8(), Ordering::Relaxed);
     // workers/dist 搬家裁决：`[schedule]` 表存在用新位置，否则认 `[render]` 旧键
     // （缺表老文件；显式旧键给一行警告后照读，不写回）。
@@ -250,12 +245,9 @@ pub fn load() -> Option<String> {
     BOOT_STRICT.store(cfg.boot.strict as u8, Ordering::Relaxed);
     ASYNC_EXECUTOR.store(cfg.r#async.executor.as_u8(), Ordering::Relaxed);
     log::info!(
-        "cfg: version={} accel.level={:?} decode(hevc={:?} vp9={:?} h263={:?}) render.mode={:?} sched.backend={:?} workers={:?} dist={:?} vsync={:?} blt_op={:?} tune.frames={} measured(render={:?} workers={:?} dist={:?} vsync={:?} vhalf={} cores={}) play.fps={} play.fmt={:?} measured_max_fps={} wallpaper.fmt={:?} async.executor={:?} boot(auto={} win={} lin={} sh={} uki={} mac={} strict={})",
+        "cfg: version={} accel.level={:?} render.mode={:?} sched.backend={:?} workers={:?} dist={:?} vsync={:?} blt_op={:?} tune.frames={} measured(render={:?} workers={:?} dist={:?} vsync={:?} vhalf={} cores={}) play.fps={} play.fmt={:?} measured_max_fps={} wallpaper.fmt={:?} async.executor={:?} boot(auto={} win={} lin={} sh={} uki={} mac={} strict={})",
         cfg.version,
         cfg.accel.level,
-        cfg.accel.decode.hevc,
-        cfg.accel.decode.vp9,
-        cfg.accel.decode.h263,
         cfg.render.mode,
         cfg.schedule.backend,
         workers,
@@ -295,17 +287,6 @@ pub fn load() -> Option<String> {
 
 pub fn accel_level() -> AccelLevel {
     AccelLevel::from_u8(ACCEL.load(Ordering::Relaxed))
-}
-
-/// `[accel.decode]` 三键生效值（缺键按 `Auto`=跟随 `level` 照读）。
-pub fn decode_hevc() -> DecodeSimd {
-    DecodeSimd::from_u8(DECODE_HEVC.load(Ordering::Relaxed))
-}
-pub fn decode_vp9() -> DecodeSimd {
-    DecodeSimd::from_u8(DECODE_VP9.load(Ordering::Relaxed))
-}
-pub fn decode_h263() -> DecodeSimd {
-    DecodeSimd::from_u8(DECODE_H263.load(Ordering::Relaxed))
 }
 
 pub fn render_mode() -> RenderMode {
@@ -434,8 +415,8 @@ pub fn vsync_enabled() -> bool {
 /// 开机探一次硬件最大搬运位宽（P2）：先 `ensure_xsave_enabled`（CPL0 直接开，
 /// 幂等），再按 CPUID/XCR0 取最高可用。调一次，`upload_frame` 每次读结论。
 /// 必须在任何上屏/bench 之前调（`main` 里调，bench/播放只读）。
-/// 末尾把 `[accel]` 开关推进三家解码轮子：各家 `auto`=跟随全局
-/// （`scalar`=关/其余=开），显式 `scalar`/`max` 覆盖全局；
+/// 末尾把 `[accel]` 开关推进三家解码轮子：单比特跟随全局搬运位宽
+/// （`copy_width() == U64`（即 `level=scalar`）则关，其余开）；
 /// 首解前各轮子自保（`hevc_probe` 的幂等 `ensure` + vp9 轮内镜像门）保持。
 pub fn resolve_accel() {
     #[cfg(target_arch = "x86_64")]
@@ -454,40 +435,24 @@ pub fn resolve_accel() {
         }
         log::info!("accel: hardware max width = {:?}", max_width_name(max));
         // 解码轮子的运行时检测就是这道固件门（轮内无第二套 CPUID/XCR0 探）：
-        // `auto` 家按 `copy_width()`（= min(配置, 硬件)）推上限，首解前生效；
-        // 显式 `scalar` 驻标量双胞胎，显式 `max` 按硬件探到的最高推（无视全局
-        // 钳制，搬运与解码本就独立选路）。
-        // `V128`（AVX）在 hevc 轮侧无 VEX-128 档，取其下最高档 `Sse41`
+        // 三家单比特跟随全局 `copy_width()`（`scalar`=关/其余=开），首解前生效。
+        // `V128`（AVX/F16C）在 hevc 轮侧无 VEX-128 档，取其下最高档 `Sse41`
         //（AVX 机器恒有 SSE4.1，可安全执行）。
-        match decode_hevc() {
-            DecodeSimd::Scalar => rusty_h265::accel::force_scalar(),
-            DecodeSimd::Max => push_hevc_isa(hw_max_width()),
-            DecodeSimd::Auto => push_hevc_isa(copy_width()),
-        }
+        let on = copy_width() != CopyWidth::U64;
+        push_hevc_isa(copy_width());
         log::info!("accel: hevc decode isa = {}", rusty_h265::accel::describe());
         // vp9（`vp9dec::simd`，x86_64 内核常编，运行时单比特门）与
         // h263（`yuv`+`deblock` 的 `set_simd_enabled`，`simd` 特性下 wide 核，
-        // 关特性时调用即 no-op）：同推单比特语义（`scalar`=关/`max`=开，
-        // `auto`=跟随全局 `copy_width() != U64`）。
-        vp9dec::simd::set_simd_allowed(decode_on(decode_vp9()));
-        let h263_on = decode_on(decode_h263());
-        h263_rs_yuv::bt601::set_simd_enabled(h263_on);
-        h263_rs_deblock::deblock::set_simd_enabled(h263_on);
+        // 关特性时调用即 no-op）：同推单比特语义（`scalar`=关/其余=开）。
+        vp9dec::simd::set_simd_allowed(on);
+        h263_rs_yuv::bt601::set_simd_enabled(on);
+        h263_rs_deblock::deblock::set_simd_enabled(on);
         log::info!(
             "accel: decode simd hevc={} vp9={} h263={}",
-            onoff(decode_on(decode_hevc())),
-            onoff(decode_on(decode_vp9())),
-            onoff(h263_on),
+            onoff(on),
+            onoff(on),
+            onoff(on),
         );
-    }
-}
-
-/// 单家开关的开关量：`auto` 跟随全局（`scalar`=关/其余=开），显式键覆盖。
-fn decode_on(m: DecodeSimd) -> bool {
-    match m {
-        DecodeSimd::Auto => copy_width() != CopyWidth::U64,
-        DecodeSimd::Scalar => false,
-        DecodeSimd::Max => true,
     }
 }
 
@@ -517,22 +482,51 @@ pub fn copy_width() -> CopyWidth {
     if want as u8 > max as u8 { max } else { want }
 }
 
-/// 硬件探到的最大搬运位宽（`resolve_accel` 的结论；`max` 档解码开关用它推轮子
-/// 上限，无视全局 `level` 的钳制；搬运与解码本就独立选路）。
+/// 硬件探到的最大搬运位宽（`resolve_accel` 的结论；显式档位超它即警告+钳住）。
 fn hw_max_width() -> CopyWidth {
     CopyWidth::from_u8(MAX_ACCEL.load(Ordering::Relaxed))
 }
 
+/// 档位→搬运位宽（`target_feature` 小写无点形命名；位号依据 Intel SDM Vol.2A
+/// CPUID，见 `docs/simd.md` 档位→位宽表）：
+/// - `sse`~`sse42` → X128（128 位同宽；`sse` 早于 `sse2` 但 x86-64 恒有 SSE2，
+///   `copy_block_x128` 的 `movdqu` 可安全执行）；
+/// - `avx`/`f16c` → V128（VEX-128；F16C 本就要求 AVX，缺 AVX 即被钳住）；
+/// - `avx2`/`fma`/`bmi1`/`bmi2`/`avxvnni` → Y256（VEX-256 时代档；
+///   BMI 本是标量位操作，按时代下限同宽处理，缺 AVX2 即被钳住）；
+/// - `avx512f/cd/dq/bw/vl` → Z512（512 位；`vmovdqu8` 引擎，探针按 F+XCR0 门控）；
+/// - 标量/密码/计数类（`popcnt`/`aes`/`pclmulqdq`/`lzcnt`/`movbe`/`rdrand`/
+///   `rdseed`/`sha`/`gfni`）不加宽搬运，按 x86-64 基线下限 X128 处理。
 fn level_width(l: AccelLevel) -> CopyWidth {
     match l {
         AccelLevel::Auto => CopyWidth::X128,
         AccelLevel::Scalar => CopyWidth::U64,
-        AccelLevel::Sse2 | AccelLevel::Ssse3 | AccelLevel::Sse41 | AccelLevel::Sse42 => {
-            CopyWidth::X128
-        }
-        AccelLevel::Avx => CopyWidth::V128,
-        AccelLevel::Avx2 => CopyWidth::Y256,
-        AccelLevel::Avx512 => CopyWidth::Z512,
+        AccelLevel::Sse
+        | AccelLevel::Sse2
+        | AccelLevel::Sse3
+        | AccelLevel::Ssse3
+        | AccelLevel::Sse41
+        | AccelLevel::Sse42
+        | AccelLevel::Popcnt
+        | AccelLevel::Aes
+        | AccelLevel::Pclmulqdq
+        | AccelLevel::Lzcnt
+        | AccelLevel::Movbe
+        | AccelLevel::Rdrand
+        | AccelLevel::Rdseed
+        | AccelLevel::Sha
+        | AccelLevel::Gfni => CopyWidth::X128,
+        AccelLevel::Avx | AccelLevel::F16c => CopyWidth::V128,
+        AccelLevel::Fma
+        | AccelLevel::Avx2
+        | AccelLevel::Bmi1
+        | AccelLevel::Bmi2
+        | AccelLevel::Avxvnni => CopyWidth::Y256,
+        AccelLevel::Avx512f
+        | AccelLevel::Avx512cd
+        | AccelLevel::Avx512dq
+        | AccelLevel::Avx512bw
+        | AccelLevel::Avx512vl => CopyWidth::Z512,
     }
 }
 
@@ -548,6 +542,9 @@ fn max_width_name(w: CopyWidth) -> &'static str {
 
 /// CPUID/XCR0 探最高可用位宽（P2 矩阵的“探”；bench 只出数，选择看这里）。
 /// 判定位与 `hw_bench`/`gop_simd` 同源（AVX512 五位门、`check_avx_support`）。
+/// 读叶前先用最大叶号门控（与 `hw_bench::cpuid_simd` 同式，老 CPU 直接读
+/// 7 号叶/扩展叶会回落误报）：缺叶恒取低位宽，不断 boot。
+/// 各档位宽见 `level_width`；标量/密码类档不加宽（恒 ≤X128），探针只定上限。
 #[cfg(target_arch = "x86_64")]
 fn probe_max_width() -> CopyWidth {
     use core::arch::x86_64::{__cpuid, __cpuid_count, _xgetbv};
@@ -555,7 +552,12 @@ fn probe_max_width() -> CopyWidth {
     let c1 = __cpuid(1);
     let has7 = crate::diag::common::cpuid_max_basic() >= 7;
     let b7 = if has7 { __cpuid_count(7, 0).ebx } else { 0 };
-    // AVX512：硬件位 + OSXSAVE + XCR0 五位全开，缺一个执行就 #UD。
+    // 7 号叶 ECX（avxvnni/gfni）与扩展叶 0x80000001（ECX.5 lzcnt）不影响位宽上限
+    // （avxvnni/gfni 恒 ≤Y256 且必有同代 AVX2；lzcnt 是 X128 下限档），故不读；
+    // 真要读它们时必须先用 `cpuid_max_basic/_extended` 门控（`hw_bench` 同式）。
+    // AVX512：F 硬件位 + OSXSAVE + XCR0 五位全开，缺一个执行就 #UD。
+    // 注：Z512 引擎是 `vmovdqu8`（BW 编码），探针按 F 门控（与 `gop_simd` 同口径；
+    // 仅 F 无 BW 的硬件（KNL）不在本仓目标内，见 `docs/simd.md`）。
     if has7 && b7 & (1 << 16) != 0 && c1.ecx & (1 << 27) != 0 {
         let xcr0 = unsafe { _xgetbv(0) };
         const ZMM_MASK: u64 = (1 << 1) | (1 << 2) | (1 << 5) | (1 << 6) | (1 << 7);
@@ -563,12 +565,15 @@ fn probe_max_width() -> CopyWidth {
             return CopyWidth::Z512;
         }
     }
+    // Y256：AVX 门（`avx_checker`：AVX 硬件位 + OSXSAVE + XCR0.2）+ AVX2 硬件位。
     if crate::diag::avx_checker::check_avx_support() && has7 && b7 & (1 << 5) != 0 {
         return CopyWidth::Y256;
     }
+    // V128：AVX 门（F16C 本就要求 AVX，同门覆盖）。
     if crate::diag::avx_checker::check_avx_support() {
         return CopyWidth::V128;
     }
+    // X128：SSE2（x86-64 psABI 基线；sse/密码类档的下限）。
     if c1.edx & (1 << 26) != 0 {
         return CopyWidth::X128;
     }

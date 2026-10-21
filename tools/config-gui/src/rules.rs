@@ -109,12 +109,14 @@ mod blackbox_matrix {
         cfg
     }
 
-    /// 全档位笛卡尔回写：9 accel × 3 render × 3 workers × 4 dist × 4 vsync × 4 blt × 3 async × 3 sched，
+    /// 全档位笛卡尔回写：9 代表档 × 3 render × 3 workers × 4 dist × 4 vsync × 4 blt × 3 async × 3 sched，
     /// 序列化再解析必须逐字节等价（顺序/缺键都由 serde 保证，不许丢字段）。
+    /// 代表集见 `AccelLevel::REPRESENTATIVE`（旧 9 档口径，`avx512`→`avx512f` 改名后仍占一位）；
+    /// 全量 29 档另见 `accel_levels_roundtrip` 表，不进主笛卡尔，避 3 倍膨胀。
     #[test]
     fn schema_roundtrip_matrix() {
         let mut n = 0;
-        for a in AccelLevel::ALL {
+        for a in AccelLevel::REPRESENTATIVE {
             for m in [RenderMode::Auto, RenderMode::Direct, RenderMode::Blt] {
                 for w in WorkersMode::ALL {
                     for d in DistMode::ALL {
@@ -150,10 +152,7 @@ mod blackbox_matrix {
     ) {
         let cfg = FileConfig {
             version: 1,
-            accel: AccelConfig {
-                level: a,
-                decode: AccelDecode::default(),
-            },
+            accel: AccelConfig { level: a },
             render: RenderConfig {
                 mode: m,
                 workers: WorkersMode::Auto,
@@ -685,39 +684,34 @@ mod blackbox_matrix {
         assert_eq!(kept.render.workers, WorkersMode::All);
     }
 
-    /// `[accel.decode]` 三键回写（3³ = 27 组合；不进主笛卡尔，避免 27 倍膨胀）+
-    /// 老文件缺表缺键按 auto 照读（= 跟随全局，不炸旧配置）。
+    /// 加速全量 29 档回写（`ALL` 逐档 `file_str` 照读照写，不丢字段；
+    /// 老文件 `"avx512"` 按 `avx512f` 照读，不断旧配置）。
     #[test]
-    fn decode_roundtrip_matrix() {
+    fn accel_levels_roundtrip() {
         let mut n = 0;
-        for h in DecodeSimd::ALL {
-            for v in DecodeSimd::ALL {
-                for g in DecodeSimd::ALL {
-                    let mut cfg = FileConfig::default();
-                    cfg.accel.decode.hevc = h;
-                    cfg.accel.decode.vp9 = v;
-                    cfg.accel.decode.h263 = g;
-                    let back: FileConfig =
-                        toml::from_str(&toml::to_string(&cfg).unwrap()).unwrap();
-                    assert_eq!(back.accel.decode.hevc, h);
-                    assert_eq!(back.accel.decode.vp9, v);
-                    assert_eq!(back.accel.decode.h263, g);
-                    assert_eq!(back, cfg);
-                    n += 1;
-                }
-            }
+        for a in AccelLevel::ALL {
+            let mut cfg = FileConfig::default();
+            cfg.accel.level = a;
+            let text = toml::to_string(&cfg).unwrap();
+            assert!(text.contains(a.file_str()), "{a:?} missing in {text}");
+            let back: FileConfig = toml::from_str(&text).unwrap();
+            assert_eq!(back.accel.level, a);
+            assert_eq!(back, cfg);
+            n += 1;
         }
-        assert_eq!(n, 27);
-        // 老文件：无 `[accel.decode]` 表 → 三键全 auto（跟随全局）。
+        assert_eq!(n, 29);
+        // 老文件 `"avx512"`（改名前的写法）按 `avx512f` 照读。
         let legacy: FileConfig =
-            toml::from_str("version = 1\n[accel]\nlevel = \"scalar\"\n").unwrap();
-        assert_eq!(legacy.accel.decode.hevc, DecodeSimd::Auto);
-        assert_eq!(legacy.accel.decode.vp9, DecodeSimd::Auto);
-        assert_eq!(legacy.accel.decode.h263, DecodeSimd::Auto);
-        // 半表：只写一键，其余 auto。
-        let partial: FileConfig = toml::from_str("[accel.decode]\nvp9 = \"max\"\n").unwrap();
-        assert_eq!(partial.accel.decode.vp9, DecodeSimd::Max);
-        assert_eq!(partial.accel.decode.hevc, DecodeSimd::Auto);
-        assert_eq!(partial.accel.decode.h263, DecodeSimd::Auto);
+            toml::from_str("version = 1\n[accel]\nlevel = \"avx512\"\n").unwrap();
+        assert_eq!(legacy.accel.level, AccelLevel::Avx512f);
+        // 缺键老文件按 auto 照读（现行为不变）。
+        let missing: FileConfig = toml::from_str("version = 1\n[accel]\n").unwrap();
+        assert_eq!(missing.accel.level, AccelLevel::Auto);
+        // 回滚兼容：ee2ccad 窗口期写出的 `[accel.decode]` 表直接忽略，不断解析。
+        let rolled: FileConfig = toml::from_str(
+            "version = 1\n[accel]\nlevel = \"avx2\"\n[accel.decode]\nhevc = \"scalar\"\n",
+        )
+        .unwrap();
+        assert_eq!(rolled.accel.level, AccelLevel::Avx2);
     }
 }
