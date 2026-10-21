@@ -144,6 +144,16 @@ pub(crate) fn format_desc(v: MediaFormat) -> String {
     .into_owned()
 }
 
+/// 循环模式显示名（存盘仍用 `file_str` 小写串，与固件 `LoopMode` 同构）。
+pub(crate) fn loop_desc(v: LoopMode) -> String {
+    match v {
+        LoopMode::LoopSingle => t!("loop.desc_loop_single"),
+        LoopMode::LoopList => t!("loop.desc_loop_list"),
+        LoopMode::Once => t!("loop.desc_once"),
+    }
+    .into_owned()
+}
+
 /// 供片模式显示名（存盘仍用 `file_str` 小写串）。
 /// 多核（`mp_draw`）/动态调度/壁纸恒为 `clip`（见 `play.feed_hint` 文案）。
 pub(crate) fn feed_desc(v: FeedMode) -> String {

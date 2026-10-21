@@ -1,9 +1,9 @@
 //! 转换编码页：片源 → 固件可播格式，落在图库（`player.toml` 同目录）。
 //!
-//! 流程：选源（图库文件/`rfd`/示例片）→ 整轨解码 → 缩到 1920x1080 →
-//! 七目标编码 → 固件布局落盘（`1080p/video.*`；avc/hevc/vp9 全进 MP4）。
+//! 流程：选源（图库文件/`rfd`/示例片）→ 整轨解复用 → 逐组解码→缩放→编码
+//! → 固件布局落盘（`1080p/video.*`；avc/hevc/vp9 全进 MP4）。
 //! 编码在 worker 线程跑（`mpsc` 进度回传），UI 只轮询不阻塞；取消用
-//! 原子旗标按组检查。内存纪律见 `codecs.rs` 头注释（关键帧分组 GROUP_CAP=60）。
+//! 原子旗标按组检查。内存纪律见 `codecs.rs` 头注释（关键帧分组 GROUP_CAP=120）。
 //! 件库约束同其它页（GlassButton/留白，无 TextEdit/ComboBox/滑杆；
 //! 路径显示只用 monospace 文本）。
 
@@ -119,9 +119,13 @@ impl TranscodeState {
     }
 }
 
-/// 组封顶（关键帧自然分组 + 硬切；60 帧×8MB ≈ 480MB 瞬时上限，
-/// 超了硬切 + 状态栏警告，不断转码）。
-pub(crate) const GROUP_CAP: usize = 60;
+/// 解码组封顶（关键帧自然分组 + 硬切；120 帧 720p ≈ 170MB 瞬时上限，
+/// 超了硬切 + 状态栏不断转码）。
+pub(crate) const GROUP_CAP: usize = 120;
+/// 编码段（组内再切；30 帧 1080p ≈ 240MB 瞬时上限）。
+pub(crate) const ENCODE_CHUNK: usize = 30;
+/// 连续解码错误上限（坏流保护，避免无限循环）。
+pub(crate) const MAX_DECODE_ERRORS: usize = 16;
 /// 输出几何（固件定死 1920x1080）。
 pub(crate) const OUT_W: u32 = 1920;
 pub(crate) const OUT_H: u32 = 1080;
@@ -133,15 +137,23 @@ struct TrackMeta {
     length_size: usize,
     annexb_prefix: Vec<u8>,
 }
-/// 窗内样片（压缩态；分组后解码；时长只用于窗内 fps 估算）。
-struct RawSample {
+/// 压缩样片（分组后解码；dur 只用于 fps 估算）。
+pub(crate) struct RawSample {
     dur: f64,
     keyframe: bool,
     payload: Vec<u8>,
 }
+/// 解复用产物（压缩态分组；裸帧不过组，内存封顶见 GROUP_CAP）。
+pub(crate) struct DemuxedTrack {
+    pub(crate) length_size: usize,
+    pub(crate) annexb_prefix: Vec<u8>,
+    pub(crate) groups: Vec<Vec<RawSample>>,
+    pub(crate) fps: u32,
+    pub(crate) total: usize,
+}
 
-/// MP4 源解码（want 三轨整轨；返回 YUV420 帧 + 实测 fps）。
-pub(crate) fn decode_mp4_track(data: &[u8], want: MediaFormat) -> Result<DecodedClip, String> {
+/// MP4 解复用（want 三轨；关键帧分组 + 硬切封顶；只收压缩负载，不解码）。
+pub(crate) fn demux_groups(data: &[u8], want: MediaFormat) -> Result<DemuxedTrack, String> {
     use shiguredo_mp4::boxes::SampleEntry;
     use shiguredo_mp4::demux::{Input, Mp4FileDemuxer};
     use shiguredo_mp4::TrackKind;
@@ -242,7 +254,7 @@ pub(crate) fn decode_mp4_track(data: &[u8], want: MediaFormat) -> Result<Decoded
     } else {
         30
     };
-    // 关键帧分组（硬切封顶）。
+    // 关键帧分组（硬切封顶；裸帧不过组）。
     let mut groups: Vec<Vec<RawSample>> = vec![Vec::new()];
     for r in raws {
         let g = groups.last().unwrap();
@@ -251,98 +263,137 @@ pub(crate) fn decode_mp4_track(data: &[u8], want: MediaFormat) -> Result<Decoded
         }
         groups.last_mut().unwrap().push(r);
     }
-    // 逐组解码（YUV420 紧凑帧；组播完即转段，不驻留）。
-    let mut frames: Vec<Yuv420> = Vec::new();
-    let (mut gw, mut gh) = (0u32, 0u32);
-    for g in &groups {
-        let mut gf = decode_group(&m, g, want)?;
-        if gw == 0 {
-            gw = gf.w;
-            gh = gf.h;
-        }
-        if gf.w != gw || gf.h != gh {
-            continue;
-        }
-        frames.append(&mut gf.frames);
+    let total: usize = groups.iter().map(|g| g.len()).sum();
+    if total == 0 {
+        return Err(String::from("mp4: no samples in track"));
     }
-    if frames.is_empty() {
-        return Err(String::from("mp4: no decodable frames"));
-    }
-    Ok(DecodedClip {
-        w: gw,
-        h: gh,
+    Ok(DemuxedTrack {
+        length_size: m.length_size,
+        annexb_prefix: m.annexb_prefix.clone(),
+        groups,
         fps,
-        frames,
+        total,
     })
 }
 
-/// 单组解码（SPS/PPS 前缀 + 整组 Annex-B/裸帧；形状与固件一致）。
-fn decode_group(m: &TrackMeta, g: &[RawSample], want: MediaFormat) -> Result<DecodedClip, String> {
-    match want {
+/// 单轨流式解码器（一把跑完整轨；组是关键帧自然边界 + 硬切封顶，
+/// 解码器状态跨组保持，开 GOP 的前向引用不断）。
+pub(crate) struct TrackDecoder {
+    kind: MediaFormat,
+    avc: Option<rusty_h264_decoder::Decoder>,
+    hevc: Option<rusty_h265::Decoder>,
+    vp9: Option<vp9dec::Decoder>,
+    prefix_done: bool,
+    w: u32,
+    h: u32,
+}
+
+impl TrackDecoder {
+    pub(crate) fn new(kind: MediaFormat) -> Self {
+        Self {
+            kind,
+            avc: matches!(kind, MediaFormat::Avc).then(rusty_h264_decoder::Decoder::new),
+            hevc: matches!(kind, MediaFormat::Hevc).then(rusty_h265::Decoder::new),
+            vp9: matches!(kind, MediaFormat::Vp9).then(vp9dec::Decoder::new),
+            prefix_done: false,
+            w: 0,
+            h: 0,
+        }
+    }
+
+    /// 收一帧（几何以首帧为准，其余跳过；调用方只管拼）。
+    fn push_frame(
+        &mut self,
+        w: u32,
+        h: u32,
+        y: Vec<u8>,
+        u: Vec<u8>,
+        v: Vec<u8>,
+        out: &mut Vec<Yuv420>,
+    ) {
+        if self.w == 0 {
+            self.w = w;
+            self.h = h;
+        }
+        if w != self.w || h != self.h {
+            return;
+        }
+        out.push(Yuv420 { w, h, y, u, v });
+    }
+}
+
+/// 单组解码（SPS/PPS 前缀只喂首组；HEVC 尾组外不 flush，结束调 finish；
+/// 形状与固件一致）。
+fn decode_group(
+    dec: &mut TrackDecoder,
+    d: &DemuxedTrack,
+    g: &[RawSample],
+) -> Result<Vec<Yuv420>, String> {
+    let mut annexb = Vec::new();
+    if !dec.prefix_done {
+        annexb.extend_from_slice(&d.annexb_prefix);
+        dec.prefix_done = true;
+    }
+    let mut frames = Vec::new();
+    let mut errs = 0usize;
+    match dec.kind {
         MediaFormat::Avc => {
-            let mut annexb = m.annexb_prefix.clone();
             for r in g {
-                annexb.extend(length_prefixed_to_annexb(&r.payload, m.length_size));
+                annexb.extend(length_prefixed_to_annexb(&r.payload, d.length_size));
             }
-            let decoded = rusty_h264_decoder::Decoder::new()
-                .decode_stream(&annexb)
-                .map_err(|e| format!("avc decode: {e:?}"))?;
-            let mut frames = Vec::new();
-            let (mut w, mut h) = (0u32, 0u32);
+            let decoded = match dec.avc.as_mut() {
+                Some(a) => a
+                    .decode_stream(&annexb)
+                    .map_err(|e| format!("avc decode: {e:?}"))?,
+                None => return Err(String::from("avc: no decoder")),
+            };
             for f in &decoded {
                 let planes = f.as_planes();
                 if !planes.is_tight() {
                     continue;
                 }
-                if w == 0 {
-                    w = f.width as u32;
-                    h = f.height as u32;
-                }
-                if f.width as u32 != w || f.height as u32 != h {
-                    continue;
-                }
-                frames.push(Yuv420 {
-                    w: f.width as u32,
-                    h: f.height as u32,
-                    y: planes.y.to_vec(),
-                    u: planes.u.to_vec(),
-                    v: planes.v.to_vec(),
-                });
+                dec.push_frame(
+                    f.width as u32,
+                    f.height as u32,
+                    planes.y.to_vec(),
+                    planes.u.to_vec(),
+                    planes.v.to_vec(),
+                    &mut frames,
+                );
             }
-            Ok(DecodedClip {
-                w,
-                h,
-                fps: 30,
-                frames,
-            })
+            Ok(frames)
         }
         MediaFormat::Hevc => {
-            let mut annexb = m.annexb_prefix.clone();
             for r in g {
-                annexb.extend(length_prefixed_to_annexb(&r.payload, m.length_size));
+                annexb.extend(length_prefixed_to_annexb(&r.payload, d.length_size));
             }
-            let mut dec = rusty_h265::Decoder::new();
-            dec.push_annexb(&annexb, None)
-                .map_err(|e| format!("hevc push: {e:?}"))?;
-            dec.flush();
-            let mut frames = Vec::new();
-            let (mut w, mut h) = (0u32, 0u32);
+            match dec.hevc.as_mut() {
+                Some(h) => h
+                    .push_annexb(&annexb, None)
+                    .map_err(|e| format!("hevc push: {e:?}"))?,
+                None => return Err(String::from("hevc: no decoder")),
+            }
             loop {
-                let f = match dec.next_frame() {
+                let f = match dec.hevc.as_mut() {
+                    Some(h) => h.next_frame(),
+                    None => return Err(String::from("hevc: no decoder")),
+                };
+                let f = match f {
                     Ok(f) => f,
                     Err(rusty_h265::Error::Eof) | Err(rusty_h265::Error::Again) => break,
-                    Err(_) => continue,
+                    Err(_) => {
+                        errs += 1;
+                        if errs >= MAX_DECODE_ERRORS {
+                            break;
+                        }
+                        continue;
+                    }
                 };
                 if f.bit_depth() != 8 {
                     continue;
                 }
-                if w == 0 {
-                    w = f.width as u32;
-                    h = f.height as u32;
-                }
-                if f.width as u32 != w || f.height as u32 != h {
-                    continue;
-                }
+                let w = f.width as u32;
+                let h = f.height as u32;
                 let mut yuv = Vec::new();
                 f.write_yuv(&mut yuv);
                 let ybytes = w as usize * h as usize;
@@ -355,29 +406,18 @@ fn decode_group(m: &TrackMeta, g: &[RawSample], want: MediaFormat) -> Result<Dec
                 if vpl.len() < uvbytes {
                     continue;
                 }
-                frames.push(Yuv420 {
-                    w,
-                    h,
-                    y: ypl.to_vec(),
-                    u: upl.to_vec(),
-                    v: vpl.to_vec(),
-                });
+                dec.push_frame(w, h, ypl.to_vec(), upl.to_vec(), vpl.to_vec(), &mut frames);
             }
-            Ok(DecodedClip {
-                w,
-                h,
-                fps: 30,
-                frames,
-            })
+            Ok(frames)
         }
         MediaFormat::Vp9 => {
-            let mut dec = vp9dec::Decoder::new();
-            let mut frames = Vec::new();
-            let (mut w, mut h) = (0u32, 0u32);
             for r in g {
-                let decoded = dec
-                    .decode_frame(&r.payload)
-                    .map_err(|e| format!("vp9 decode: {e:?}"))?;
+                let decoded = match dec.vp9.as_mut() {
+                    Some(v) => v
+                        .decode_frame(&r.payload)
+                        .map_err(|e| format!("vp9 decode: {e:?}"))?,
+                    None => return Err(String::from("vp9: no decoder")),
+                };
                 for d in decoded {
                     let Some(f) = d.frame else { continue };
                     if f.bit_depth != 8 || f.subsampling_x != 1 || f.subsampling_y != 1 {
@@ -391,31 +431,68 @@ fn decode_group(m: &TrackMeta, g: &[RawSample], want: MediaFormat) -> Result<Dec
                     else {
                         continue;
                     };
-                    if w == 0 {
-                        w = f.width;
-                        h = f.height;
-                    }
-                    if f.width != w || f.height != h {
-                        continue;
-                    }
-                    frames.push(Yuv420 {
-                        w,
-                        h,
-                        y: y.clone(),
-                        u: u.clone(),
-                        v: v.clone(),
-                    });
+                    dec.push_frame(
+                        f.width,
+                        f.height,
+                        y.clone(),
+                        u.clone(),
+                        v.clone(),
+                        &mut frames,
+                    );
                 }
             }
-            Ok(DecodedClip {
-                w,
-                h,
-                fps: 30,
-                frames,
-            })
+            Ok(frames)
         }
         _ => Err(String::from("mp4: unsupported track")),
     }
+}
+
+/// 收尾（HEVC flush 后排空；avc/vp9 无缓冲，直接空）。
+fn finish_decode(dec: &mut TrackDecoder) -> Result<Vec<Yuv420>, String> {
+    let mut frames = Vec::new();
+    if dec.hevc.is_none() {
+        return Ok(frames);
+    }
+    if let Some(hevc) = dec.hevc.as_mut() {
+        hevc.flush();
+    }
+    let mut errs = 0usize;
+    loop {
+        let f = match dec.hevc.as_mut() {
+            Some(h) => h.next_frame(),
+            None => return Err(String::from("hevc: no decoder")),
+        };
+        let f = match f {
+            Ok(f) => f,
+            Err(rusty_h265::Error::Eof) | Err(rusty_h265::Error::Again) => break,
+            Err(_) => {
+                errs += 1;
+                if errs >= MAX_DECODE_ERRORS {
+                    break;
+                }
+                continue;
+            }
+        };
+        if f.bit_depth() != 8 {
+            continue;
+        }
+        let w = f.width as u32;
+        let h = f.height as u32;
+        let mut yuv = Vec::new();
+        f.write_yuv(&mut yuv);
+        let ybytes = w as usize * h as usize;
+        let uvbytes = (w as usize).div_ceil(2) * (h as usize).div_ceil(2);
+        if yuv.len() < ybytes + uvbytes * 2 {
+            continue;
+        }
+        let (ypl, rest) = yuv.split_at(ybytes);
+        let (upl, vpl) = rest.split_at(uvbytes.min(rest.len()));
+        if vpl.len() < uvbytes {
+            continue;
+        }
+        dec.push_frame(w, h, ypl.to_vec(), upl.to_vec(), vpl.to_vec(), &mut frames);
+    }
+    Ok(frames)
 }
 
 impl App {
@@ -656,7 +733,117 @@ impl App {
     }
 }
 
+/// 编码累积器（流式：逐段 push，最后 finish 一次性包装；裸帧不过段）。
+#[derive(Default)]
+struct EncodeAcc {
+    avc: Option<AvcStream>,
+    hevc: Option<HevcStream>,
+    vp9: Vec<Vp9PacketData>,
+    theora_headers: Vec<Vec<u8>>,
+    theora_packets: Vec<Vec<u8>>,
+    bare: Vec<u8>,
+    qois: Vec<u8>,
+}
+
+impl EncodeAcc {
+    fn push(&mut self, target: TranscodeTarget, g: &[Yuv420]) -> Result<(), String> {
+        match target {
+            TranscodeTarget::Avc => {
+                let s = encode_avc(g)?;
+                if self.avc.is_none() {
+                    self.avc = Some(AvcStream {
+                        sps: s.sps.clone(),
+                        pps: s.pps.clone(),
+                        samples: Vec::new(),
+                    });
+                }
+                self.avc.as_mut().unwrap().samples.extend(s.samples);
+            }
+            TranscodeTarget::Hevc => {
+                let s = encode_hevc(g)?;
+                if self.hevc.is_none() {
+                    self.hevc = Some(HevcStream {
+                        vps: s.vps.clone(),
+                        sps: s.sps.clone(),
+                        pps: s.pps.clone(),
+                        samples: Vec::new(),
+                    });
+                }
+                self.hevc.as_mut().unwrap().samples.extend(s.samples);
+            }
+            TranscodeTarget::Vp9 => self.vp9.extend(encode_vp9(g)?),
+            TranscodeTarget::Theora => {
+                let t = encode_theora(g)?;
+                if self.theora_headers.is_empty() {
+                    self.theora_headers = t.header_packets;
+                }
+                self.theora_packets.extend(t.data_packets);
+            }
+            TranscodeTarget::H263 => self.bare.extend(encode_h263(g)?),
+            TranscodeTarget::Mpeg2v => self.bare.extend(encode_mpeg2v(g)?),
+            TranscodeTarget::Qois => {
+                for f in g {
+                    let rgba = yuv420_to_rgba(f);
+                    let q = qoi::encode_to_vec(&rgba.px, rgba.w, rgba.h)
+                        .map_err(|e| format!("qoi: {e:?}"))?;
+                    self.qois.extend_from_slice(&(q.len() as u32).to_le_bytes());
+                    self.qois.extend_from_slice(&q);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn finish(self, target: TranscodeTarget, fps: u32) -> Result<Vec<u8>, String> {
+        match target {
+            TranscodeTarget::Avc => {
+                let s = self.avc.ok_or_else(|| String::from("avc: no stream"))?;
+                let entry = avc_entry(&s.sps, &s.pps, OUT_W, OUT_H);
+                let samples: Vec<Mp4OutSample> = s
+                    .samples
+                    .iter()
+                    .map(|x| Mp4OutSample {
+                        keyframe: x.keyframe,
+                        payload: length_prefixed_nals(&x.nalus),
+                    })
+                    .collect();
+                mux_mp4_video(entry, &samples, OUT_W, OUT_H, fps)
+            }
+            TranscodeTarget::Hevc => {
+                let s = self.hevc.ok_or_else(|| String::from("hevc: no stream"))?;
+                let entry = hevc_entry(&s.vps, &s.sps, &s.pps, OUT_W, OUT_H, fps);
+                let samples: Vec<Mp4OutSample> = s
+                    .samples
+                    .iter()
+                    .map(|x| Mp4OutSample {
+                        keyframe: x.keyframe,
+                        payload: length_prefixed_nals(&x.nalus),
+                    })
+                    .collect();
+                mux_mp4_video(entry, &samples, OUT_W, OUT_H, fps)
+            }
+            TranscodeTarget::Vp9 => {
+                let entry = vp9_entry(OUT_W, OUT_H);
+                let samples: Vec<Mp4OutSample> = self
+                    .vp9
+                    .iter()
+                    .map(|x| Mp4OutSample {
+                        keyframe: x.keyframe,
+                        payload: x.data.clone(),
+                    })
+                    .collect();
+                mux_mp4_video(entry, &samples, OUT_W, OUT_H, fps)
+            }
+            TranscodeTarget::Theora => mux_ogg_theora(&self.theora_headers, &self.theora_packets),
+            TranscodeTarget::H263 | TranscodeTarget::Mpeg2v => Ok(self.bare),
+            TranscodeTarget::Qois => Ok(self.qois),
+        }
+    }
+}
+
 /// 后台转码主流程（worker 线程内跑；`stage` 报阶段，`progress` 报帧进度）。
+/// 流式：demux 分组 → 逐组解码→缩放→编码→释放（裸帧不过组，内存封顶）。
+#[allow(clippy::too_many_lines)]
 pub(crate) fn run_transcode_job(
     source: &str,
     target: TranscodeTarget,
@@ -668,177 +855,124 @@ pub(crate) fn run_transcode_job(
     let bytes = std::fs::read(source).map_err(|e| format!("read source: {e}"))?;
     let lower = source.to_ascii_lowercase();
     stage(JobStage::Decode);
-    // 解码到 YUV420（源尺寸）+ fps。
-    let clip = if lower.ends_with(".mp4") {
-        // 源轨按容器头选：avc/hevc/vp9 首个视频轨（与固件 `demux_mp4_track` 同顺序）。
-        decode_mp4_auto(&bytes)?
-    } else if lower.ends_with(".png")
-        || lower.ends_with(".jpg")
-        || lower.ends_with(".jpeg")
-        || lower.ends_with(".bmp")
-    {
-        let img = image::open(std::path::Path::new(source))
-            .map_err(|e| format!("image decode: {e}"))?
-            .to_rgba8();
-        let (w, h) = (img.width(), img.height());
-        let px = img.into_raw();
-        let rgba = RgbaFrame { w, h, px };
-        DecodedClip {
-            w,
-            h,
-            fps: 30,
-            frames: vec![rgba_to_yuv420(&rgba)],
+    let mut acc = EncodeAcc::default();
+    let mut done = 0usize;
+    let mut encoding = false;
+    let fps: u32;
+    if lower.ends_with(".mp4") {
+        // 源轨按容器头选：首个有样片的 avc/hevc/vp9 轨（与固件同顺序）。
+        let mut demuxed = None;
+        for want in [MediaFormat::Avc, MediaFormat::Hevc, MediaFormat::Vp9] {
+            match demux_groups(&bytes, want) {
+                Ok(d) if d.total > 0 => {
+                    demuxed = Some((want, d));
+                    break;
+                }
+                _ => continue,
+            }
         }
-    } else if lower.ends_with(".raw") {
-        if bytes.len() != 1920 * 1080 * 4 {
-            return Err(format!(
-                "raw: want 1920x1080 BGRA, got {} bytes",
-                bytes.len()
-            ));
+        let (want, d) = demuxed.ok_or_else(|| String::from("mp4: no avc/hevc/vp9 track"))?;
+        fps = d.fps;
+        let total = d.total;
+        let mut dec = TrackDecoder::new(want);
+        for g in &d.groups {
+            if cancel.load(Ordering::Relaxed) {
+                return Err(String::from("cancelled"));
+            }
+            let frames = decode_group(&mut dec, &d, g)?;
+            if !encoding && !frames.is_empty() {
+                stage(JobStage::Encode);
+                encoding = true;
+            }
+            for chunk in frames.chunks(ENCODE_CHUNK) {
+                if cancel.load(Ordering::Relaxed) {
+                    return Err(String::from("cancelled"));
+                }
+                let scaled: Vec<Yuv420> = chunk
+                    .iter()
+                    .map(|f| scale_yuv420(f, OUT_W, OUT_H))
+                    .collect();
+                acc.push(target, &scaled)?;
+                done += chunk.len();
+                progress(done, total);
+            }
         }
-        let mut px = vec![0u8; bytes.len()];
-        for (i, p) in bytes.as_chunks::<4>().0.iter().enumerate() {
-            px[i * 4] = p[2];
-            px[i * 4 + 1] = p[1];
-            px[i * 4 + 2] = p[0];
-            px[i * 4 + 3] = p[3];
+        // 尾部排空（HEVC flush；其余空）。
+        let tail = finish_decode(&mut dec)?;
+        if !tail.is_empty() {
+            stage(JobStage::Encode);
+            for chunk in tail.chunks(ENCODE_CHUNK) {
+                if cancel.load(Ordering::Relaxed) {
+                    return Err(String::from("cancelled"));
+                }
+                let scaled: Vec<Yuv420> = chunk
+                    .iter()
+                    .map(|f| scale_yuv420(f, OUT_W, OUT_H))
+                    .collect();
+                acc.push(target, &scaled)?;
+                done += chunk.len();
+                progress(done, total);
+            }
         }
-        let rgba = RgbaFrame {
-            w: 1920,
-            h: 1080,
-            px,
-        };
-        DecodedClip {
-            w: 1920,
-            h: 1080,
-            fps: 30,
-            frames: vec![rgba_to_yuv420(&rgba)],
+        if done == 0 {
+            return Err(String::from("mp4: no decodable frames"));
         }
     } else {
-        return Err(format!("unsupported source: {source}"));
-    };
-    if clip.frames.is_empty() {
-        return Err(String::from("no frames decoded"));
-    }
-    let fps = clip.fps;
-    // 缩到输出几何（组是关键帧自然边界；组首恒关键帧，拼接恒合法）。
-    let total = clip.frames.len();
-    let mut done = 0usize;
-    // 编码器按组重建；内存纪律见 codecs 头注释（组封顶 60）。
-    let mut groups: Vec<Vec<Yuv420>> = vec![Vec::new()];
-    for f in &clip.frames {
-        if groups.last().map(|g| g.len() >= GROUP_CAP).unwrap_or(false) {
-            groups.push(Vec::new());
+        // 静帧/裸帧：单帧直接进同一编码循环。
+        let rgba = if lower.ends_with(".png")
+            || lower.ends_with(".jpg")
+            || lower.ends_with(".jpeg")
+            || lower.ends_with(".bmp")
+        {
+            let img = image::open(std::path::Path::new(source))
+                .map_err(|e| format!("image decode: {e}"))?
+                .to_rgba8();
+            let (w, h) = (img.width(), img.height());
+            RgbaFrame {
+                w,
+                h,
+                px: img.into_raw(),
+            }
+        } else if lower.ends_with(".raw") {
+            if bytes.len() != 1920 * 1080 * 4 {
+                return Err(format!(
+                    "raw: want 1920x1080 BGRA, got {} bytes",
+                    bytes.len()
+                ));
+            }
+            let mut px = vec![0u8; bytes.len()];
+            for (i, p) in bytes.as_chunks::<4>().0.iter().enumerate() {
+                px[i * 4] = p[2];
+                px[i * 4 + 1] = p[1];
+                px[i * 4 + 2] = p[0];
+                px[i * 4 + 3] = p[3];
+            }
+            RgbaFrame {
+                w: 1920,
+                h: 1080,
+                px,
+            }
+        } else {
+            return Err(format!("unsupported source: {source}"));
+        };
+        let frames = [rgba_to_yuv420(&rgba)];
+        fps = 30;
+        let total = frames.len();
+        stage(JobStage::Encode);
+        for chunk in frames.chunks(ENCODE_CHUNK) {
+            let scaled: Vec<Yuv420> = chunk
+                .iter()
+                .map(|f| scale_yuv420(f, OUT_W, OUT_H))
+                .collect();
+            acc.push(target, &scaled)?;
+            done += chunk.len();
+            progress(done, total);
         }
-        groups
-            .last_mut()
-            .unwrap()
-            .push(scale_yuv420(f, OUT_W, OUT_H));
-    }
-    drop(clip);
-    let mut avc_stream: Option<AvcStream> = None;
-    let mut hevc_stream: Option<HevcStream> = None;
-    let mut vp9_samples: Vec<Vp9PacketData> = Vec::new();
-    let mut theora_packets: Vec<Vec<u8>> = Vec::new();
-    let mut theora_headers: Vec<Vec<u8>> = Vec::new();
-    let mut bare: Vec<u8> = Vec::new();
-    let mut qois: Vec<u8> = Vec::new();
-    stage(JobStage::Encode);
-    for g in &groups {
-        if cancel.load(Ordering::Relaxed) {
-            return Err(String::from("cancelled"));
-        }
-        match target {
-            TranscodeTarget::Avc => {
-                let s = encode_avc(g)?;
-                if avc_stream.is_none() {
-                    avc_stream = Some(AvcStream {
-                        sps: s.sps.clone(),
-                        pps: s.pps.clone(),
-                        samples: Vec::new(),
-                    });
-                }
-                avc_stream.as_mut().unwrap().samples.extend(s.samples);
-            }
-            TranscodeTarget::Hevc => {
-                let s = encode_hevc(g)?;
-                if hevc_stream.is_none() {
-                    hevc_stream = Some(HevcStream {
-                        vps: s.vps.clone(),
-                        sps: s.sps.clone(),
-                        pps: s.pps.clone(),
-                        samples: Vec::new(),
-                    });
-                }
-                hevc_stream.as_mut().unwrap().samples.extend(s.samples);
-            }
-            TranscodeTarget::Vp9 => vp9_samples.extend(encode_vp9(g)?),
-            TranscodeTarget::Theora => {
-                let t = encode_theora(g)?;
-                if theora_headers.is_empty() {
-                    theora_headers = t.header_packets;
-                }
-                theora_packets.extend(t.data_packets);
-            }
-            TranscodeTarget::H263 => bare.extend(encode_h263(g)?),
-            TranscodeTarget::Mpeg2v => bare.extend(encode_mpeg2v(g)?),
-            TranscodeTarget::Qois => {
-                for f in g {
-                    let rgba = yuv420_to_rgba(f);
-                    let q = qoi::encode_to_vec(&rgba.px, rgba.w, rgba.h)
-                        .map_err(|e| format!("qoi: {e:?}"))?;
-                    qois.extend_from_slice(&(q.len() as u32).to_le_bytes());
-                    qois.extend_from_slice(&q);
-                }
-            }
-        }
-        done += g.len();
-        progress(done, total);
     }
     // 容器包装 + 落盘。
     stage(JobStage::Mux);
-    let bytes = match target {
-        TranscodeTarget::Avc => {
-            let s = avc_stream.ok_or_else(|| String::from("avc: no stream"))?;
-            let entry = avc_entry(&s.sps, &s.pps, OUT_W, OUT_H);
-            let samples: Vec<Mp4OutSample> = s
-                .samples
-                .iter()
-                .map(|x| Mp4OutSample {
-                    keyframe: x.keyframe,
-                    payload: length_prefixed_nals(&x.nalus),
-                })
-                .collect();
-            mux_mp4_video(entry, &samples, OUT_W, OUT_H, fps)?
-        }
-        TranscodeTarget::Hevc => {
-            let s = hevc_stream.ok_or_else(|| String::from("hevc: no stream"))?;
-            let entry = hevc_entry(&s.vps, &s.sps, &s.pps, OUT_W, OUT_H, fps);
-            let samples: Vec<Mp4OutSample> = s
-                .samples
-                .iter()
-                .map(|x| Mp4OutSample {
-                    keyframe: x.keyframe,
-                    payload: length_prefixed_nals(&x.nalus),
-                })
-                .collect();
-            mux_mp4_video(entry, &samples, OUT_W, OUT_H, fps)?
-        }
-        TranscodeTarget::Vp9 => {
-            let entry = vp9_entry(OUT_W, OUT_H);
-            let samples: Vec<Mp4OutSample> = vp9_samples
-                .iter()
-                .map(|x| Mp4OutSample {
-                    keyframe: x.keyframe,
-                    payload: x.data.clone(),
-                })
-                .collect();
-            mux_mp4_video(entry, &samples, OUT_W, OUT_H, fps)?
-        }
-        TranscodeTarget::Theora => mux_ogg_theora(&theora_headers, &theora_packets)?,
-        TranscodeTarget::H263 | TranscodeTarget::Mpeg2v => bare,
-        TranscodeTarget::Qois => qois,
-    };
+    let bytes = acc.finish(target, fps)?;
+
     if let Some(parent) = std::path::Path::new(out_path).parent() {
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent).map_err(|e| format!("mkdir: {e}"))?;
@@ -988,17 +1122,6 @@ fn probe_mp4(data: &[u8]) -> Result<ProbeInfo, String> {
         n,
         dur_s: total_dur.round() as u64,
     })
-}
-
-/// MP4 自动选轨解码（avc → hevc → vp9 顺序，首个命中轨；与固件同顺序）。
-fn decode_mp4_auto(data: &[u8]) -> Result<DecodedClip, String> {
-    for want in [MediaFormat::Avc, MediaFormat::Hevc, MediaFormat::Vp9] {
-        match decode_mp4_track(data, want) {
-            Ok(clip) => return Ok(clip),
-            Err(_) => continue,
-        }
-    }
-    Err(String::from("mp4: no avc/hevc/vp9 track"))
 }
 
 /// MP4 输出样片（负载形态按编码定：avc/hevc 长度前缀，vp9 裸帧）。

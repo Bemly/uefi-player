@@ -11,12 +11,10 @@
 //!   （`make_encoder(&CodecParameters)` + `send_frame`/`receive_packet`/`flush`，
 //!   见 oxideav-theora 树内 `make_encoder_synthesizes_setup_from_ident_only` 用法）。
 //! - 容器：AVC 走 `shiguredo_mp4::Mp4FileMuxer`（与固件 demux 同轮子，
-//!   回读零口径差）；theora 走 `ogg` 组 OggS；vp9 走手写 IVF
-//!   （32 字节头 + 帧长/pts + 负载，20 行，无现货轮子，测试锁死）。
+//!   回读零口径差）；theora 走 `ogg` 组 OggS；vp9 裸帧直装 vpcC。
 //! - 内存纪律：40s@60fps 全预解码要 ~19GB，不可能；按关键帧分组
-//!   （`GROUP_CAP` 60 封顶，超了硬切 + 状态栏警告），组帧缩到 1920x1080 后
-//!   逐组过编码器（组首恒关键帧，拼接恒合法）；压缩包累积（小），
-//!   裸帧不过组不驻留。
+//!   （`GROUP_CAP` 120 封顶，超了硬切），组内 30 帧一段过编码器
+//!   （段首恒关键帧，拼接恒合法）；压缩包累积（小），裸帧不过组不驻留。
 //! - 几何：统一缩到 1920x1080（固件定死分辨率；1280x720→×1.5 纯放大，
 //!   `image::Triangle` 双线性；YUV420 按平面双线性手写，image 只吃打包 RGBA）。
 //! - 色彩：YUV↔RGBA 用 BT.601 全范围整数近似（正向与固件
@@ -38,14 +36,6 @@ pub(crate) struct RgbaFrame {
     pub(crate) w: u32,
     pub(crate) h: u32,
     pub(crate) px: Vec<u8>,
-}
-
-/// 解码产物（一路源 → 若干 YUV420 帧 + 帧率）。
-pub(crate) struct DecodedClip {
-    pub(crate) w: u32,
-    pub(crate) h: u32,
-    pub(crate) fps: u32,
-    pub(crate) frames: Vec<Yuv420>,
 }
 
 /// YUV420 → RGBA（正向与固件 `yuv420_to_bgra` 同式，只是通道换位）。
