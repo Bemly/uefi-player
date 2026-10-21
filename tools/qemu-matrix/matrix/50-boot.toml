@@ -1,0 +1,402 @@
+# 50-boot.toml：QEMU 黑盒矩阵分组（`matrix/` 目录，按用例前缀分组，合并后等价原 `matrix.toml`）。
+# 共 12 cases，单文件 ≤1000 行（AGENTS 口径）。新增 case 按前缀落对应文件，并写 `covers`。
+
+[[case]]
+name = "boot-chainload"
+covers = ["src/boot/", "patches/", "third_party/sprout"]
+ovmf = "release"
+timeout_sec = 300
+needs_chainload = true
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+workers = "bsp_only"
+dist = "static"
+vsync = "off"
+[play]
+fps = "max"
+[wallpaper]
+enable = false
+"""
+boot_expect = ["cfg: version=1", "idle: ready"]
+keys = [
+  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
+  { send = "0", wait_for = ["boot: 1 entries"], wait_after = 5 },
+]
+expect = ["boot: starting image", { pat = "cfg: version=1", count = 2 }, { pat = "idle: ready", count = 2 }]
+
+# BLS 组内排序：同 sort-key 下版本号大的在前（10.0 > 2.0 是数值比，不是字典序）。
+# 目录顺序是反的（aaa 在前），排完 [0] 必须是 New。
+[[case]]
+name = "boot-sort"
+covers = ["src/boot/", "patches/", "third_party/sprout"]
+ovmf = "release"
+timeout_sec = 180
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+workers = "bsp_only"
+dist = "static"
+vsync = "off"
+[play]
+fps = "max"
+[wallpaper]
+enable = false
+"""
+boot_expect = ["cfg: version=1", "idle: ready"]
+keys = [{ send = "x", wait_after = 3 }]
+expect = ["boot: 2 entries", "boot: [0] New", "boot: [1] Old"]
+
+[[case.extra_volumes]]
+  [[case.extra_volumes.files]]
+  path = "loader/entries/aaa.conf"
+  text = "title Old\nsort-key k\nversion 1.0\nefi /EFI/other/app.efi\n"
+  [[case.extra_volumes.files]]
+  path = "loader/entries/zzz.conf"
+  text = "title New\nsort-key k\nversion 2.0\nefi /EFI/other/app.efi\n"
+  [[case.extra_volumes.files]]
+  path = "EFI/other/app.efi"
+  efi = true
+
+# UKI 回退标题：test.efi 无 .uname 区，标题取文件名，照样 chainload（count x2）。
+[[case]]
+name = "boot-uki"
+covers = ["src/boot/", "patches/", "third_party/sprout"]
+ovmf = "release"
+timeout_sec = 300
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+workers = "bsp_only"
+dist = "static"
+vsync = "off"
+[play]
+fps = "max"
+[wallpaper]
+enable = false
+"""
+boot_expect = ["cfg: version=1", "idle: ready"]
+keys = [
+  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
+  { send = "0", wait_for = ["boot: 1 entries"], wait_after = 5 },
+]
+expect = ["boot: [0] test", "boot: starting image", { pat = "cfg: version=1", count = 2 }, { pat = "idle: ready", count = 2 }]
+
+[[case.extra_volumes]]
+  [[case.extra_volumes.files]]
+  path = "EFI/Linux/test.efi"
+  efi = true
+
+# UKI 多 profile：合成 UKI（2 个 profile），只验列出 + 标题区分，不真起。
+# 上游 version-sort：新版本在前（third-kernel > second-kernel），故 [0] 是 Second。
+[[case]]
+name = "boot-uki-profiles"
+covers = ["src/boot/", "patches/", "third_party/sprout"]
+ovmf = "release"
+timeout_sec = 180
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+workers = "bsp_only"
+dist = "static"
+vsync = "off"
+[play]
+fps = "max"
+[wallpaper]
+enable = false
+"""
+boot_expect = ["cfg: version=1", "idle: ready"]
+keys = [{ send = "x", wait_after = 3 }]
+expect = ["boot: 2 entries", "boot: [0] testos (Second)", "boot: [1] testos (First)"]
+
+[[case.extra_volumes]]
+  [[case.extra_volumes.files]]
+  path = "EFI/Linux/multi.efi"
+  asset = "tools/qemu-matrix/assets/multi-profile.efi"
+
+# 慢：HW bench 落盘工件（默认跳过，--include-slow 才跑）。
+[[case]]
+name = "hwbench-artifact"
+covers = ["src/diag/hw_bench.rs", "src/diag/gop_bench", "src/diag/gop_simd"]
+slow = true
+timeout_sec = 1500
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+workers = "bsp_only"
+dist = "static"
+vsync = "off"
+[play]
+fps = "max"
+[wallpaper]
+enable = false
+"""
+boot_expect = ["cfg: version=1", "idle: ready"]
+keys = [
+  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
+  { send = "p", wait_after = 3 },
+  { send = "8", wait_for = ["menu: ready"], wait_after = 10 },
+]
+expect = ["-- bench done --"]
+artifact = { glob = "HWBENCH*.TXT", contains = ["ticks"] }
+
+# --- 多卷自动发现（第二盘挂 hd2，见 extra_volumes） ---
+
+# Windows 跨盘 chainload：第二盘只有 bootmgfw（就是我们的 efi 改名），
+# 按 0 直接交权，第二遍 cfg + 待机证明跨盘 DevicePath + 跨盘读都通了。
+[[case]]
+name = "boot-windows-crossvol"
+covers = ["src/boot/", "patches/", "third_party/sprout"]
+ovmf = "release"
+timeout_sec = 300
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+workers = "bsp_only"
+dist = "static"
+vsync = "off"
+[play]
+fps = "max"
+[wallpaper]
+enable = false
+"""
+boot_expect = ["cfg: version=1", "idle: ready"]
+keys = [
+  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
+  { send = "0", wait_for = ["boot: 1 entries"], wait_after = 5 },
+]
+expect = ["boot: starting image", { pat = "cfg: version=1", count = 2 }, { pat = "idle: ready", count = 2 }]
+
+[[case.extra_volumes]]
+  [[case.extra_volumes.files]]
+  path = "EFI/Microsoft/Boot/bootmgfw.efi"
+  efi = true
+
+# 第二卷 BLS：other.conf 指第二卷自己的 app.efi，跨盘 chainload。
+[[case]]
+name = "boot-bls-secondvol"
+covers = ["src/boot/", "patches/", "third_party/sprout"]
+ovmf = "release"
+timeout_sec = 300
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+workers = "bsp_only"
+dist = "static"
+vsync = "off"
+[play]
+fps = "max"
+[wallpaper]
+enable = false
+"""
+boot_expect = ["cfg: version=1", "idle: ready"]
+keys = [
+  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
+  { send = "0", wait_for = ["boot: 1 entries"], wait_after = 5 },
+]
+expect = ["boot: starting image", { pat = "cfg: version=1", count = 2 }, { pat = "idle: ready", count = 2 }]
+
+[[case.extra_volumes]]
+  [[case.extra_volumes.files]]
+  path = "EFI/other/app.efi"
+  efi = true
+  [[case.extra_volumes.files]]
+  path = "loader/entries/other.conf"
+  text = "title Second Volume Entry\nefi /EFI/other/app.efi\n"
+
+# Linux 内核对发现：只验列出来（标题 + <linux> 标记进串口），不真起
+#（假内核不是有效 PE，起了也是 INVALID_IMAGE，不浪费时间）。
+[[case]]
+name = "boot-linux-detect"
+covers = ["src/boot/", "patches/", "third_party/sprout"]
+ovmf = "release"
+timeout_sec = 180
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+workers = "bsp_only"
+dist = "static"
+vsync = "off"
+[play]
+fps = "max"
+[wallpaper]
+enable = false
+"""
+boot_expect = ["cfg: version=1", "idle: ready"]
+keys = [{ send = "x", wait_after = 2 }]
+expect = ["boot: 1 entries", "vmlinuz-test", "<linux>"]
+
+[[case.extra_volumes]]
+  [[case.extra_volumes.files]]
+  path = "boot/vmlinuz-test"
+  zeros = 65536
+  [[case.extra_volumes.files]]
+  path = "boot/initramfs-test.img"
+  zeros = 65536
+
+# UEFI Shell 发现 + chainload（shellx64.efi 就是我们的 efi，起了算数）。
+[[case]]
+name = "boot-shell"
+covers = ["src/boot/", "patches/", "third_party/sprout"]
+ovmf = "release"
+timeout_sec = 300
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+workers = "bsp_only"
+dist = "static"
+vsync = "off"
+[play]
+fps = "max"
+[wallpaper]
+enable = false
+"""
+boot_expect = ["cfg: version=1", "idle: ready"]
+keys = [
+  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
+  { send = "0", wait_for = ["boot: 1 entries"], wait_after = 5 },
+]
+expect = ["boot: starting image", { pat = "cfg: version=1", count = 2 }, { pat = "idle: ready", count = 2 }]
+
+[[case.extra_volumes]]
+  [[case.extra_volumes.files]]
+  path = "EFI/shellx64.efi"
+  efi = true
+
+# OpenCore 链式接力：第二盘只有 OpenCore.efi（我们的 efi 改名），
+# 按 0 直接交权，第二遍 cfg + 待机证明跨盘 DevicePath + 跨盘读都通了。
+# 不扫通用 BOOTX64.EFI（那可能是我们自己，会自举死循环），只认固定路径。
+[[case]]
+name = "boot-macos"
+covers = ["src/boot/", "patches/", "third_party/sprout"]
+ovmf = "release"
+timeout_sec = 300
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+workers = "bsp_only"
+dist = "static"
+vsync = "off"
+[play]
+fps = "max"
+[wallpaper]
+enable = false
+"""
+boot_expect = ["cfg: version=1", "idle: ready"]
+keys = [
+  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
+  { send = "0", wait_for = ["boot: 1 entries"], wait_after = 5 },
+]
+expect = ["boot: [0] OpenCore <efi>", "boot: starting image", { pat = "cfg: version=1", count = 2 }, { pat = "idle: ready", count = 2 }]
+
+[[case.extra_volumes]]
+  [[case.extra_volumes.files]]
+  path = "EFI/OC/OpenCore.efi"
+  efi = true
+
+# boot counting 端到端：第二卷 test+2-0.conf 起一次，真改名成 test+1-1.conf
+#（`+left-done` 语义：decremented = left-1 + done+1，上游 BootCounter::render）。
+# 直调上游 BootCounterTarget::consume（SetInfo 原子改名）的 QEMU 证明；
+# 旧读旧写新删旧实现已删。工件在第二盘（artifact.volume = 2）。
+[[case]]
+name = "boot-counting"
+covers = ["src/boot/", "patches/", "third_party/sprout"]
+ovmf = "release"
+timeout_sec = 300
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+workers = "bsp_only"
+dist = "static"
+vsync = "off"
+[play]
+fps = "max"
+[wallpaper]
+enable = false
+"""
+boot_expect = ["cfg: version=1", "idle: ready"]
+keys = [
+  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
+  { send = "0", wait_for = ["boot: 1 entries"], wait_after = 5 },
+]
+expect = ["consumed try", "boot: starting image", { pat = "cfg: version=1", count = 2 }, { pat = "idle: ready", count = 2 }]
+artifact = { glob = "test+1-1.conf", contains = ["Chainload Counting"], volume = 2 }
+
+[[case.extra_volumes]]
+  [[case.extra_volumes.files]]
+  path = "EFI/other/app.efi"
+  efi = true
+  [[case.extra_volumes.files]]
+  path = "loader/entries/test+2-0.conf"
+  text = "title Chainload Counting Test\nefi /EFI/other/app.efi\n"
+
+# 严格模式：第二卷 BLS 被压住，只剩 Windows（索引 0 必须是它）。
+# 不加 strict 的话同一镜像会列出 2 项（other.conf 排第一），见 boot-bls-secondvol。
+[[case]]
+name = "boot-strict"
+covers = ["src/boot/", "patches/", "third_party/sprout"]
+ovmf = "release"
+timeout_sec = 180
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+workers = "bsp_only"
+dist = "static"
+vsync = "off"
+[play]
+fps = "max"
+[wallpaper]
+enable = false
+[boot]
+strict = true
+"""
+boot_expect = ["cfg: version=1", "idle: ready"]
+keys = [{ send = "x", wait_after = 3 }]
+expect = ["boot: 1 entries", "boot: [0] Windows Boot Manager <efi>"]
+
+[[case.extra_volumes]]
+  [[case.extra_volumes.files]]
+  path = "EFI/Microsoft/Boot/bootmgfw.efi"
+  efi = true
+  [[case.extra_volumes.files]]
+  path = "loader/entries/other.conf"
+  text = "title Other Volume Entry\nefi /EFI/other/app.efi\n"
+  [[case.extra_volumes.files]]
+  path = "EFI/other/app.efi"
+  efi = true

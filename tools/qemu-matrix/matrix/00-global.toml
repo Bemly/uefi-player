@@ -1,0 +1,48 @@
+# 00-global.toml：QEMU 黑盒矩阵全局配置 + 头注释（`matrix/` 目录入口）。
+# 其余分组文件只含 `[[case]]`，`[global]` 唯一在此。单文件 ≤1000 行。
+
+# QEMU 黑盒矩阵：case = 内联 player.toml + 串口断言 + 按键脚本。
+# 断言是字面包含匹配（非正则；runner 是纯 Rust std，无 regex 轮子）。
+# 新增配置项/路径时在这里加行（和 AGENTS「黑盒矩阵测试」规则配套），
+# 并给新 case 写 `covers`（改动→case 的选择依据，见下）。
+#
+# `--changed`（迭代加速）：只跑改动波及的 case。
+# 改动 = 工作区未提交（含 untracked）∪ 分支相对 origin/master 的已提交。
+# 选择规则：`covers` 前缀命中改动文件即跑；`covers` 写 `"*"` 的 menu-smoke
+# 是锚点（任何改动都带它，保开机底线）；`covers = []` = 纯标定类，只靠隐式核心。
+# 隐式核心（runner 里 CORE 常量，逐 case 写 8 遍太吵）：src/main.rs、menu.rs、
+# idle.rs、graphics.rs、diag/common.rs、src/config/（mod.rs+types.rs）、fs.rs、
+# error.rs——这些动了等于全跑。
+# `[accel] level` 全集 31 档（auto + 30，见 docs/simd.md 档位→位宽表），
+# 本矩阵各 case 统一用 `auto`（门禁口径 qemu64/SSE2 基线），显式档位由
+# GUI 笛卡尔（9 代表档）+ 全量 roundtrip 表 + 固件超硬件钳住覆盖；
+# 解码 SIMD 无独立开关，六家单比特跟随全局（`hevc-probe` 断言即全跟随值）。
+# 以下动了直接全跑（选择依据本身可能已过期）：tools/qemu-matrix/**、
+# 根 Cargo.toml、.cargo/、rust-toolchain.toml、sprout pin（third_party/sprout
+# 工作区恒脏只看分支 diff，日常忽略）。提交门禁仍是全矩阵，`--changed` 只省迭代时间。
+# 预览选谁：`--list --changed`（不启 QEMU）。
+#
+# 固件双轨：`[global] ovmf` 缺省是 brew 瓶 DEBUG OVMF
+#（`/usr/local/share/qemu/edk2-x86_64-code.fd`，带 ASSERT，抓固件 bug 用）。
+# 单 case 可钉 `ovmf = "release"` 切自带 nightly RELEASE
+#（`assets/ovmf-release-x86_64-code.fd`，osdev0/edk2-ovmf-nightly 20261019，
+# `build -b RELEASE`，无 ASSERT、更快，适合比性能），可钉 `cpu = "host"`
+# 透传宿主特性（缺省 qemu64/SSE2 基线，门禁口径）。
+# 命令行 `--ovmf debug|release|PATH` / `--cpu MODEL` 强制全矩阵用一种；
+# `--ovmf-set both` 每个 case 跑两遍（第二遍 `-release` 后缀，双轨全绿才算过）。
+#
+# 分轨口径：`boot-*` 全钉 `ovmf = "release"——引导 lane 用上游实测过的环境
+#（sprout 自家 dev 就是发行版 bios.bin，CI 连 QEMU 都不起，见 docs/bootloader.md），
+# 后续 `src/boot/` 切上游管线（`resolve_path` 那套）的前提；其余 case 留 debug。
+
+[global]
+smp = 4
+mem_mb = 1024
+ovmf = "/usr/local/share/qemu/edk2-x86_64-code.fd"
+timeout_sec = 240
+forbid = ["panicked at", "CpuDeadLoop", "No valid frames", "startup_all_aps failed"]
+
+# 新顶层流程（见 `src/idle.rs`）：开机壁纸待机（`idle: ready`）→ 任意键开弹窗
+#（`popup: open`）→ 数字键直选引导条目交权 / `p` 进纯播放器菜单（`menu: ready`）
+# / `f` 固件设置 / `s` 关机 / `r` 重启 / `q` 回壁纸。无按键 case 只验到待机。
+# 冒烟：全显式最快配置，进纯播放器菜单后按 7，AVX 探针必须出数。

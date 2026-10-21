@@ -131,7 +131,7 @@ cargo run --manifest-path tools/config-gui/Cargo.toml --target "$(rustc -vV | se
 - 黑盒矩阵测试（两套，必同步更新）：
   - GUI 侧：`tools/config-gui/src/main.rs` 的 `blackbox_matrix` 模组——TOML 全档位
     笛卡尔回写、旧文件兼容、读盘/落盘钳制、`bench_pending`、`tune_visible`。
-  - QEMU 侧：`tools/qemu-matrix/matrix.toml`——每个 case 内联 `player.toml` +
+  - QEMU 侧：`tools/qemu-matrix/matrix/`——每个 case 内联 `player.toml` +
     串口断言 + 按键脚本（事件驱动，`wait_for` 卡点，不靠裸睡；屏显-only 界面
     靠 `log::` 标记同步，见该目录 `README.md`）。
 - 新增/修改功能必同步更新两套矩阵（GUI 加表行，QEMU 加 case 并写 `covers`），提交前两套全绿；
@@ -149,9 +149,9 @@ cargo run --manifest-path tools/config-gui/Cargo.toml --target "$(rustc -vV | se
   （`registry.rs` 的两种 `Entry`，不要第三种）。
 - 诊断项可返回式报错，只生产路径（播视频）走 `handle_fatal`。
 - 单文件 ≤1000 行（`wc -l` 口径，含注释空行；UEFI 固件/host GUI/工具一视同仁，
-  数据文件如 `matrix.toml` 同理）：超了说明职责过载，必须按子分类拆模块，
+  数据文件如 `matrix/` 下分组 `*.toml` 同理）：超了说明职责过载，必须按子分类拆模块，
   不许继续往里堆。新文件落地即守，存量超限（`config-gui main`/`gop_simd`/
-  `graphics`/`config`/`video`/`gop_bench`/`matrix.toml`）按触达顺序拆。
+  `graphics`/`config`/`video`/`gop_bench`/`matrix/`）按触达顺序拆（2026-10-21 六件套已拆完：`gop_bench`/`graphics`/`video`/`gop_simd`/`qemu main`/`matrix/`，各子文件均 <1000 行）。
 - 提交用 Conventional Commits（`feat/fix/docs`），不加 Agent 署名。
 - 版本号用 CalVer `YY.MM.DD`（如 `26.10.20`；
   主包与 `uefi-async` 各自独立按日期 bump，`tools/*` 内部工具保持 `0.1.0` 不动）。

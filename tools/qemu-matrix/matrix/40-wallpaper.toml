@@ -1,0 +1,207 @@
+# 40-wallpaper.toml：QEMU 黑盒矩阵分组（`matrix/` 目录，按用例前缀分组，合并后等价原 `matrix.toml`）。
+# 共 7 cases，单文件 ≤1000 行（AGENTS 口径）。新增 case 按前缀落对应文件，并写 `covers`。
+
+[[case]]
+name = "boot-menu"
+covers = ["src/boot/"]
+ovmf = "release"
+timeout_sec = 180
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+workers = "bsp_only"
+dist = "static"
+vsync = "off"
+[play]
+fps = "max"
+[wallpaper]
+enable = false
+"""
+boot_expect = ["cfg: version=1", "idle: ready"]
+keys = [
+  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
+  { send = "q", wait_after = 2 },
+  { send = "y", wait_after = 2 },
+]
+expect = ["popup: back to idle", { pat = "popup: open (frozen)", count = 2 }]
+
+# 壁纸开：2 帧黑场，无缺片警告；弹窗 → p → 7 照常响应。
+[[case]]
+name = "wallpaper-on"
+covers = ["src/wallpaper.rs"]
+timeout_sec = 180
+needs_wallpaper = 2
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+workers = "bsp_only"
+dist = "static"
+vsync = "off"
+[play]
+fps = "max"
+[wallpaper]
+enable = true
+fps = 15
+"""
+boot_expect = ["cfg: version=1", "idle: ready"]
+keys = [
+  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
+  { send = "p", wait_after = 3 },
+  { send = "7", wait_for = ["menu: ready"], wait_after = 5 },
+]
+expect = ["AVX is "]
+forbid = ["panicked at", "CpuDeadLoop", "menu bg skipped"]
+
+# 壁纸 live：popup_freeze=false 时行区继续播（`popup: open (live)`），q 回壁纸。
+[[case]]
+name = "wallpaper-live"
+covers = ["src/wallpaper.rs"]
+timeout_sec = 180
+needs_wallpaper = 2
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+workers = "bsp_only"
+dist = "static"
+vsync = "off"
+[play]
+fps = "max"
+[wallpaper]
+enable = true
+fps = 15
+popup_freeze = false
+"""
+boot_expect = ["cfg: version=1", "idle: ready"]
+keys = [
+  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
+  { send = "q", wait_after = 2 },
+]
+expect = ["popup: open (live)", "popup: back to idle"]
+forbid = ["panicked at", "CpuDeadLoop", "menu bg skipped"]
+
+# 壁纸 qois：wall.qois 预解码循环（复用测试视频真帧）；弹窗 → p → 7 照常响应。
+# 统一 Clip 的 qois 分支在壁纸侧的证明（与 raw 的 wallpaper-on 对称）。
+[[case]]
+name = "wallpaper-qois"
+covers = ["src/wallpaper.rs", "src/video/", "usb_reports/1080p/video.qois"]
+timeout_sec = 180
+needs_wallpaper_qois = true
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+workers = "bsp_only"
+dist = "static"
+vsync = "off"
+[play]
+fps = "max"
+[wallpaper]
+enable = true
+fps = 15
+format = "qois"
+"""
+boot_expect = ["cfg: version=1", "idle: ready"]
+keys = [
+  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
+  { send = "p", wait_after = 3 },
+  { send = "7", wait_for = ["menu: ready"], wait_after = 5 },
+]
+expect = ["AVX is "]
+forbid = ["panicked at", "CpuDeadLoop", "menu bg skipped"]
+
+# 壁纸 avc：wall.mp4（1080p avc 轨）容器拆轨预解码循环；弹窗 → p → 0 照常响应。
+# 统一 Clip 的 MP4 分支在壁纸侧的证明（与 qois 的 wallpaper-qois 对称）。
+[[case]]
+name = "wallpaper-avc"
+covers = ["src/wallpaper.rs", "src/video/", "src/diag/data/wall-avc.mp4"]
+timeout_sec = 180
+needs_avcwallpaper = true
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+workers = "bsp_only"
+dist = "static"
+vsync = "off"
+[play]
+fps = "max"
+[wallpaper]
+enable = true
+fps = 15
+format = "avc"
+"""
+boot_expect = ["cfg: version=1", "idle: ready"]
+keys = [
+  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
+  { send = "p", wait_after = 3 },
+  { send = "0", wait_for = ["menu: ready"], wait_after = 5 },
+]
+expect = ["wallpaper: preloaded 10 frames"]
+forbid = ["panicked at", "CpuDeadLoop", "menu bg skipped"]
+
+# 壁纸预载拉满：preload = 0 不封顶（3 帧黑场全进内存，和播片一样）；
+# 串口 preloaded 计数即断言。无按键：只验开机预载（待机即停）。
+[[case]]
+name = "wallpaper-preload-full"
+covers = ["src/wallpaper.rs"]
+timeout_sec = 120
+needs_wallpaper = 3
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+workers = "bsp_only"
+dist = "static"
+vsync = "off"
+[play]
+fps = "max"
+[wallpaper]
+enable = true
+fps = 15
+preload = 0
+"""
+boot_expect = ["cfg: version=1", "idle: ready"]
+expect = ["wallpaper: preloaded 3 frames"]
+
+# 壁纸帧率 max：三态滑杆最右（不限速通路不断播；无按键，只验待机保活）。
+[[case]]
+name = "wallpaper-fps-max"
+covers = ["src/wallpaper.rs"]
+timeout_sec = 120
+needs_wallpaper = 2
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+workers = "bsp_only"
+dist = "static"
+vsync = "off"
+[play]
+fps = "max"
+[wallpaper]
+enable = true
+fps = "max"
+"""
+boot_expect = ["cfg: version=1", "idle: ready"]
+expect = ["wallpaper: preloaded 2 frames"]
+soak_sec = 10
+
+# 引导 chainload：弹窗（等计数标记）0 选第一项，被起镜像是同一份 efi
+# 换个路径（单盘场景）；成功 = 同一串口出现第二遍 cfg + 待机就绪（计数断言）。

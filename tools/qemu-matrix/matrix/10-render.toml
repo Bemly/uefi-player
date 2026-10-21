@@ -1,0 +1,150 @@
+# 10-render.toml：QEMU 黑盒矩阵分组（`matrix/` 目录，按用例前缀分组，合并后等价原 `matrix.toml`）。
+# 共 6 cases，单文件 ≤1000 行（AGENTS 口径）。新增 case 按前缀落对应文件，并写 `covers`。
+
+[[case]]
+name = "menu-smoke"
+covers = ["*"]
+timeout_sec = 180
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+workers = "bsp_only"
+dist = "static"
+vsync = "off"
+[play]
+fps = "max"
+[wallpaper]
+enable = false
+"""
+boot_expect = ["cfg: version=1", "idle: ready"]
+keys = [
+  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
+  { send = "p", wait_after = 3 },
+  { send = "7", wait_for = ["menu: ready"], wait_after = 5 },
+]
+expect = ["AVX is "]
+
+# 矩阵冒烟：全 auto + 2 帧，矩阵行必须出现（赢家不定，不锁）。
+# 无按键：只验开机校准（待机即停，不断言菜单）。
+[[case]]
+name = "matrix-tiny"
+covers = []
+timeout_sec = 600
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "auto"
+workers = "auto"
+dist = "auto"
+vsync = "auto"
+tune = { frames = 2 }
+[play]
+fps = "max"
+[wallpaper]
+enable = false
+"""
+boot_expect = ["cfg: version=1", "idle: ready"]
+expect = ["render auto:"]
+forbid = ["panicked at", "CpuDeadLoop"]
+
+# 分工 dynamic 显式：cfg 行必须原样回显（GUI 改 dynamic 落盘即生效的固件侧证明）。
+# 无按键：只验开机校准。
+[[case]]
+name = "matrix-dist-dynamic"
+covers = []
+timeout_sec = 180
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+workers = "all"
+dist = "dynamic"
+vsync = "off"
+[play]
+fps = "max"
+[wallpaper]
+enable = false
+"""
+boot_expect = ["cfg: version=1", "idle: ready"]
+expect = ["reuse measured"]
+
+# half 定档：冠军计时取半，预算必须落串口。无按键：只验开机校准。
+[[case]]
+name = "matrix-vsync-half"
+covers = []
+timeout_sec = 300
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+workers = "bsp_only"
+dist = "static"
+vsync = "half"
+tune = { frames = 2 }
+[play]
+fps = "max"
+[wallpaper]
+enable = false
+"""
+boot_expect = ["cfg: version=1", "idle: ready"]
+expect = ["half probe winner_ticks", "budget"]
+
+# 后缓冲影子环：buffers=2 + auto 单核矩阵（单 cell 经 upload_frame 整推），
+# 影子起用行必须出现（无上屏动作时环永不起，这是预期行为）。无按键。
+[[case]]
+name = "matrix-buffers"
+covers = []
+timeout_sec = 180
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "auto"
+workers = "bsp_only"
+dist = "static"
+vsync = "off"
+tune = { buffers = 2 }
+[play]
+fps = "max"
+[wallpaper]
+enable = false
+"""
+boot_expect = ["cfg: version=1", "idle: ready"]
+expect = ["shadow: 2 bufs", "render auto:"]
+
+# Blt 引擎对照数：选中非 B2V op，单发出数行必须出现（不参选播视频）。
+# 无按键：只验开机校准。
+[[case]]
+name = "matrix-blt-op"
+covers = []
+timeout_sec = 300
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "blt"
+workers = "bsp_only"
+dist = "static"
+vsync = "off"
+blt_op = "video_to_blt_buffer"
+tune = { frames = 2 }
+[play]
+fps = "max"
+[wallpaper]
+enable = false
+"""
+boot_expect = ["cfg: version=1", "idle: ready"]
+expect = ["blt_op(VideoToBltBuffer)"]
+
+# 播放多核：弹窗 → p 进纯播放器 → 按 0 进 mp_draw， soak 20 秒只看红线（不断言画面）。
