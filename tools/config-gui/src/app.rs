@@ -140,6 +140,130 @@ pub(crate) struct TwinPhoto {
     view: egui_wgpu::wgpu::TextureView,
 }
 
+/// 像素线条图标画法签名：画笔 + 中心 + 主色。
+type IconPaint = fn(&egui::Painter, egui::Pos2, egui::Color32);
+
+/// 图标统一线宽（2px，10px 像素字不断裂）。
+fn icon_stroke(col: egui::Color32) -> egui::Stroke {
+    egui::Stroke::new(2.0, col)
+}
+
+/// 文件夹（打开）：框体 + 左上标签。
+fn icon_folder(p: &egui::Painter, c: egui::Pos2, col: egui::Color32) {
+    let s = icon_stroke(col);
+    let v = |x: f32, y: f32| c + egui::vec2(x, y);
+    p.rect_stroke(
+        egui::Rect::from_min_max(v(-9.0, -3.0), v(9.0, 7.0)),
+        2.0,
+        s,
+        egui::StrokeKind::Middle,
+    );
+    p.line_segment([v(-9.0, -3.0), v(-9.0, -7.0)], s);
+    p.line_segment([v(-9.0, -7.0), v(-3.0, -7.0)], s);
+    p.line_segment([v(-3.0, -7.0), v(-1.0, -3.0)], s);
+}
+
+/// 软盘（保存）：外框 + 顶部滑块 + 底部标签。
+fn icon_save(p: &egui::Painter, c: egui::Pos2, col: egui::Color32) {
+    let s = icon_stroke(col);
+    let v = |x: f32, y: f32| c + egui::vec2(x, y);
+    p.rect_stroke(
+        egui::Rect::from_min_max(v(-8.0, -8.0), v(8.0, 8.0)),
+        1.0,
+        s,
+        egui::StrokeKind::Middle,
+    );
+    p.rect_stroke(
+        egui::Rect::from_min_max(v(-4.0, -8.0), v(4.0, -2.0)),
+        0.0,
+        s,
+        egui::StrokeKind::Middle,
+    );
+    p.rect_stroke(
+        egui::Rect::from_min_max(v(-4.0, 2.0), v(4.0, 8.0)),
+        0.0,
+        s,
+        egui::StrokeKind::Middle,
+    );
+}
+
+/// 双页（另存为）：前后错开的两个方框。
+fn icon_save_as(p: &egui::Painter, c: egui::Pos2, col: egui::Color32) {
+    let s = icon_stroke(col);
+    let v = |x: f32, y: f32| c + egui::vec2(x, y);
+    p.rect_stroke(
+        egui::Rect::from_min_max(v(-1.0, -8.0), v(9.0, 2.0)),
+        1.0,
+        s,
+        egui::StrokeKind::Middle,
+    );
+    p.rect_stroke(
+        egui::Rect::from_min_max(v(-9.0, -2.0), v(1.0, 8.0)),
+        1.0,
+        s,
+        egui::StrokeKind::Middle,
+    );
+}
+
+/// 环形箭头（重置）：300° 圆弧 + 顺时针箭头（东侧缺口，头朝下）。
+fn icon_reset(p: &egui::Painter, c: egui::Pos2, col: egui::Color32) {
+    let s = icon_stroke(col);
+    let mut pts = Vec::with_capacity(26);
+    for i in 0..=25 {
+        let a = 0.5_f32 + (std::f32::consts::TAU - 1.0) * i as f32 / 25.0;
+        pts.push(c + egui::vec2(a.cos(), a.sin()) * 8.0);
+    }
+    p.line(pts, s);
+    // 箭头落在弧尾（上侧缺口端），顺切线方向。
+    let a1 = 0.5_f32;
+    let tip = c + egui::vec2(a1.cos(), a1.sin()) * 8.0;
+    let dir = egui::vec2(-a1.sin(), a1.cos());
+    p.arrow(tip - dir * 9.0, dir * 9.0, s);
+}
+
+/// 太阳（深色下显示，切浅色用）：圆 + 十字四射线。
+fn icon_sun(p: &egui::Painter, c: egui::Pos2, col: egui::Color32) {
+    let s = icon_stroke(col);
+    p.circle_stroke(c, 4.5, s);
+    for d in [
+        egui::vec2(1.0, 0.0),
+        egui::vec2(-1.0, 0.0),
+        egui::vec2(0.0, 1.0),
+        egui::vec2(0.0, -1.0),
+    ] {
+        p.line_segment([c + d * 7.0, c + d * 9.5], s);
+    }
+}
+
+/// 月牙（浅色下显示，切深色用）：左鼓外弧 + 右鼓内弧闭合描边，角朝右。
+fn icon_moon(p: &egui::Painter, c: egui::Pos2, col: egui::Color32) {
+    let s = icon_stroke(col);
+    let mut pts = Vec::with_capacity(27);
+    for i in 0..=12 {
+        let a = (80.0 + 200.0 * i as f32 / 12.0).to_radians();
+        pts.push(c + egui::vec2(a.cos(), a.sin()) * 7.0);
+    }
+    for j in 0..=12 {
+        let a = (280.0 + 160.0 * j as f32 / 12.0).to_radians();
+        pts.push(c + egui::vec2(2.0, 0.0) + egui::vec2(a.cos(), a.sin()) * 4.5);
+    }
+    pts.push(pts[0]);
+    p.line(pts, s);
+}
+
+/// 地球（语言切换）：圆 + 赤道 + 子午椭圆。
+fn icon_globe(p: &egui::Painter, c: egui::Pos2, col: egui::Color32) {
+    let s = icon_stroke(col);
+    p.circle_stroke(c, 8.0, s);
+    p.line_segment([c + egui::vec2(-8.0, 0.0), c + egui::vec2(8.0, 0.0)], s);
+    let mut m = Vec::with_capacity(13);
+    for i in 0..=12 {
+        let a = i as f32 / 12.0 * std::f32::consts::TAU;
+        m.push(c + egui::vec2(a.cos() * 3.5, a.sin() * 8.0));
+    }
+    p.line(m, s);
+}
+
 impl App {
     pub(crate) fn new(cc: &eframe::CreationContext<'_>) -> Self {
         // 缝合像素 10px 简中全量优先（西文缺字形会 fallback 到默认字体）。
@@ -161,12 +285,12 @@ impl App {
         let live_fonts = fonts.clone();
         cc.egui_ctx.set_fonts(fonts);
 
-        // 默认英文 + 浅色（白底），与初始 backdrop 一致。
+        // 默认英文 + 深色（用户拍板：打开即深色），与初始 backdrop 一致。
         // 窗口标题跟语言走（中英切换时见 ToggleLang），首帧即按当前 locale 下发。
         rust_i18n::set_locale("en");
         cc.egui_ctx
             .send_viewport_cmd(egui::ViewportCommand::Title(t!("app.title").into_owned()));
-        cc.egui_ctx.set_visuals(egui::Visuals::light());
+        cc.egui_ctx.set_visuals(egui::Visuals::dark());
         let mut glass = false;
         let mut live = None;
         let mut twin_photo = None;
@@ -252,7 +376,7 @@ impl App {
             tune_at_load: RenderTune::default(),
             sched_cores_f: 0.0,
             glass,
-            dark: false,
+            dark: true,
             zh: false,
             live,
             twin_photo,
@@ -665,51 +789,63 @@ impl App {
         }
     }
 
-    /// 顶栏动作按钮：全玻璃（嵌在 toolbar 里，见文件头注释的用户拍板说明）。
+    /// 右下悬浮动作条：圆形像素图标按钮（用户拍板：文字改图标，最边上是明暗开关）。
+    /// 轮子结论：`GlassButton` 只吃文本，库内无图标件；故空文本圆钮（`icon()`
+    /// 方垫 + `accessible_name` + 悬停提示保可访问性）+ 原语线条图标，
+    /// 图标色取描边字同色（暗白/亮黑），注释说明。
     pub(crate) fn action_buttons(&mut self, ui: &mut egui::Ui) -> Action {
         let mut act = Action::None;
-        if egui_glass::GlassButton::new(t!("toolbar.open"))
-            .show(ui)
-            .clicked()
-        {
+        let col = if self.dark {
+            egui::Color32::WHITE
+        } else {
+            egui::Color32::BLACK
+        };
+        // 顺序：打开 → 保存 → 另存为 → 重置 → 语言 → 明暗（最边上）。
+        if Self::icon_btn(ui, t!("toolbar.open").into_owned(), icon_folder, col).clicked() {
             act = Action::Open;
         }
-        if egui_glass::GlassButton::new(t!("toolbar.save"))
-            .show(ui)
-            .clicked()
-        {
+        if Self::icon_btn(ui, t!("toolbar.save").into_owned(), icon_save, col).clicked() {
             act = Action::Save;
         }
-        if egui_glass::GlassButton::new(t!("toolbar.save_as"))
-            .show(ui)
-            .clicked()
-        {
+        if Self::icon_btn(ui, t!("toolbar.save_as").into_owned(), icon_save_as, col).clicked() {
             act = Action::SaveAs;
         }
-        if egui_glass::GlassButton::new(t!("toolbar.reset"))
-            .show(ui)
-            .clicked()
-        {
+        if Self::icon_btn(ui, t!("toolbar.reset").into_owned(), icon_reset, col).clicked() {
             act = Action::Reset;
         }
         ui.add_space(6.0);
-        if egui_glass::GlassButton::new(if self.dark {
-            t!("toolbar.to_light")
-        } else {
-            t!("toolbar.to_dark")
-        })
-        .show(ui)
-        .clicked()
-        {
-            act = Action::ToggleTheme;
-        }
-        if egui_glass::GlassButton::new(if self.zh { "EN" } else { "中文" })
-            .show(ui)
-            .clicked()
-        {
+        let lang = if self.zh { "EN" } else { "中文" }.to_owned();
+        if Self::icon_btn(ui, lang, icon_globe, col).clicked() {
             act = Action::ToggleLang;
         }
+        // 明暗开关摆最边上：深色下给太阳（切浅色），浅色下给月亮（切深色）。
+        let (theme_tip, theme_icon) = if self.dark {
+            (t!("toolbar.to_light").into_owned(), icon_sun as IconPaint)
+        } else {
+            (t!("toolbar.to_dark").into_owned(), icon_moon as IconPaint)
+        };
+        if Self::icon_btn(ui, theme_tip, theme_icon, col).clicked() {
+            act = Action::ToggleTheme;
+        }
         act
+    }
+
+    /// 空文本圆形图标钮：`GlassButton::icon` 玻璃圆底 + 自绘线条图标。
+    fn icon_btn(
+        ui: &mut egui::Ui,
+        label: String,
+        paint: IconPaint,
+        col: egui::Color32,
+    ) -> egui::Response {
+        let r = egui_glass::GlassButton::new("")
+            .icon()
+            .accessible_name(label.clone())
+            .show(ui)
+            .on_hover_text(label);
+        if ui.is_rect_visible(r.rect) {
+            paint(ui.painter(), r.rect.center(), col);
+        }
+        r
     }
 
     /// 左侧导航：全宽玻璃按钮，选中态描蓝 + ●。
