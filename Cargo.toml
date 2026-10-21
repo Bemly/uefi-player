@@ -10,12 +10,19 @@ shiguredo_mp4 = { version = "2026.5.0", default-features = false }
 # H.264 解码（mp4/壁纸片源用；pure-Rust，no_std 经 `alloc` + `libm`，见 diag/avc_probe.rs 头注释轮子结论；
 # 不开上游 `global-alloc`：它会装轮子自带的进程全局分配器，与 uefi 的 `#[global_allocator]` 撞车，
 # 上游文档明示自带分配器的下游用 `default-features = false`；
-# 不开上游 `asm`（SIMD）：accel 箱源码无条件 `use std::`（无 no_std 门），终链时 std 的
-# panic_impl 与 uefi 的 `panic_handler` 撞车（E0152，`cargo check` 能过、`cargo build`  binary 才炸；
-# 另裸 UEFI 默认 flags 下 accel codegen 还会 LLVM ICE，必须本仓 flags——两道门皆实锤，见 avc_probe 头注释）。
-# 解禁条件：上游 accel 去 std 化（其作者 4 个月发 18 版、正把 asm 往可移植迁，可期）；
-# 到时 `[accel]` 矩阵经 `scalar`=关/`else`=开做单比特开关（设计已论证，见 simd.md）。）
-rusty_h264-decoder = { version = "0.16", default-features = false, features = ["libm"] }
+# `asm`（SIMD）开：纯 Rust 可移植内核，host 已证提速（720p census 全进内核，
+# baseline 1.55×、main/CABAC 1.23×，与 ffmpeg 像素级一致）；
+# 上游 accel 箱无 no_std 门，本仓 vendor 到 third_party/rusty_h264-accel 后自 port
+# （`default` 为空即 no_std 形，`--features std` 才回上游行为——`common` 的可选
+# 依赖边会打开本箱默认特性，默认含 `std` 即链 `std` 死于 E0152，实锤见 vendor VENDOR.md；
+# 特性名 census/knobs 与上游一致），经本文件尾部 `[patch.crates-io]` 截到本地
+# （version 保持 0.16.1，wide 0.7 不动，global-alloc 保持关闭）。
+# `[accel]` 矩阵经 `scalar`=关/`else`=开做单比特开关（见 simd.md）。）
+rusty_h264-decoder = { version = "0.16", default-features = false, features = ["libm", "asm"] }
+# H.264 SIMD 核直连边（与上条同源，经尾部 `[patch.crates-io]` 同截到本地 vendor 树；
+# 传进去的特性为空：`resolve_accel` 的 `set_simd_enabled`/`describe` 调用需要这个 crate 名
+# （透传依赖调不到）；`default-features = false` 即 no_std 形，固件侧不链 `std`。
+rusty_h264-accel = { version = "0.16", default-features = false }
 # H.265 解码（mp4/壁纸片源用；pure-Rust，上游 0.6.2 尚无 no_std 分层，
 # 本仓 vendor 到 third_party/rusty_h265(+accel) 后自 port（标量路 + SIMD 双胞胎
 # no_std 化，见该目录 VENDOR.md）；纯整数运算，连 libm 都不要。
@@ -106,3 +113,10 @@ incremental = false
 codegen-units = 1
 rpath = false
 strip = true
+
+# vendor 截流：`rusty_h264-decoder`（crates.io，不动）经 `common` 的可选依赖
+# 拉到 `rusty_h264-accel`；本仓把该箱 vendor 进 `third_party/` 后自 port no_std，
+# 在此截到本地（`version` 0.16.1 与上游一致；`census`/`knobs` 特性名与上游一致，
+# 兼容 `common` 的 `accel?/` 弱依赖；`wide 0.7` 不动；`global-alloc` 保持关闭）。
+[patch.crates-io]
+rusty_h264-accel = { path = "third_party/rusty_h264-accel" }

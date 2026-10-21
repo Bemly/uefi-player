@@ -260,3 +260,47 @@ host 像素级回归（ffmpeg md5 + 标量/SIMD 双路一致）→
 - 遗留：固件 `cargo build/clippy/fmt` 被 sibling 未提交的
   `third_party/filmcraft-mpeg2v` 改动挡住（`idct.rs:48` `.round()` 在软浮点
   no_std 下无此方法），本轮只改了注释未碰其代码，待其合入后重验固件侧。
+
+### 7.6 AVC 解码 SIMD 上线（2026-10-21，vendor rusty_h264-accel + 单比特跟随全局）
+
+背景：`simd.md` AVC 节“标量 shipped、SIMD 待上游解禁”已过时——本轮把上游
+`rusty_h264-accel 0.16.1` vendor 进 `third_party/rusty_h264-accel` 并自 port
+no_std，`decoder`（`features = ["libm", "asm"]`）+ 根尾部 `[patch.crates-io]`
+截流；`common` 保持外部箱不动。decoder 本体也不 fork，只加特性。
+
+- 移植（三板斧同 §7.2）：`std::arch`→`core::arch`（25 处）；`OnceLock` 两处
+  （x86_asm/hpel 的 `has_avx2`，std 侧原样缓存、no_std 侧恒真）；
+  `AtomicU8`+`std::env` 两处（knobs 下 `tq_scalar_forced`/`abl_recon`，
+  no_std 侧 env 读作未设置）；检测宏直调点（luma_mc×11、idct4x4×2、
+  dequant、satd 宏、neon×8）经 `lib.rs` 的 `have_avx2()/have_sse41()/have_neon()`
+  转接（std 原样探、no_std 恒真——`core` 在 no_std 下没有 feature-detect 宏，
+  手写 `__cpuid` 就是第二套，故恒真，见下）。
+- 总开关（VENDOR 新增缝，上游无）：`set_simd_enabled(bool)` +
+  `pub(crate) simd_enabled()`（`core::AtomicBool`，初值恒 `true` ==
+  上游行为）；解码可达入口（idct/deblock-dispatch!/mc/chroma/hpel/
+  bs_masks/mb_uniform/dequant）关时走标量双胞胎（bool/Option 入口回退到
+  `common` 自带标量路，census 记 scalar）；编码侧（satd/sad/dct）固件无调用，
+  只保编译。`intra_pred` 纯标量无门可加。
+- **设计偏离（实锤 E0152 逼的）**：原计划 vendor `default = ["std"]` 不可行——
+  `common` 以 `optional`（未关 defaults）拉 accel，特性单向累加把 `std` 推进
+  固件图，`cargo check` 即撞 `panic_impl`（E0152）。故 vendor `default = []`
+ （`--features std` 才回上游行为），开关初值恒开（host 默认构建无人推，
+  初值关会把 host 全打成标量）；`resolve_accel` 开机无条件推一次，
+  首解只能跑在它后面。根另加 `rusty_h264-accel` 直连边（registry 名，
+  patch 同截到本地；透传依赖调不到 crate 名，不加边写不了推）。
+- 接线：`resolve_accel` 按 `copy_width()` 单比特推（`scalar`=关/其余=开）+
+  串口 `accel: h264 decode isa = rusty_h264-accel: SIMD/scalar` 行
+  （hevc 同款，供矩阵断言；另立项的 QEMU avc-probe case 再消费）；
+  `avc_probe` 首解前幂等 `ensure_xsave_enabled`（hevc 同款）。
+  无独立 `[accel.decode] h264` 键（§7.5 回滚口径：解码开关只跟随全局）。
+- 验证链：host Baseline/High 320x240 三方逐字节一致（asm 路/标量路/ffmpeg；
+  乱字节·截断双路优雅 0 帧）；720p census 双流全进内核（scalar=0，
+  kernel_share=100%）；提速配对 dev baseline~1.3x/main~1.3x
+  （口径 1.55x/1.23x，机器负载 16 噪声大、趋势一致，main 贴近）；
+  vendor 4 配置 check（默认 no_std/`--features std`/no-default+census+knobs/
+  UEFI no-default）+ 箱内单测 46×2（默认/`--features std`，test-only alloc
+  前奏让上游 std 测试在 no_std 默认构建下可编）+ 根三门
+  （终链 build/clippy 0 error/fmt）全绿。
+- 遗留风险：开状态假设 AVX2/SSE4.1 可执行（无 SSE4.1/AVX2 老 CPU 上
+  `level != scalar` 会 `#UD`；`deblock` 的“sse2”核本就无条件用 SSSE3/SSE4.1，
+  上游原样）；详见 vendor `VENDOR.md` 固件门契约。

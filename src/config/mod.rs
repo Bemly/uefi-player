@@ -10,8 +10,10 @@
 //!                 # | popcnt | aes | pclmulqdq | avx | f16c | fma | avx2
 //!                 # | bmi1 | bmi2 | lzcnt | movbe | rdrand | rdseed | sha | gfni
 //!                 # | avx512f | avx512cd | avx512dq | avx512bw | avx512vl | avxvnni
+//!                 # | tbm | sse4a（AMD 专有，扩展叶 8000_0001H ECX bit 21/6；
+//!                 #   qemu64 无此叶，显式配了即按 X128 钳住用，不断 boot）
 //!                 # auto = 开机探最高可用；显式超硬件警告+钳住；老 "avx512" 按 avx512f 照读
-//!                 # 解码 SIMD 无独立开关：三家（hevc/vp9/h263）单比特跟随全局
+//!                 # 解码 SIMD 无独立开关：四家（hevc/vp9/h263/h264）单比特跟随全局
 //!                 #（level=scalar 则关，其余开），见 `resolve_accel` 末尾
 //! [render]
 //! mode    = "auto"        # "auto" | "direct" | "blt"
@@ -415,9 +417,9 @@ pub fn vsync_enabled() -> bool {
 /// 开机探一次硬件最大搬运位宽（P2）：先 `ensure_xsave_enabled`（CPL0 直接开，
 /// 幂等），再按 CPUID/XCR0 取最高可用。调一次，`upload_frame` 每次读结论。
 /// 必须在任何上屏/bench 之前调（`main` 里调，bench/播放只读）。
-/// 末尾把 `[accel]` 开关推进三家解码轮子：单比特跟随全局搬运位宽
+/// 末尾把 `[accel]` 开关推进四家解码轮子：单比特跟随全局搬运位宽
 /// （`copy_width() == U64`（即 `level=scalar`）则关，其余开）；
-/// 首解前各轮子自保（`hevc_probe` 的幂等 `ensure` + vp9 轮内镜像门）保持。
+/// 首解前各轮子自保（`hevc_probe`/`avc_probe` 的幂等 `ensure` + vp9 轮内镜像门）保持。
 pub fn resolve_accel() {
     #[cfg(target_arch = "x86_64")]
     {
@@ -435,12 +437,18 @@ pub fn resolve_accel() {
         }
         log::info!("accel: hardware max width = {:?}", max_width_name(max));
         // 解码轮子的运行时检测就是这道固件门（轮内无第二套 CPUID/XCR0 探）：
-        // 三家单比特跟随全局 `copy_width()`（`scalar`=关/其余=开），首解前生效。
+        // 四家单比特跟随全局 `copy_width()`（`scalar`=关/其余=开），首解前生效。
         // `V128`（AVX/F16C）在 hevc 轮侧无 VEX-128 档，取其下最高档 `Sse41`
         //（AVX 机器恒有 SSE4.1，可安全执行）。
         let on = copy_width() != CopyWidth::U64;
         push_hevc_isa(copy_width());
         log::info!("accel: hevc decode isa = {}", rusty_h265::accel::describe());
+        // h264（vendor 的 `rusty_h264_accel`，`set_simd_enabled` 单比特门；
+        // 关时全入口走标量双胞胎，开时 SSE2 基线核 + AVX2（no_std 下 have 恒
+        // 最高档，真门就是这里的一推；轮内无第二套探，见该目录 VENDOR.md）。
+        // `describe()` 供 QEMU 矩阵断言（hevc 同款 `isa` 行）。
+        rusty_h264_accel::set_simd_enabled(on);
+        log::info!("accel: h264 decode isa = {}", rusty_h264_accel::describe());
         // vp9（`vp9dec::simd`，x86_64 内核常编，运行时单比特门）与
         // h263（`yuv`+`deblock` 的 `set_simd_enabled`，`simd` 特性下 wide 核，
         // 关特性时调用即 no-op）：同推单比特语义（`scalar`=关/其余=开）。
@@ -496,7 +504,8 @@ fn hw_max_width() -> CopyWidth {
 ///   BMI 本是标量位操作，按时代下限同宽处理，缺 AVX2 即被钳住）；
 /// - `avx512f/cd/dq/bw/vl` → Z512（512 位；`vmovdqu8` 引擎，探针按 F+XCR0 门控）；
 /// - 标量/密码/计数类（`popcnt`/`aes`/`pclmulqdq`/`lzcnt`/`movbe`/`rdrand`/
-///   `rdseed`/`sha`/`gfni`）不加宽搬运，按 x86-64 基线下限 X128 处理。
+///   `rdseed`/`sha`/`gfni`）+ AMD 专有（`tbm`/`sse4a`，扩展叶 8000_0001H
+///   ECX bit 21/6）不加宽搬运，按 x86-64 基线下限 X128 处理。
 fn level_width(l: AccelLevel) -> CopyWidth {
     match l {
         AccelLevel::Auto => CopyWidth::X128,
@@ -515,7 +524,11 @@ fn level_width(l: AccelLevel) -> CopyWidth {
         | AccelLevel::Rdrand
         | AccelLevel::Rdseed
         | AccelLevel::Sha
-        | AccelLevel::Gfni => CopyWidth::X128,
+        | AccelLevel::Gfni
+        // AMD 专有（扩展叶 8000_0001H ECX bit 21 tbm / bit 6 sse4a）：
+        // 128 位/标量类档，按基线下限 X128 处理（已有 `popcnt`/`aes` 先例）。
+        | AccelLevel::Tbm
+        | AccelLevel::Sse4a => CopyWidth::X128,
         AccelLevel::Avx | AccelLevel::F16c => CopyWidth::V128,
         AccelLevel::Fma
         | AccelLevel::Avx2
@@ -552,9 +565,19 @@ fn probe_max_width() -> CopyWidth {
     let c1 = __cpuid(1);
     let has7 = crate::diag::common::cpuid_max_basic() >= 7;
     let b7 = if has7 { __cpuid_count(7, 0).ebx } else { 0 };
-    // 7 号叶 ECX（avxvnni/gfni）与扩展叶 0x80000001（ECX.5 lzcnt）不影响位宽上限
-    // （avxvnni/gfni 恒 ≤Y256 且必有同代 AVX2；lzcnt 是 X128 下限档），故不读；
+    // 7 号叶 ECX（avxvnni/gfni）与扩展叶 0x80000001（ECX.5 lzcnt、ECX.6 sse4a、
+    // ECX.21 tbm）不影响位宽上限（avxvnni/gfni 恒 ≤Y256 且必有同代 AVX2；
+    // lzcnt/sse4a/tbm 是 X128 下限档），故不参与上限判定；
     // 真要读它们时必须先用 `cpuid_max_basic/_extended` 门控（`hw_bench` 同式）。
+    // 扩展叶存在性门控读一遍（qemu64 无此叶即 0，不断 boot）：
+    // tbm（ECX.21）/sse4a（ECX.6）显式配置恒按 X128 钳住用（见 `level_width`），
+    // 矩阵在 qemu64 上实测即此路径（缺叶→钳住→不断）。
+    let ext_ecx = if crate::diag::common::cpuid_max_extended() >= 0x8000_0001 {
+        __cpuid(0x8000_0001).ecx
+    } else {
+        0
+    };
+    log::info!("accel: ext 80000001h ecx={:#010x}", ext_ecx);
     // AVX512：F 硬件位 + OSXSAVE + XCR0 五位全开，缺一个执行就 #UD。
     // 注：Z512 引擎是 `vmovdqu8`（BW 编码），探针按 F 门控（与 `gop_simd` 同口径；
     // 仅 F 无 BW 的硬件（KNL）不在本仓目标内，见 `docs/simd.md`）。

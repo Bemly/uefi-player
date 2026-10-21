@@ -1,0 +1,33 @@
+[package]
+name = "rusty_h264-accel"
+version = "0.16.1"
+edition = "2021"
+rust-version = "1.80"
+license = "BSD-2-Clause"
+repository = "https://github.com/remade-with-rust/rusty_h264"
+description = "Optional SIMD kernels for rusty_h264 — the one unsafe crate, behind safe wrappers so the codec core stays forbid(unsafe). Pure Rust (x86-64 SSE2/AVX2 + aarch64 NEON + scalar oracles), no nasm, no build script."
+keywords = ["h264", "simd", "video", "codec"]
+categories = ["multimedia::video", "hardware-support"]
+
+# NOTE(uefi-player vendor): vendored from crates.io 0.16.1 + no_std port. See
+# VENDOR.md. `default` is EMPTY on purpose (NOT `std`): `rusty_h264-common`
+# (external, immutable) enables this crate's defaults through its optional-dep
+# edge, and features unify additively — a default `std` would link `std` into
+# the firmware and die with E0152 (empirically verified, see VENDOR.md).
+# Opt in with `--features std` for exact upstream behavior (real CPUID probe +
+# env knobs); the default no_std build assumes max ISA and is bit-identical
+# with the switch on. Feature names `census`/`knobs` are unchanged so
+# downstream weak deps keep working (`rusty_h264-common` `census =
+# ["rusty_h264-accel?/census"]`, `knobs = ["rusty_h264-accel?/knobs"]`).
+
+[features]
+default = []
+std = []
+# Per-twin CALL census (scalar vs kernel share). Diagnostic builds only.
+census = []
+# Runtime env knobs (RFF_ABL_RECON, RFF_TQ_SCALAR): off in release; see rusty_h264-common.
+knobs = []
+
+[lib]
+name = "rusty_h264_accel"
+path = "src/lib.rs"
