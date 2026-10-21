@@ -1,29 +1,51 @@
 # 播放器（P3）
 
-## 片源格式矩阵（`[play] format`，`Clip` 统一解码）
+## 播放列表（`[playlist]`，`Clip` 统一解码）
+
+播放不再读 `[play] format`（旧键已删除，残留按 serde 默认忽略）：`[playlist] loop`
++ `[[playlist.items]] path` 逐项自动检测，每项落到同一 `Clip`
+（三条播放路零分支）；检测失败或探针无匹配轨，该项 `playlist: skip` 警告跳过，
+不断播；空列表 `playlist: empty list, nothing to play` 直接报错
+（不静默换菜单/壁纸）。
 
 > 六组展示（GUI 主行同形）：`qois` / `raw` / `MP4{avc,hevc,vp9}` /
 > `h263` / `mpeg2v` / `theora`。线值保持八个扁平小写串（固件 `MediaFormat`
 > 原子存储 + 串口 `video: fmt=` 断言口径，不嵌套；分组只是展示概念）。
 
-| `format` | 片源 | 接线状态 |
+| 检测序 | 路径规则 | 格式与接线 |
 |---|---|---|
-| `qois`（默认） | `1080p/video.qois`（`u32le 帧长 + QOI 帧` 串接）→ 开机全量预解码 | 已接（三条播放路零分支） |
-| `raw` | `1080p/frameNNNN.raw`（1920x1080 BGRA 直存，与壁纸同格式）→ 零解码直读 | 已接（同下游切分） |
-| `MP4` → `hevc` | `1080p/video.mp4`（hev 轨，石雨堂拆包 → Annex-B；无容器回 `video.hevc` Annex-B）→ vendor `rusty_h265` 软解 → YUV420 转 BGRA | 已接（预解码进 `Clip`；坏帧计数跳过，全坏报错；只收 8-bit） |
-| `MP4` → `avc` | `1080p/video.mp4`（avc 轨，石雨堂拆 avcC → Annex-B）→ vendor `rusty_h264_decoder` 软解 → YUV420 转 BGRA | 已接（tight 8-bit 4:2:0；MP4-only，无裸流路） |
-| `MP4` → `vp9` | `1080p/video.mp4`（vp09 轨，样片即裸帧；无容器回 `video.ivf`）→ vendor `vp9dec` 软解 → YUV420 转 BGRA | 已接（只要显示帧，隐藏 altref 跳过；只收 8-bit 4:2:0） |
-| `h263` | `1080p/video.h263`（裸 H.263 基线流，无容器）→ vendor `h263-rs`（标准空选项）软解 → YUV420 转 BGRA | 已接（错位/坏包截断，首帧错即报错；基线 `PictType` 上游反转已修正，见 vendor `VENDOR.md`） |
-| `mpeg2v` | `1080p/video.m2v`（裸基本流，接入单元切分）→ vendor `filmcraft-mpeg2v` 软解 → YUV420 转 BGRA | 已接（只收 4:2:0；422/444 记数跳过；AU 失败计数，`flush` 收尾帧） |
-| `theora` | `1080p/video.ogv`（OggS 磁盘原格式，手写拆包 + CRC32 校验）→ vendor `oxideav-theora` 软解 → 显示区裁剪 + 翻转 + YUV420 转 BGRA | 已接（只收 4:2:0；ident/comment/setup 三头缺一即报错） |
+| 1 | 小写路径以 `.qois` 结尾 | `qois`（默认）：`1080p/video.qois`（`u32le 帧长 + QOI 帧` 串接）→ 开机全量预解码（已接） |
+| 2 | 文件名命中 `frameNNNN.raw` 模式（目录扫描，`.raw` 后缀，`1080p/` 或画廊目录） | `raw`：`1080p/frameNNNN.raw`（1920x1080 BGRA 直存，与壁纸同格式）→ 零解码直读（已接，同下游切分） |
+| 3 | 小写路径以 `.mp4` 结尾 | 容器探针：拆视频轨，`hevc > avc > vp9` 首匹配胜出（avcC/hvcC/vpcC → Annex-B/裸帧；无匹配轨该项跳过并警告，永不静默换源）：`hevc` → vendor `rusty_h265` 软解 → YUV420 转 BGRA（预解码进 `Clip`；坏帧计数跳过，全坏报错；只收 8-bit）；`avc` → vendor `rusty_h264_decoder` 软解（tight 8-bit 4:2:0；MP4-only，无裸流路）；`vp9` → vendor `vp9dec` 软解（只要显示帧，隐藏 altref 跳过；只收 8-bit 4:2:0） |
+| 4 | 小写路径以 `.hevc`/`.265` 结尾 | `hevc`（Annex-B 裸流，无容器回退）→ 同上 vendor 软解 |
+| 5 | 小写路径以 `.ivf` 结尾 | `vp9`（IVF 容器）→ 同上 vendor 软解 |
+| 6 | 小写路径以 `.h263` 结尾 | `h263`（裸 H.263 基线流，无容器）→ vendor `h263-rs`（标准空选项）软解（错位/坏包截断，首帧错即报错；基线 `PictType` 上游反转已修正，见 vendor `VENDOR.md`） |
+| 7 | 小写路径以 `.m2v` 结尾 | `mpeg2v`（裸基本流，接入单元切分）→ vendor `filmcraft-mpeg2v` 软解（只收 4:2:0；422/444 记数跳过；AU 失败计数，`flush` 收尾帧） |
+| 8 | 小写路径以 `.ogv` 结尾 | `theora`（OggS 磁盘原格式，手写拆包 + CRC32 校验）→ vendor `oxideav-theora` 软解（只收 4:2:0；ident/comment/setup 三头缺一即报错） |
 
-- 八格式全落到同一 `Clip`（`video/decoder.rs` + `video/demux.rs`），三条播放路零分支；
-  容器优先裸流：avc/hevc/vp9 有 `video.mp4` 即拆轨（无匹配轨直接报错，不静默换源）；
-  hevc/vp9 缺容器回裸流老路（老矩阵不断）；h263/mpeg2v/theora 只读裸流。
+- 其余路径或探针失败一律该项跳过（`log::warn!`，永不 halt）。
 - MP4 拆包（石雨堂 `Mp4FileDemuxer`，avcC/hvcC/vpcC，长度前缀→Annex-B 起始码；
   vp09 样片即裸帧直送）与 OggS 拆包（手写：`OggS` 页头 + 段表组包 + MSB-first
   CRC32，错页记数跳过）见 `video/demux.rs` 头注释轮子结论。
-- 壁纸同矩阵（`wall.*` 同名文件，见 `docs/wallpaper.md`）。
+- 壁纸同矩阵（`wall.*` 同名文件，见 `docs/wallpaper.md`），同一自动检测。
+
+## 循环模式（`[playlist] loop`）
+
+| `loop` | 语义 |
+|---|---|
+| `loop_list`（默认） | 播完回绕，列表循环 |
+| `loop_single` | 重播当前项 |
+| `once` | 播完最后一项即停（回菜单） |
+
+固件：建表时 `Vec<Clip>` 逐项自动检测（`detect_clip_format`），失败跳项 + 警告，
+空表直接 `Err`；播放按 `next_playlist_index` 随循环模式走项；壁纸同一引擎
+（eager，tag 壁纸无视 fetch 覆盖）。串口契约（矩阵断言子串，保持字节一致）：
+`playlist: items={n} loop={mode}` 建表行；
+`playlist: item {i}/{n} path={path} fmt={:?} feed={}` 逐项行；
+`playlist: skip {path} ({reason})` 跳过行；
+`playlist: empty list, nothing to play` 空表行；
+逐项 `video: fmt=` / `video: feed=`（+`fetchovr=<fmt>`）/ `decode: fmt=` /
+`play: path=` 行保持原口径（不断言画质）。
 
 ## `video.qois` 格式
 
@@ -75,10 +97,12 @@
 
 ## 统一控制平面（`[play] feed` × `[decode.<fmt>]`，无老管线）
 
-播放只走 `Clip`：拿帧方式由 `[play] feed` 五档切，单格式解码并发/缓冲/取数由
+播放只走 `Clip`：拿帧方式由 `[play] feed` 五档切（全局默认），单格式解码并发/缓冲/取数由
 `[decode.<fmt>]` 五键调（八格式 qois/raw/hevc/avc/vp9/h263/mpeg2v/theora 各一表，
 见下节解码表），上传路（`blt`/`direct`/`mp_draw`/`nano_pump`/
-`dynamic_draw`）零改。串口 `video: feed=` 恒为生效值：无覆盖时即全局 feed，
+`dynamic_draw`）零改。feed/fetch/解码表按项当前检测格式生效
+（既有 `effective_feed`/`decode_window` 不变）。
+串口 `video: feed=` 恒为生效值：无覆盖时即全局 feed，
 有 per-codec `fetch` 覆盖时取覆盖值并附 ` fetchovr=<fmt>` 令牌（矩阵断言子串，保持字节一致）。`[play] pipeline` 与 `[render] workers/dist` 旧键已删除
 （正典只剩 `[schedule] workers/dist`；旧文件未知键按 serde 默认忽略，
 旧值别名 `avx512`/`on`/整数壁纸 fps 已摘除，命中即整文件回默认 + 警告）。
@@ -102,11 +126,14 @@
 - 多核（`mp_draw`）/动态调度/壁纸恒 `clip`/`eager`（壁纸随机访问循环，按 tag 裁决，
   见固件 `lazy::feed_for`；`mp_draw`/`dynamic_draw` 启动即 `ensure_eager` 全量，
   不变）；旧文件缺键按 `clip` 照读。
-- 矩阵覆盖：`video-decode-fetch-override` 一例（全局 clip + `[decode.hevc] fetch=stream`，
+- 矩阵覆盖：`video-decode-fetch-override` 一例（全局 clip + `[decode.hevc] fetch=stream`
+  + 单项 `[[playlist.items]] path="1080p/video.hevc"`，
   断言生效 `video: feed=stream` + `fetchovr=hevc` + `play: path=direct_loop` + soak）。
-- 矩阵覆盖：`video-feed-*` 7 case（`video: feed=` + path 行 + soak 保活；
-  clip/staged/stream/zero_copy/single × qois + stream/single × hevc 代表格式，
-  全组合不铺，避 5×8 膨胀）。
+- 矩阵覆盖：播放列表三例（`playlist-list-loop` 6 项裸片源循环 +
+  `playlist-loop-single` mp4（avc 轨）单曲重播 +
+  `playlist-once` mp4（hev 轨）+ qois 两项播完即停；
+  逐项 `playlist: item` + `video: fmt=` + path 行 + soak 保活；
+  mp4 容器探针以 avc/hev 两轨代表覆盖，全组合不铺）。
 - GUI：播放页供片滑杆 0-4 拨档（`[play] feed = "single"` 为第 5 档）+ 一句话说明；
   `[render.tune] window` 缺键按 4、钳 1..=32（GUI 只保 roundtrip，不摆旋钮）。
 - 跳帧同样经懒解码（`pace_or_drop` 调 `next_frame` 跳过）：正确但把被跳帧也解了，

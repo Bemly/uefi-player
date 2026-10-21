@@ -16,8 +16,7 @@
 //!                 # auto = 开机探最高可用；显式超硬件警告+钳住；旧 "avx512" 已删
 //!                 # （非法值整文件回默认 + 警告，无别名）；旧 "on"（vsync）与整数
 //!                 # 壁纸 fps 同理（无别名/回退）。
-//!                 # 解码 SIMD 无独立开关：六家（hevc/vp9/h263/h264/mpeg2v/theora）单比特跟随全局
-//!                 #（level=scalar 则关，其余开），见 `resolve_accel` 末尾
+//!                 # 解码 SIMD 无独立开关：六家单比特跟随全局（scalar 关/其余开，见 `resolve_accel` 末尾）
 //! [render]
 //! mode    = "auto"        # "auto" | "direct" | "blt"
 //!                         # `[render] workers/dist` 已删除（未知键忽略；正典只认 `[schedule]`）
@@ -34,9 +33,8 @@
 //! frames    = 30   # 每次矩阵/微基准的帧数（>=1）
 //! tile_rows = 64   # tile 高（行），MP 自调度切块粒度（8-512）
 //! vsync_fps = 60   # vsync 预算帧率：static 的封顶 + auto 探测达标线（15-240）
-//! buffers   = 0    # 后缓冲帧数（0 = 直写前台，现状；1-16 = 影子环 + 整推，撕裂窗口压成一次 push）
-//! window    = 4    # 流式供片全局默认（`feed = "stream"` 且 `decode.<fmt>.buffers = 0`
-//!                  # 跟随时用；1-32，显式 1-32 按格式覆盖，见 `[decode.*]`）
+//! buffers   = 0    # 后缓冲帧数（0 = 直写前台现状；1-16 = 影子环 + 整推，撕裂窗口压成一次 push）
+//! window    = 4    # 流式供片全局默认（feed=stream 且 decode.<fmt>.buffers=0 跟随时用；1-32）
 //! [play]
 //! fps = "auto"            # "auto" | "max" | "1".."240"
 //! feed = "clip"           # 供片模式："clip"（全量预解码，默认，老文件缺键照读）
@@ -46,10 +44,14 @@
 //!                         # | "single"（零缓存逐帧重解 + render.blt，旧 single 同语义）
 //!                         # 只切 `Clip` 内部拿帧方式，上传路（blt/direct/mp/nano）零改
 //!                         # `[play] pipeline` 已删除（未知键忽略；旧 7 档映射见 `docs/player.md`）
-//! format = "qois"         # 片源格式："qois"（1080p/video.qois）| "raw"（1080p/frameNNNN.raw）
-//!                         # | "hevc"（1080p/video.hevc，Annex-B 软解）| "vp9"（1080p/video.ivf 软解）
-//!                         # | "h263" | "mpeg2v" | "theora"（格式可选、解码后继，选中即明确报错）
+//!                         # `[play] format` 已删除（改走 `[playlist]` 每项自动检测，残留忽略）
 //! measured_max_fps = 0    # 固件实测后回写，GUI 只读展示
+//! [playlist]              # 播放列表（`video::play` 逐项自动检测加载，见该文件头）
+//! loop = "loop_list"      # "loop_single"（重播当前项）| "loop_list"（回绕，默认）| "once"（播完回菜单）
+//! [[playlist.items]]      # 单键片源路径（qois 后缀 / frameNNNN.raw 目录扫描 /
+//! path = "1080p/video.mp4" # mp4 容器探针 hevc>avc>vp9 / hevc/.265 / ivf / h263 / m2v / ogv）
+//! [[playlist.items]]      # 失败项 `playlist: skip` 警告跳过，不断播；空列表播片直接 Err
+//! path = "1080p/video.hevc"
 //! [decode.hevc]           # 每格式解码表（六软解 + qois/raw 全键，缺表缺键全默认）：
 //! threads = "bsp_only"    # "bsp_only"（默认，顺序安全）| "all"（qois/raw 立即兑现，
 //!                         # 有状态解析但告警仍顺序）
@@ -59,36 +61,29 @@
 //!                         # 其余 [decode.avc/vp9/h263/mpeg2v/theora/qois/raw] 同五键
 //! fetch = "clip"            # 可选覆盖（默认缺键 = 继承全局 [play] feed；显式值只覆盖本格式；壁纸恒 clip 忽略覆盖）
 //! [wallpaper]
-//! enable = false          # 菜单背景 + 引导过渡总开关（默认关）
-//! format = "raw"          # 片源格式："raw"（wallpaper/frameNNNN.raw）| "qois"（wallpaper/wall.qois）
-//! fps = "15"               # 背景帧率三态（与 [play] fps 同构）："auto"（最左，
-//!                         # 跟 vsync；vsync 关则不限速）| "max"（最右，不限速）
-//!                         # | "1".."240"（中间显式封顶）；默认 "15"（整数值整文件回默认）
-//! frames = 0              # B 过渡封顶帧数（0 = 全播预载集）
-//! preload = 8             # 预载帧数上限（1-32；0 = 不封顶，和播片一样拉满；
+//! enable = false          # 菜单背景 + 引导过渡总开关（默认关；开但画廊空 = 静默无壁纸）
+//! loop = "loop_list"      # 画廊循环（单曲/回绕/播一次；单曲只取首项，一次末帧保持）
+//! fps = "15"               # 背景帧率三态（与 [play] fps 同构；默认 "15"，整数值整文件回默认）
+//! preload = 8             # 按项预载封顶（0 = 不封顶，和播片一样拉满；
 //!                         # 1080p BGRA 单帧约 8MB，长动画注意内存）
 //! popup_freeze = true     # 选项弹窗时冻结壁纸（false 则行区继续播）
+//! [[wallpaper.items]]     # 单键片源路径（与播放列表同一自动检测；`format`/`frames` 旧键已删）
+//! path = "wallpaper/wall.qois"
+//! # B 过渡长度由画廊项数代替 `frames`（旧键残留忽略）。
 //! [boot]
-//! auto = true             # 多卷自动发现总开关（关 = 只列本卷 BLS，老行为）
-//! windows = true          # 自动发现 Windows Boot Manager
-//! linux = true            # 自动发现 Linux 内核对（kernel + initrd)
-//! shell = true            # 自动发现 UEFI Shell（shellx64.efi）
-//! uki = true              # 自动发现 EFI/Linux/*.efi（读全套 profile，一 profile 一条目，读不到用文件名）
-//! macos = true            # OpenCore 链式接力（EFI/OC/OpenCore.efi 存在即链）
+//! auto/windows/linux/shell/uki/macos = true  # 多卷自动发现总开关 + 种类（关 = 只列本卷 BLS）
 //! strict = false          # 严格模式：BLS 只认本卷 + XBOOTLDR 卷（systemd 严格模式)
-//! [schedule]
-//! backend = "manual"      # 调度后端："manual"（手写 MP，workers/dist 生效）
-//!                         # | "nano"（单核执行器泵，workers/dist 忽略）
-//!                         # | "dynamic"（多核 steal 泵，只直写前台；见 fallbacks）
-//! workers = "auto"        # manual 后端多核开关（auto | bsp_only | all）
-//! dist = "auto"           # manual 后端分工（auto | static | tile | dynamic）
-//! [async]
-//! executor = "all"        # 诊断项 a 跑哪条执行器线："all"（默认，都跑）| "nano" | "dynamic"
+//! [schedule] backend = "manual" | "nano" | "dynamic"（手写 MP / 单核泵 / 多核 steal 泵）
+//! workers = "auto"（manual 后端多核开关：auto | bsp_only | all）
+//! dist = "auto"（manual 后端分工：auto | static | tile | dynamic）
+//! [async] executor = "all"  # 诊断项 a 跑哪条执行器线："all"（默认）| "nano" | "dynamic"
 //! ```
 
+use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::String;
-use core::sync::atomic::{AtomicU8, AtomicU32, Ordering};
+use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU8, AtomicU32, AtomicUsize, Ordering};
 
 use uefi::cstr16;
 
@@ -160,10 +155,18 @@ static MEASURED_CORES: AtomicU32 = AtomicU32::new(0);
 /// 盘上 `measured_vsync_fps`（0 = 未测）。
 static MEASURED_VSYNC_FPS: AtomicU32 = AtomicU32::new(0);
 static WALLPAPER_ENABLE: AtomicU8 = AtomicU8::new(0);
+/// `[playlist]` / `[wallpaper.items]` 运行时快照（原子 + 常驻泄漏；`Box::leak`
+/// 会话期风格，load() 单线程装填一次，旧泄漏随启动丢弃，无二次写竞争）。
+/// loop：0 = loop_single，1 = loop_list，2 = once（`LoopMode` 判别值）。
+static PLAYLIST_LOOP: AtomicU8 = AtomicU8::new(1);
+static PLAYLIST_PTR: AtomicUsize = AtomicUsize::new(0);
+static PLAYLIST_LEN: AtomicUsize = AtomicUsize::new(0);
+static WALLPAPER_LOOP: AtomicU8 = AtomicU8::new(1);
+static WALLPAPER_PTR: AtomicUsize = AtomicUsize::new(0);
+static WALLPAPER_LEN: AtomicUsize = AtomicUsize::new(0);
 /// 0 = auto，1 = capped，2 = max（`wallpaper.fps` 的解析结果，与 `PLAY_MODE` 同构）。
 static WALLPAPER_MODE: AtomicU8 = AtomicU8::new(1);
 static WALLPAPER_CAP: AtomicU32 = AtomicU32::new(15);
-static WALLPAPER_FRAMES: AtomicU32 = AtomicU32::new(0);
 static WALLPAPER_PRELOAD: AtomicU32 = AtomicU32::new(default_wallpaper_preload());
 static WALLPAPER_POPUP_FREEZE: AtomicU8 = AtomicU8::new(1);
 /// `[boot]` 自动发现开关（5 个 u8，0/1）。
@@ -192,9 +195,6 @@ static PLAY_MODE: AtomicU8 = AtomicU8::new(0);
 static PLAY_CAP: AtomicU32 = AtomicU32::new(0);
 /// 固件实测的最大播放帧率（0 = 未测）。`auto` 首启测完写入并回盘。
 static PLAY_MEASURED: AtomicU32 = AtomicU32::new(0);
-/// 片源格式（0 = qois，1 = raw；`[play]` 默认 qois，`[wallpaper]` 默认 raw）。
-static PLAY_FORMAT: AtomicU8 = AtomicU8::new(0);
-static WALLPAPER_FORMAT: AtomicU8 = AtomicU8::new(1);
 /// 0 = 未测，1 = direct，2 = blt（`mode = "auto"` 的矩阵结论，校准/记忆二选一写入）
 static RESOLVED_RENDER: AtomicU8 = AtomicU8::new(0);
 /// 0 = 未测，1 = bsp_only，2 = all（`workers = "auto"` 的矩阵结论）
@@ -208,6 +208,27 @@ static RESOLVED_DIST: AtomicU8 = AtomicU8::new(0);
 /// 硬件实测最大搬运位宽（`CopyWidth` 判别值；0 = 未探，按 X128 保守用）。
 /// `auto` 取它，显式档位超出它会被钳住并警告（不断 boot）。
 static MAX_ACCEL: AtomicU8 = AtomicU8::new(0);
+
+/// 条目路径表装填（`load()` 唯一调用）：Vec 收敛为常驻泄漏切片，
+/// 指针 + 长度进原子存储（`no_std` 无新依赖，`Box::leak` 会话期风格）。
+fn store_paths(ptr: &AtomicUsize, len: &AtomicUsize, items: Vec<PlaylistItem>) {
+    let paths: Vec<String> = items.into_iter().map(|it| it.path).collect();
+    let n = paths.len();
+    let p = Box::leak(paths.into_boxed_slice()).as_ptr() as usize;
+    ptr.store(p, Ordering::Relaxed);
+    len.store(n, Ordering::Relaxed);
+}
+
+fn load_path(ptr: &AtomicUsize, len: &AtomicUsize, i: usize) -> Option<String> {
+    if i >= len.load(Ordering::Relaxed) {
+        return None;
+    }
+    let p = ptr.load(Ordering::Relaxed) as *const String;
+    if p.is_null() {
+        return None;
+    }
+    unsafe { Some((*p.add(i)).clone()) }
+}
 
 /// 开机读一次；返回需要屏显的警告行。
 /// 正典只有 `[schedule] workers/dist`（`[render]` 旧键未知忽略，不再照读）；
@@ -243,9 +264,11 @@ pub fn load() -> Option<String> {
         FpsPolicy::Max => PLAY_MODE.store(2, Ordering::Relaxed),
     }
     PLAY_MEASURED.store(cfg.play.measured_max_fps, Ordering::Relaxed);
-    PLAY_FORMAT.store(cfg.play.format.as_u8(), Ordering::Relaxed);
     PLAY_FEED.store(cfg.play.feed.as_u8(), Ordering::Relaxed);
-    WALLPAPER_FORMAT.store(cfg.wallpaper.format.as_u8(), Ordering::Relaxed);
+    PLAYLIST_LOOP.store(cfg.playlist.loop_mode.as_u8(), Ordering::Relaxed);
+    store_paths(&PLAYLIST_PTR, &PLAYLIST_LEN, cfg.playlist.items);
+    WALLPAPER_LOOP.store(cfg.wallpaper.loop_mode.as_u8(), Ordering::Relaxed);
+    store_paths(&WALLPAPER_PTR, &WALLPAPER_LEN, cfg.wallpaper.items);
     WALLPAPER_ENABLE.store(cfg.wallpaper.enable as u8, Ordering::Relaxed);
     match parse_fps(&cfg.wallpaper.fps) {
         FpsPolicy::Auto => WALLPAPER_MODE.store(0, Ordering::Relaxed),
@@ -255,7 +278,6 @@ pub fn load() -> Option<String> {
         }
         FpsPolicy::Max => WALLPAPER_MODE.store(2, Ordering::Relaxed),
     }
-    WALLPAPER_FRAMES.store(cfg.wallpaper.frames, Ordering::Relaxed);
     WALLPAPER_PRELOAD.store(cfg.wallpaper.preload.min(32), Ordering::Relaxed);
     WALLPAPER_POPUP_FREEZE.store(cfg.wallpaper.popup_freeze as u8, Ordering::Relaxed);
     BOOT_AUTO.store(cfg.boot.auto as u8, Ordering::Relaxed);
@@ -267,7 +289,7 @@ pub fn load() -> Option<String> {
     BOOT_STRICT.store(cfg.boot.strict as u8, Ordering::Relaxed);
     ASYNC_EXECUTOR.store(cfg.r#async.executor.as_u8(), Ordering::Relaxed);
     log::info!(
-        "cfg: version={} accel.level={:?} render.mode={:?} sched.backend={:?} workers={:?} dist={:?} vsync={:?} blt_op={:?} tune.frames={} measured(render={:?} workers={:?} dist={:?} vsync={:?} vhalf={} cores={}) play.fps={} play.fmt={:?} play.feed={:?} measured_max_fps={} wallpaper.fmt={:?} async.executor={:?} boot(auto={} win={} lin={} sh={} uki={} mac={} strict={})",
+        "cfg: version={} accel.level={:?} render.mode={:?} sched.backend={:?} workers={:?} dist={:?} vsync={:?} blt_op={:?} tune.frames={} measured(render={:?} workers={:?} dist={:?} vsync={:?} vhalf={} cores={}) play.fps={} play.feed={:?} measured_max_fps={} playlist.items={} wallpaper.items={} async.executor={:?} boot(auto={} win={} lin={} sh={} uki={} mac={} strict={})",
         cfg.version,
         cfg.accel.level,
         cfg.render.mode,
@@ -284,10 +306,10 @@ pub fn load() -> Option<String> {
         cfg.render.measured_vsync_fps,
         cfg.render.measured_cores,
         cfg.play.fps,
-        cfg.play.format,
         cfg.play.feed,
         cfg.play.measured_max_fps,
-        cfg.wallpaper.format,
+        playlist_len(),
+        wallpaper_len(),
         cfg.r#async.executor,
         cfg.boot.auto,
         cfg.boot.windows,
@@ -297,33 +319,11 @@ pub fn load() -> Option<String> {
         cfg.boot.macos,
         cfg.boot.strict,
     );
+    // 列表行（矩阵卡点用：项数 + 循环模式；逐项行见 `play::load_playlist_clip`）。
     log::info!(
-        "decode: hevc(threads={} zc={} stream={} buf={}) avc(threads={} zc={} stream={} buf={}) vp9(threads={} zc={} stream={} buf={}) h263(threads={} zc={} stream={} buf={}) mpeg2v(threads={} zc={} stream={} buf={}) theora(threads={} zc={} stream={} buf={}) tune.window={}",
-        cfg.decode.hevc.threads.as_str(),
-        cfg.decode.hevc.zero_copy as u8,
-        cfg.decode.hevc.streaming as u8,
-        cfg.decode.hevc.buffers.min(32),
-        cfg.decode.avc.threads.as_str(),
-        cfg.decode.avc.zero_copy as u8,
-        cfg.decode.avc.streaming as u8,
-        cfg.decode.avc.buffers.min(32),
-        cfg.decode.vp9.threads.as_str(),
-        cfg.decode.vp9.zero_copy as u8,
-        cfg.decode.vp9.streaming as u8,
-        cfg.decode.vp9.buffers.min(32),
-        cfg.decode.h263.threads.as_str(),
-        cfg.decode.h263.zero_copy as u8,
-        cfg.decode.h263.streaming as u8,
-        cfg.decode.h263.buffers.min(32),
-        cfg.decode.mpeg2v.threads.as_str(),
-        cfg.decode.mpeg2v.zero_copy as u8,
-        cfg.decode.mpeg2v.streaming as u8,
-        cfg.decode.mpeg2v.buffers.min(32),
-        cfg.decode.theora.threads.as_str(),
-        cfg.decode.theora.zero_copy as u8,
-        cfg.decode.theora.streaming as u8,
-        cfg.decode.theora.buffers.min(32),
-        cfg.render.tune.window.clamp(1, 32),
+        "playlist: items={} loop={}",
+        playlist_len(),
+        playlist_loop().as_str()
     );
     warn
 }
@@ -689,9 +689,29 @@ pub fn measured_cores() -> u32 {
 pub fn wallpaper_enabled() -> bool {
     WALLPAPER_ENABLE.load(Ordering::Relaxed) != 0
 }
-/// 壁纸片源格式（默认 raw；qois 读 `wallpaper/wall.qois`）。
-pub fn wallpaper_format() -> MediaFormat {
-    MediaFormat::from_u8(WALLPAPER_FORMAT.load(Ordering::Relaxed))
+/// 播放列表循环模式（`[playlist] loop`，默认回绕）。
+pub fn playlist_loop() -> LoopMode {
+    LoopMode::from_u8(PLAYLIST_LOOP.load(Ordering::Relaxed))
+}
+/// 播放列表项数快照（原子计数）。
+pub fn playlist_len() -> usize {
+    PLAYLIST_LEN.load(Ordering::Relaxed)
+}
+/// 播放列表路径（按下标克隆，alloc 可行，no_std 可用；越界/空表回 None）。
+pub fn playlist_path(i: usize) -> Option<String> {
+    load_path(&PLAYLIST_PTR, &PLAYLIST_LEN, i)
+}
+/// 画廊循环模式（`[wallpaper] loop`，默认回绕）。
+pub fn wallpaper_loop() -> LoopMode {
+    LoopMode::from_u8(WALLPAPER_LOOP.load(Ordering::Relaxed))
+}
+/// 画廊项数快照（原子计数）。
+pub fn wallpaper_len() -> usize {
+    WALLPAPER_LEN.load(Ordering::Relaxed)
+}
+/// 画廊路径（按下标克隆；越界/空表回 None）。
+pub fn wallpaper_path(i: usize) -> Option<String> {
+    load_path(&WALLPAPER_PTR, &WALLPAPER_LEN, i)
 }
 /// 选项弹窗时冻结壁纸（默认 true；false 则行区继续播）。
 pub fn wallpaper_popup_freeze() -> bool {
@@ -722,9 +742,10 @@ pub fn effective_wallpaper_fps() -> Option<u32> {
         }
     }
 }
-/// B 过渡封顶帧数（0 = 全播预载集）。
+/// B 过渡长度（画廊语义：列表长度即全集；只读 `boot` 过渡用）。
+/// 旧 `[wallpaper] frames` 已删除（残留忽略），此处直接返回画廊项数。
 pub fn wallpaper_frames() -> u32 {
-    WALLPAPER_FRAMES.load(Ordering::Relaxed)
+    wallpaper_len().min(u32::MAX as usize) as u32
 }
 /// 预载帧数上限（0 = 不封顶；1-32，已钳制；单帧约 8MB，内存兜底）。
 pub fn wallpaper_preload() -> u32 {
@@ -911,9 +932,30 @@ pub fn measured_max_fps() -> u32 {
     PLAY_MEASURED.load(Ordering::Relaxed)
 }
 
-/// 播片片源格式（默认 qois；raw 读 `1080p/frameNNNN.raw` 序列）。
+/// 供片路由垫片（只读 `mp_slots` 分发用）：首项路径扩展名初判，
+/// 与 `play::detect_clip_format` 同序但免 I/O（`.mp4` 不探轨，一律按非
+/// qois/raw 计，真格式以加载期容器探针为准）。空列表回默认 qois。
+/// mp4 具体是 hev/avc/vp9 哪轨只影响软解分支（都不走槽路），此处统一 Hevc 占位。
 pub fn play_format() -> MediaFormat {
-    MediaFormat::from_u8(PLAY_FORMAT.load(Ordering::Relaxed))
+    let p = playlist_path(0).unwrap_or_default();
+    let l = p.to_ascii_lowercase();
+    if l.ends_with(".qois") {
+        MediaFormat::Qois
+    } else if is_raw_frame_path(&l) {
+        MediaFormat::Raw
+    } else if l.ends_with(".hevc") || l.ends_with(".265") || l.ends_with(".mp4") {
+        MediaFormat::Hevc
+    } else if l.ends_with(".ivf") {
+        MediaFormat::Vp9
+    } else if l.ends_with(".h263") {
+        MediaFormat::H263
+    } else if l.ends_with(".m2v") {
+        MediaFormat::Mpeg2v
+    } else if l.ends_with(".ogv") {
+        MediaFormat::Theora
+    } else {
+        MediaFormat::Qois
+    }
 }
 
 /// 供片模式（默认 clip；老文件缺键照读；只切 `Clip` 内部拿帧方式）。

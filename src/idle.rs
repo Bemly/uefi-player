@@ -75,7 +75,8 @@ fn idle_wait(screen: &mut Screen, clip: &Option<Clip>, tps: u64) {
                 last = now;
                 let clip = clip.as_ref().unwrap_or_else(|| unreachable!());
                 let _ = screen.upload_frame(WP_W, WP_H, clip.frame(idx));
-                idx += 1;
+                // 画廊步进：list 回绕，once 到末帧停留（见 `wallpaper::next_gallery_index`）。
+                idx = wallpaper::next_gallery_index(idx, clip.len());
             }
         } else {
             stall(Duration::from_millis(5));
@@ -114,7 +115,7 @@ fn popup(mut screen: Screen, clip: &Option<Clip>, tps: u64) -> Result<Screen> {
                 last = now;
                 if let Some(c) = clip {
                     let _ = screen.upload_frame_region(WP_W, WP_H, anim_top, c.frame(idx));
-                    idx += 1;
+                    idx = wallpaper::next_gallery_index(idx, c.len());
                 }
             }
         }

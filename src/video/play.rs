@@ -1,19 +1,49 @@
-//! `video::play`：片源加载与播放目标裁决（`[play] format/fps/feed` + `[decode.*]` 矩阵）。
+//! `video::play`：播放列表加载与播放目标裁决（`[playlist] loop/items` +
+//! `[play] fps/feed` + `[decode.*]` 矩阵）。
 //! `need_eager_clip` 决全量/懒形态（dynamic 恒 eager，mp 恒 eager 但 slots 例外走 lazy，
 //! 壁纸恒 eager 见 `feed_for`）；
-//! `load_video_clip` 八格式落同一 `Clip`；`resolve_play_target`/`measure_max_fps` 决限速目标。
+//! `detect_clip_format` 按路径自动检测八格式（扩展名 + `.mp4` 容器探针 hevc>avc>vp9）；
+//! `load_playlist_clip` 逐项加载（失败跳项 + warn，调用方推进；空列表 Err）；
+//! `next_playlist_index` 按循环模式推进（single 停留 / list 回绕 / once 到头结束）；
+//! `load_video_clip` 取首个可播项（三条播放路零改）；
+//! `resolve_play_target`/`measure_max_fps` 决限速目标（fps 政策 + vsync 封顶，逐项不变）。
+//!
+//! 新串口标记（矩阵卡点用，旧行逐字保留）：
+//! - `playlist: items={n} loop={mode}`（`config::load` 启动记一笔）；
+//! - `playlist: item {i}/{n} path={path} fmt={:?} feed={}`（每项加载记一笔，i 从 1 起）；
+//! - `playlist: skip {path} ({reason})`（检测/打开/解码失败跳项，不断播）；
+//! - `playlist: empty list, nothing to play`（空列表，播片直接 Err）；
+//!
+//! 旧行 `video: fmt=` / `video: feed=`（+`fetchovr=`）/ `decode: fmt=` / `play: path=` 逐字保留。
 
 use super::decoder::Clip;
+use super::demux::{Mp4VideoKind, demux_mp4_track};
 use super::{VIDEO_H, VIDEO_NATIVE_FPS, VIDEO_W, rdtsc};
-use crate::config::{self, MediaFormat};
-use crate::error::Result;
+use crate::config::{self, LoopMode, MediaFormat};
+use crate::error::{NyaStatus, Result};
 use crate::fs::Fs;
 use crate::graphics::Screen;
 use alloc::format;
-use uefi::cstr16;
+use alloc::string::String;
+use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU32, Ordering};
+
+/// 最近一次成功加载的播放列表下标（`load_video_clip`/`load_playlist_clip` 写入，
+/// `loops` 步进时读回；`u32::MAX` = 尚未加载，走旧 rewind 语义）。
+static PLAY_CURSOR: AtomicU32 = AtomicU32::new(u32::MAX);
+
+/// 当前剪辑在列表中的下标（加载后步进用；空列表/未加载回 None）。
+pub(crate) fn playlist_cursor() -> Option<usize> {
+    let v = PLAY_CURSOR.load(Ordering::Relaxed);
+    if v == u32::MAX {
+        None
+    } else {
+        Some(v as usize)
+    }
+}
 
 pub(crate) fn need_eager_clip() -> bool {
-    // mp/dynamic 恒 eager（全前视行区切分）；其余懒/全量按 feed 走 clip 路。
+    // mp/dynamic 恒全量前视（行区切分）；其余懒/全量按 feed 走 clip 路。
     // wallpaper 恒 eager 由 `feed_for` tag 裁决（此处不分支）。
     // single 零缓存：eager 会一次全解（正确但多内存），mp/dynamic 下仍 eager（矩阵要求）。
     // slots 例外（manual direct+all + qois/raw + 零拷系供片）：走 lazy 保留编码源，
@@ -32,61 +62,177 @@ pub(crate) fn need_eager_clip() -> bool {
     }
 }
 
-/// 片源加载（`[play] format` 矩阵）：qois 读整文件预解码，raw 读序列目录，
-/// hevc/avc/vp9 读 MP4 拆轨（缺容器回裸流老路），h263/mpeg2v/theora 读裸流直解；
-/// 八格式全落到同一 `Clip`（`feed` 懒/全量形态见上），三条播放路零分支。
-/// 容器优先裸流：avc/hevc/vp9 有 `video.mp4` 即拆轨（无匹配轨直接报错，
-/// 不静默换源）；hevc/vp9 缺容器回裸流老路（`video.hevc`/`video.ivf`，
-/// 老矩阵不断）；h263/mpeg2v/theora 只读裸流（`video.h263`/`video.m2v`/
-/// `video.ogv`，OggS 是 theora 磁盘原格式，非 MP4 系容器）。
-/// `eager` 为真时无视 `feed` 强制全量（矩阵需全前视路径用）；
-/// `measure` 传假，边测边解。
-pub(crate) fn load_video_clip(fs: &mut Fs, eager: bool) -> Result<Clip> {
-    use crate::video::demux::Mp4VideoKind;
-    let mut clip = match config::play_format() {
+/// 路径转 UEFI 打开路径（斜杠统一为反斜杠；`playlist`/`wallpaper` 条目共用）。
+pub(crate) fn path_cstr16(path: &str) -> Result<uefi::CString16> {
+    let fixed = path.replace('/', "\\");
+    uefi::CString16::try_from(fixed.as_str()).map_err(|_| NyaStatus::FromStrWithBufError)
+}
+
+/// raw 项的同胞目录（`frameNNNN.raw` 所在父目录，反斜杠形；裸文件名默认 `1080p`）。
+fn raw_parent_dir(path: &str) -> String {
+    match path.rsplit_once(['/', '\\']) {
+        Some((dir, _)) if !dir.is_empty() => dir.replace('/', "\\"),
+        _ => String::from("1080p"),
+    }
+}
+
+/// 整文件读出（容器探针用；失败回 None，调用方记 skip）。
+fn read_path_bytes(path: &str) -> Option<Vec<u8>> {
+    let mut fs = Fs::new().ok()?;
+    let c = path_cstr16(path).ok()?;
+    fs.read_file(&c).ok()
+}
+
+/// 片源自动检测（播放列表/画廊共用），按 SPEC 顺序：
+/// 1. 小写路径以 `.qois` 结尾 → qois；
+/// 2. 文件名匹配 `frameNNNN.raw` 模式 → raw（目录扫描）；
+/// 3. 小写路径以 `.mp4` 结尾 → 容器探针（demux 视频轨，hevc > avc > vp9 首中者胜，
+///    无匹配轨即 None，不断言静默回退）；
+/// 4. `.hevc`/`.265` → hevc；5. `.ivf` → vp9；6. `.h263` → h263；
+/// 7. `.m2v` → mpeg2v；8. `.ogv` → theora；
+///
+/// 其余一律 None（调用方记 `playlist: skip` + warn，不断播）。
+pub fn detect_clip_format(path: &str) -> Option<MediaFormat> {
+    let lower = path.to_ascii_lowercase();
+    if lower.ends_with(".qois") {
+        return Some(MediaFormat::Qois);
+    }
+    if config::is_raw_frame_path(path) {
+        return Some(MediaFormat::Raw);
+    }
+    if lower.ends_with(".mp4") {
+        // 容器探针：整文件 demux，hevc > avc > vp9 顺序首中者胜；
+        // 无匹配轨/坏容器/缺文件一律 None（调用方 skip + warn）。
+        let bytes = read_path_bytes(path)?;
+        for kind in [Mp4VideoKind::Hevc, Mp4VideoKind::Avc, Mp4VideoKind::Vp9] {
+            if demux_mp4_track(&bytes, kind, "playlist").is_ok() {
+                return Some(match kind {
+                    Mp4VideoKind::Hevc => MediaFormat::Hevc,
+                    Mp4VideoKind::Avc => MediaFormat::Avc,
+                    Mp4VideoKind::Vp9 => MediaFormat::Vp9,
+                });
+            }
+        }
+        return None;
+    }
+    if lower.ends_with(".hevc") || lower.ends_with(".265") {
+        return Some(MediaFormat::Hevc);
+    }
+    if lower.ends_with(".ivf") {
+        return Some(MediaFormat::Vp9);
+    }
+    if lower.ends_with(".h263") {
+        return Some(MediaFormat::H263);
+    }
+    if lower.ends_with(".m2v") {
+        return Some(MediaFormat::Mpeg2v);
+    }
+    if lower.ends_with(".ogv") {
+        return Some(MediaFormat::Theora);
+    }
+    None
+}
+
+/// 单项加载（`tag` 只进串口：`video` / `wallpaper`；壁纸恒 eager 由调用方传 true，
+/// `feed_for` 以 tag 裁决忽略每格式 fetch 覆盖）。
+/// 扩展名定读写路（mp4 走容器，裸后缀走裸流，raw 扫同胞目录）；
+/// `eager` 为真无视 `feed` 强制全量（矩阵需全前视路径用）。
+pub(crate) fn load_item_clip(
+    fs: &mut Fs,
+    path: &str,
+    fmt: MediaFormat,
+    tag: &str,
+    eager: bool,
+) -> Result<Clip> {
+    let lower = path.to_ascii_lowercase();
+    let is_mp4 = lower.ends_with(".mp4");
+    let mut clip = match fmt {
         MediaFormat::Qois => {
-            let file = fs.open_file(cstr16!("1080p\\video.qois"))?;
-            Clip::from_qois_file(file, "video")?
+            let c = path_cstr16(path)?;
+            Clip::from_qois_file(fs.open_file(&c)?, tag)?
         }
         MediaFormat::Raw => {
-            Clip::from_raw_dir(fs, "1080p", usize::MAX, VIDEO_W * VIDEO_H * 4, "video")?
+            let dir = raw_parent_dir(path);
+            Clip::from_raw_dir(fs, &dir, usize::MAX, VIDEO_W * VIDEO_H * 4, tag)?
+        }
+        MediaFormat::Hevc if is_mp4 => {
+            let c = path_cstr16(path)?;
+            Clip::from_mp4_file(fs.open_file(&c)?, Mp4VideoKind::Hevc, tag)?
+        }
+        MediaFormat::Hevc => {
+            let c = path_cstr16(path)?;
+            Clip::from_hevc_file(fs.open_file(&c)?, tag)?
         }
         MediaFormat::Avc => {
-            let file = fs.open_file(cstr16!("1080p\\video.mp4"))?;
-            Clip::from_mp4_file(file, Mp4VideoKind::Avc, "video")?
+            let c = path_cstr16(path)?;
+            Clip::from_mp4_file(fs.open_file(&c)?, Mp4VideoKind::Avc, tag)?
         }
-        MediaFormat::Hevc => match fs.open_file(cstr16!("1080p\\video.mp4")) {
-            Ok(file) => Clip::from_mp4_file(file, Mp4VideoKind::Hevc, "video")?,
-            Err(_) => {
-                let file = fs.open_file(cstr16!("1080p\\video.hevc"))?;
-                Clip::from_hevc_file(file, "video")?
-            }
-        },
-        MediaFormat::Vp9 => match fs.open_file(cstr16!("1080p\\video.mp4")) {
-            Ok(file) => Clip::from_mp4_file(file, Mp4VideoKind::Vp9, "video")?,
-            Err(_) => {
-                let file = fs.open_file(cstr16!("1080p\\video.ivf"))?;
-                Clip::from_vp9_file(file, "video")?
-            }
-        },
+        MediaFormat::Vp9 if is_mp4 => {
+            let c = path_cstr16(path)?;
+            Clip::from_mp4_file(fs.open_file(&c)?, Mp4VideoKind::Vp9, tag)?
+        }
+        MediaFormat::Vp9 => {
+            let c = path_cstr16(path)?;
+            Clip::from_vp9_file(fs.open_file(&c)?, tag)?
+        }
         MediaFormat::H263 => {
-            let file = fs.open_file(cstr16!("1080p\\video.h263"))?;
-            Clip::from_h263_file(file, "video")?
+            let c = path_cstr16(path)?;
+            Clip::from_h263_file(fs.open_file(&c)?, tag)?
         }
         MediaFormat::Mpeg2v => {
-            let file = fs.open_file(cstr16!("1080p\\video.m2v"))?;
-            Clip::from_mpeg2v_file(file, "video")?
+            let c = path_cstr16(path)?;
+            Clip::from_mpeg2v_file(fs.open_file(&c)?, tag)?
         }
         MediaFormat::Theora => {
-            let file = fs.open_file(cstr16!("1080p\\video.ogv"))?;
-            Clip::from_theora_file(file, "video")?
+            let c = path_cstr16(path)?;
+            Clip::from_theora_file(fs.open_file(&c)?, tag)?
         }
     };
     if eager {
         clip.ensure_eager()?;
     }
-    let fmt = config::play_format();
-    // 矩阵靠它断言格式分发（`video-hevc`/`video-vp9` 的 `expect` 行）。
+    Ok(clip)
+}
+
+/// 播放列表示项加载（`index` 下标；失败跳项 + warn，调用方推进下标；
+/// 空列表直接 Err）。成功记 `playlist: item` 行并更新游标。
+pub fn load_playlist_clip(fs: &mut Fs, index: usize, eager: bool) -> Result<Clip> {
+    let total = config::playlist_len();
+    if total == 0 {
+        log::warn!("playlist: empty list, nothing to play");
+        return Err(NyaStatus::_Debug(String::from("playlist: empty list")));
+    }
+    let path = match config::playlist_path(index) {
+        Some(p) => p,
+        None => {
+            log::warn!("playlist: skip index {} (out of range)", index);
+            return Err(NyaStatus::_Debug(format!("playlist: bad index {}", index)));
+        }
+    };
+    let fmt = match detect_clip_format(&path) {
+        Some(f) => f,
+        None => {
+            log::warn!("playlist: skip {} (unknown format or probe failed)", path);
+            return Err(NyaStatus::_Debug(format!("playlist: skip {}", path)));
+        }
+    };
+    let clip = match load_item_clip(fs, &path, fmt, "video", eager) {
+        Ok(c) => c,
+        Err(e) => {
+            log::warn!("playlist: skip {} ({:?})", path, e);
+            return Err(e);
+        }
+    };
+    PLAY_CURSOR.store(index as u32, Ordering::Relaxed);
+    // 矩阵靠它断言逐项分发（`playlist: item` + `video: fmt=` 行）。
+    log::info!(
+        "playlist: item {}/{} path={} fmt={:?} feed={}",
+        index + 1,
+        total,
+        path,
+        fmt,
+        config::effective_feed(fmt).as_str(),
+    );
     log::info!(
         "video: fmt={:?} frames={} {}x{}",
         fmt,
@@ -132,6 +278,72 @@ pub(crate) fn load_video_clip(fs: &mut Fs, eager: bool) -> Result<Clip> {
         config::decode_window(fmt),
     );
     Ok(clip)
+}
+
+/// 列表步进（调用方在条目播完调；`total == 0` 直接 None）：
+/// `loop_single` 原地停留（调用方重载同项），`loop_list` 回绕，`once` 到头结束（None）。
+pub fn next_playlist_index(cur: usize, total: usize, loop_mode: LoopMode) -> Option<usize> {
+    if total == 0 {
+        return None;
+    }
+    match loop_mode {
+        LoopMode::LoopSingle => Some(cur),
+        LoopMode::LoopList => Some((cur + 1) % total.max(1)),
+        LoopMode::Once => {
+            if cur + 1 < total {
+                Some(cur + 1)
+            } else {
+                None
+            }
+        }
+    }
+}
+
+/// 条目播完推进（`loops` 唯一调用）：按循环模式算下标，重载（成功即走，
+/// 逐项 `playlist: item` 行即重播证明）；坏项跳过（已 warn，至多绕一圈）；
+/// 无处可去（`once` 到头 / 全坏）回 None（调用方结束播放）。
+pub(crate) fn advance_playlist(video: &mut Clip, cur: usize, eager: bool) -> Option<usize> {
+    let total = config::playlist_len();
+    let mode = config::playlist_loop();
+    let mut nxt = next_playlist_index(cur, total, mode)?;
+    let mut tries = 0usize;
+    loop {
+        let mut fs = Fs::new().ok()?;
+        match load_playlist_clip(&mut fs, nxt, eager) {
+            Ok(c) => {
+                *video = c;
+                return Some(nxt);
+            }
+            Err(_) => {
+                tries += 1;
+                if tries >= total.max(1) {
+                    return None;
+                }
+                nxt = next_playlist_index(nxt, total, mode)?;
+            }
+        }
+    }
+}
+
+/// 片源加载（播放列表首个可播项）：逐项自动检测，失败跳项 + warn，不断播；
+/// 空列表 / 全坏直接 Err（无静默换源）。`eager` 为真无视 `feed` 强制全量；
+/// `measure` 传假，边测边解。
+pub(crate) fn load_video_clip(fs: &mut Fs, eager: bool) -> Result<Clip> {
+    let total = config::playlist_len();
+    if total == 0 {
+        log::warn!("playlist: empty list, nothing to play");
+        return Err(NyaStatus::_Debug(String::from("playlist: empty list")));
+    }
+    for i in 0..total {
+        match load_playlist_clip(fs, i, eager) {
+            Ok(c) => return Ok(c),
+            // 跳项已 warn，此处直接推进（无静默回退：mp4 无匹配轨不换裸流）。
+            Err(_) => continue,
+        }
+    }
+    Err(NyaStatus::_Debug(String::from(
+        "playlist: no playable item",
+    )))
 }
 
 /// 播放帧率决策：max 不限速；capped 直接用；auto 无实测就现测并回写，

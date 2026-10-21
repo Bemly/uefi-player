@@ -7,11 +7,29 @@
 //! soak 用 fps=max 对齐）、single->feed=single+render.blt、
 //! legacy_blt->clip+eager+render.blt、legacy_direct->clip+eager+render.direct+workers=bsp_only、
 //! legacy_u64->clip+eager+render.direct+workers=bsp_only+accel.level=scalar。
+//!
+//! 播放列表步进（本文件后半）：条目播完（`next_frame` 见 None）按
+//! `play::next_playlist_index` 推进并重载（`advance_playlist`，逐项
+//! `playlist: item` 行即重播证明；坏项已 warn 跳过，至多绕一圈）；
+//! `once` 到头回 `Ok`（菜单返回），空列表走旧 rewind 语义（到此必非空，纯兜底）。
 
 use super::decoder::Clip;
+use super::play::{advance_playlist, need_eager_clip, playlist_cursor};
 use super::{pace_or_drop, rdtsc};
 use crate::error::Result;
 use crate::graphics::Screen;
+
+/// 条目播完推进（两循环共用）：有游标即按列表步进（无处可去回 true = 结束），
+/// 无游标（空列表兜底）rewind 回 false。
+fn playlist_step(video: &mut Clip) -> bool {
+    match playlist_cursor() {
+        Some(cur) => advance_playlist(video, cur, need_eager_clip()).is_none(),
+        None => {
+            video.rewind();
+            false
+        }
+    }
+}
 
 pub(crate) fn blt_loop(
     screen: &mut Screen,
@@ -26,7 +44,11 @@ pub(crate) fn blt_loop(
         let fstart = rdtsc();
         match video.next_frame() {
             Some(frame) => screen.upload_frame(width, height, frame)?,
-            None => video.rewind(),
+            None => {
+                if playlist_step(&mut video) {
+                    return Ok(());
+                }
+            }
         }
         pace_or_drop(&mut video, target, tps, fstart, &mut drops);
     }
@@ -48,7 +70,11 @@ pub(crate) fn direct_loop(
         let fstart = rdtsc();
         match video.next_frame() {
             Some(frame) => screen.upload_frame(width, height, frame)?,
-            None => video.rewind(),
+            None => {
+                if playlist_step(&mut video) {
+                    return Ok(());
+                }
+            }
         }
         pace_or_drop(&mut video, target, tps, fstart, &mut drops);
     }

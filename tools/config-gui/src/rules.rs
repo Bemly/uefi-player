@@ -181,17 +181,37 @@ mod blackbox_matrix {
             play: PlayConfig {
                 fps: String::from("60"),
                 measured_max_fps: 120,
-                format: MediaFormat::Raw,
                 feed: FeedMode::Clip,
             },
+            playlist: PlaylistConfig {
+                loop_mode: LoopMode::LoopList,
+                items: vec![
+                    PlaylistItem {
+                        path: String::from("1080p/video.mp4"),
+                    },
+                    PlaylistItem {
+                        path: String::from("1080p/video.hevc"),
+                    },
+                    PlaylistItem {
+                        path: String::from("1080p/video.qois"),
+                    },
+                ],
+            },
             decode: DecodeTable::default(),
-            wallpaper: WallpaperConfig {
+            wallpaper: WallpaperListConfig {
                 enable: true,
+                loop_mode: LoopMode::LoopList,
                 fps: String::from("20"),
-                frames: 30,
                 preload: 4,
-                format: MediaFormat::Qois,
                 popup_freeze: true,
+                items: vec![
+                    PlaylistItem {
+                        path: String::from("wallpaper/wall.mp4"),
+                    },
+                    PlaylistItem {
+                        path: String::from("wallpaper/wall.qois"),
+                    },
+                ],
             },
             boot: BootConfig {
                 auto: true,
@@ -231,15 +251,17 @@ mod blackbox_matrix {
         }
     }
 
-    /// 远古文件（v0.1 时代：无 wallpaper/tune/decode 表）照读，新键全按默认。
+    /// 远古文件（v0.1 时代：无 wallpaper/playlist/tune/decode 表）照读，新键全按默认。
     #[test]
     fn compat_legacy_matrix() {
         let text = "version = 1\n[accel]\nlevel = \"auto\"\n[render]\nmode = \"auto\"\n[play]\nfps = \"auto\"\n";
         let cfg: FileConfig = toml::from_str(text).unwrap();
         assert!(!cfg.wallpaper.enable);
-        assert_eq!(cfg.wallpaper.format, MediaFormat::Raw);
+        assert_eq!(cfg.wallpaper.loop_mode, LoopMode::LoopList);
+        assert!(cfg.wallpaper.items.is_empty());
         assert!(cfg.wallpaper.popup_freeze);
-        assert_eq!(cfg.play.format, MediaFormat::Qois);
+        assert!(cfg.playlist.items.is_empty());
+        assert_eq!(cfg.playlist.loop_mode, LoopMode::LoopList);
         assert_eq!(cfg.play.feed, FeedMode::Clip);
         assert_eq!(cfg.schedule.dist, DistMode::Auto);
         assert_eq!(cfg.schedule.workers, WorkersMode::Auto);
@@ -259,36 +281,81 @@ mod blackbox_matrix {
         }
     }
 
-    /// 片源格式八档位回写（play/wallpaper 各 8 种，64 组合，不丢字段）。
-    /// 弹窗冻结开关同步翻转（128 组合，见 `[wallpaper] popup_freeze`）。
-    /// 新 6 档（hevc/vp9/h263/mpeg2v/theora/avc）逐档断 `file_str` 小写串照读照写。
+    /// 播放列表循环三档回写（`loop_single`/`loop_list`/`once` × 冻结开关，
+    /// 3×2 = 6 组合不断字段；旧 `[play] format` 残留直接忽略）。
+    /// （旧 `format_roundtrip_matrix` 已删：`[play] format`/
+    /// `[wallpaper] format,frames` 键随播放页一并删除，解码 tabs 见下。）
     #[test]
-    fn format_roundtrip_matrix() {
+    fn playlist_loop_modes_matrix() {
         let mut n = 0;
-        for pf in MediaFormat::ALL {
-            for wf in MediaFormat::ALL {
-                for froze in [false, true] {
-                    let mut cfg = FileConfig::default();
-                    cfg.play.format = pf;
-                    cfg.wallpaper.format = wf;
-                    cfg.wallpaper.popup_freeze = froze;
-                    let text = toml::to_string(&cfg).unwrap();
-                    assert!(text.contains(pf.file_str()), "{pf:?} missing in {text}");
-                    let back: FileConfig = toml::from_str(&text).unwrap();
-                    assert_eq!(back.play.format, pf);
-                    assert_eq!(back.wallpaper.format, wf);
-                    assert_eq!(back.wallpaper.popup_freeze, froze);
-                    assert_eq!(back, cfg);
-                    n += 1;
-                }
+        for m in LoopMode::ALL {
+            for froze in [false, true] {
+                let mut cfg = FileConfig::default();
+                cfg.playlist.loop_mode = m;
+                cfg.wallpaper.loop_mode = m;
+                cfg.wallpaper.popup_freeze = froze;
+                let text = toml::to_string(&cfg).unwrap();
+                assert!(
+                    text.contains(&format!("loop = \"{}\"", m.file_str())),
+                    "{m:?} missing in {text}"
+                );
+                let back: FileConfig = toml::from_str(&text).unwrap();
+                assert_eq!(back.playlist.loop_mode, m);
+                assert_eq!(back.wallpaper.loop_mode, m);
+                assert_eq!(back.wallpaper.popup_freeze, froze);
+                assert_eq!(back, cfg);
+                n += 1;
             }
         }
-        assert_eq!(n, 8 * 8 * 2);
-        // 老文件缺键：play 按 qois、wallpaper 按 raw/冻结照读。
+        assert_eq!(n, 3 * 2);
+        // 老文件缺键：两表全按 `loop_list` + 空列表照读。
         let legacy: FileConfig = toml::from_str("version = 1\n").unwrap();
-        assert_eq!(legacy.play.format, MediaFormat::Qois);
-        assert_eq!(legacy.wallpaper.format, MediaFormat::Raw);
+        assert_eq!(legacy.playlist.loop_mode, LoopMode::LoopList);
+        assert_eq!(legacy.wallpaper.loop_mode, LoopMode::LoopList);
+        assert!(legacy.playlist.items.is_empty());
+        assert!(legacy.wallpaper.items.is_empty());
         assert!(legacy.wallpaper.popup_freeze);
+        // 旧 `[play] format` / `[wallpaper] format,frames` 残留直接忽略，不断解析。
+        let old: FileConfig = toml::from_str(
+            "version = 1\n[play]\nfps = \"max\"\nformat = \"raw\"\n[wallpaper]\nformat = \"qois\"\nframes = 30\n",
+        )
+        .unwrap();
+        assert_eq!(old.play.fps, "max");
+        assert!(old.playlist.items.is_empty());
+        assert!(old.wallpaper.items.is_empty());
+    }
+
+    /// 播放列表多条目回写（`playlist-list-loop`）、单条循环
+    /// （`playlist-loop-single`）、播完即停（`playlist-once`）与壁纸画廊列表
+    /// （`wallpaper-gallery-list`）见 `playlist.rs` 同名测试（列表归属页，
+    /// 黑盒仍纯 TOML 无 display，`cargo test` 同跑）。
+
+    /// 解码 tabs 回写（8 格式 × 线程 2 档采样：tab 只切展示，落盘八表齐全；
+    /// 全量组合见 `decode_roundtrip_matrix`，此处断 tab 序与落盘键）。
+    #[test]
+    fn decode_tabs_matrix() {
+        assert_eq!(DecodeTable::ORDER.len(), 8);
+        assert_eq!(DecodeTable::ORDER, MediaFormat::ALL);
+        let mut cfg = FileConfig::default();
+        for (i, fmt) in DecodeTable::ORDER.iter().copied().enumerate() {
+            let d = cfg.decode.get_mut(fmt).unwrap();
+            d.threads = if i % 2 == 0 {
+                DecodeThreads::BspOnly
+            } else {
+                DecodeThreads::All
+            };
+            d.buffers = i as u32;
+        }
+        let text = toml::to_string(&cfg).unwrap();
+        // 八表节名齐全（`[decode.<fmt>]`），逐表线程/缓冲不断字段。
+        for fmt in DecodeTable::ORDER {
+            assert!(
+                text.contains(&format!("[decode.{}]", fmt.file_str())),
+                "{fmt:?} missing in {text}"
+            );
+        }
+        let back: FileConfig = toml::from_str(&text).unwrap();
+        assert_eq!(back, cfg);
     }
 
     /// 预载帧数回写（0 = 不封顶，1/8/32 照写；老文件缺键按默认 8 照读）。

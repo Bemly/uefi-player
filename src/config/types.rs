@@ -3,6 +3,7 @@
 //! 与 `tools/config-gui/src/schema.rs` 同构（字段名/枚举字符串一致，改动双边同步）。
 
 use alloc::string::String;
+use alloc::vec::Vec;
 
 use serde::{Deserialize, Serialize};
 
@@ -482,7 +483,8 @@ pub struct Config {
     pub accel: AccelConfig,
     pub render: RenderConfig,
     pub play: PlayConfig,
-    pub wallpaper: WallpaperConfig,
+    pub playlist: PlaylistConfig,
+    pub wallpaper: WallpaperListConfig,
     pub boot: BootConfig,
     pub schedule: ScheduleConfig,
     pub r#async: AsyncConfig,
@@ -496,7 +498,8 @@ impl Default for Config {
             accel: AccelConfig::default(),
             render: RenderConfig::default(),
             play: PlayConfig::default(),
-            wallpaper: WallpaperConfig::default(),
+            playlist: PlaylistConfig::default(),
+            wallpaper: WallpaperListConfig::default(),
             boot: BootConfig::default(),
             schedule: ScheduleConfig::default(),
             r#async: AsyncConfig::default(),
@@ -556,49 +559,122 @@ pub(crate) const fn default_wallpaper_preload() -> u32 {
     8
 }
 
+/// 播放列表循环模式（`[playlist] loop` + `[wallpaper] loop` 共用，serde 小写下划线）：
+/// - `LoopSingle`：重播当前项（视频播完重载同项，画廊只取首项）；
+/// - `LoopList`（默认）：播完回绕；
+/// - `Once`：播完即停（视频回菜单，画廊末帧保持）。
+///
+/// 非法值整文件回默认 + 警告（与其它枚举档位同规则，无别名/回退）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum LoopMode {
+    LoopSingle,
+    #[default]
+    LoopList,
+    Once,
+}
+
+impl LoopMode {
+    pub(crate) const fn as_u8(self) -> u8 {
+        match self {
+            Self::LoopSingle => 0,
+            Self::LoopList => 1,
+            Self::Once => 2,
+        }
+    }
+    pub(crate) fn from_u8(v: u8) -> Self {
+        match v {
+            0 => Self::LoopSingle,
+            2 => Self::Once,
+            _ => Self::LoopList,
+        }
+    }
+    /// 配置文件拼写（serde snake_case 同形，供串口 `playlist:`/`wallpaper: gallery` 行）。
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::LoopSingle => "loop_single",
+            Self::LoopList => "loop_list",
+            Self::Once => "once",
+        }
+    }
+}
+
+/// 播放列表条目（`[[playlist.items]]` / `[[wallpaper.items]]` 单键：片源路径，
+/// 斜杠分隔，固件侧统一转反斜杠打开；格式按路径自动检测，见 `play::detect_clip_format`）。
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct PlaylistItem {
+    pub path: String,
+}
+
+/// `[playlist]`：播放列表（`loop` + 条目表；`loop` 是 Rust 关键字故字段名 `loop_mode` + rename）。
+/// 缺表缺键全默认（空列表，播片直接 Err，不断 boot）。
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct PlaylistConfig {
+    #[serde(rename = "loop")]
+    pub loop_mode: LoopMode,
+    #[serde(default)]
+    pub items: Vec<PlaylistItem>,
+}
+
 /// `[wallpaper] fps`：字符串三态（`"auto"`/`"max"`/`"15"`）。整数值不再兼容：
 /// 非字符串即整文件回默认 + 警告（无别名/回退，与 `accel.level` 旧 `"avx512"`、
 /// `vsync` 旧 `"on"` 同规则）。
-
-/// `[wallpaper]`：动态壁纸开关（P4）。片源双格式（`format` 矩阵，见 `MediaFormat`）：
-/// - `raw`（默认）：`wallpaper/frameNNNN.raw`，BGRA 直存，首版定死 1920x1080；
-/// - `qois`：`wallpaper/wall.qois`（与视频同格式），开机预解码。
-/// `popup_freeze`：选项弹窗弹出时冻结壁纸（默认 true；false 则行区继续播，
-/// 选项画在文字区，见 `idle.rs`）。缺键老配置按默认（关/raw/冻结）处理。
+///
+/// `[wallpaper]`：动态壁纸画廊（`enable` 总开关 + `loop` 循环 + 条目表；
+/// `format`/`frames` 旧键已删除，残留按 serde 默认忽略，无别名；
+/// 每项按路径自动检测，与播放列表同一 `detect_clip_format`，raw 走画廊目录扫描；
+/// `preload` 按项封顶，B 过渡长度由项数代替 `frames`）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
-pub struct WallpaperConfig {
+pub struct WallpaperListConfig {
     pub enable: bool,
+    #[serde(rename = "loop")]
+    pub loop_mode: LoopMode,
     /// 背景循环帧率三态（与 `[play] fps` 同构：`"auto"` 最左 / `"max"` 最右 /
     /// 中间 `1`-`240` 显式封顶；默认 `"15"`）。
     #[serde(default = "default_wallpaper_fps")]
     pub fps: String,
-    /// B 过渡封顶帧数（0 = 全播预载集）。
-    #[serde(default)]
-    pub frames: u32,
     /// 预载帧数上限（内存兜底；单帧 1920x1080x4 ≈ 8MB）。
     /// 0 = 不封顶（和播片一样拉满：有多少读多少，长动画注意内存）。
     #[serde(default = "default_wallpaper_preload")]
     pub preload: u32,
-    /// 片源格式（默认 raw，老文件照读）。
-    #[serde(default = "default_wallpaper_format")]
-    pub format: MediaFormat,
     /// 选项弹窗时冻结壁纸（默认 true；false 则行区继续播）。
     #[serde(default = "default_true")]
     pub popup_freeze: bool,
+    #[serde(default)]
+    pub items: Vec<PlaylistItem>,
 }
 
-impl Default for WallpaperConfig {
+impl Default for WallpaperListConfig {
     fn default() -> Self {
         Self {
             enable: false,
+            loop_mode: LoopMode::LoopList,
             fps: default_wallpaper_fps(),
-            frames: 0,
             preload: default_wallpaper_preload(),
-            format: MediaFormat::Raw,
             popup_freeze: true,
+            items: Vec::new(),
         }
     }
+}
+
+/// `frameNNNN.raw` 文件名规则（播放列表 raw 项 / 画廊 raw 项共用）：
+/// 取最后一级文件名（大小写不敏感），`frame` + ≥1 位数字 + `.raw` 后缀；
+/// 命中即从其所在目录扫描同胞帧（BGRA 直存，零解码）。
+pub(crate) fn is_raw_frame_path(path: &str) -> bool {
+    let base = path.rsplit(['/', '\\']).next().unwrap_or(path);
+    let lower = base.to_ascii_lowercase();
+    let stem = match lower.strip_suffix(".raw") {
+        Some(s) => s,
+        None => return false,
+    };
+    let digits = match stem.strip_prefix("frame") {
+        Some(d) => d,
+        None => return false,
+    };
+    !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())
 }
 
 /// 片源格式矩阵（播放器 + 壁纸共用，`Clip` 统一解码）：
@@ -612,7 +688,8 @@ impl Default for WallpaperConfig {
 /// - `Theora`：OggS 磁盘原格式（手写拆包，只收 4:2:0）。
 ///
 /// 非法值整个文件回默认 + 警告（与其它枚举档位同规则，不单独兜底）。
-/// 缺键老文件：`[play]` 按 `qois`、`[wallpaper]` 按 `raw` 照读。
+/// 格式不再由配置指定：播放列表/画廊每项按路径自动检测（见 `play::detect_clip_format`），
+/// `[play] format` / `[wallpaper] format` 旧键残留按 serde 默认忽略。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum MediaFormat {
@@ -624,42 +701,6 @@ pub enum MediaFormat {
     Mpeg2v,
     Theora,
     Avc,
-}
-
-pub(crate) const fn default_play_format() -> MediaFormat {
-    MediaFormat::Qois
-}
-
-pub(crate) const fn default_wallpaper_format() -> MediaFormat {
-    MediaFormat::Raw
-}
-
-impl MediaFormat {
-    pub(crate) const fn as_u8(self) -> u8 {
-        match self {
-            MediaFormat::Qois => 0,
-            MediaFormat::Raw => 1,
-            MediaFormat::Hevc => 2,
-            MediaFormat::Vp9 => 3,
-            MediaFormat::H263 => 4,
-            MediaFormat::Mpeg2v => 5,
-            MediaFormat::Theora => 6,
-            MediaFormat::Avc => 7,
-        }
-    }
-
-    pub(crate) fn from_u8(v: u8) -> MediaFormat {
-        match v {
-            1 => MediaFormat::Raw,
-            2 => MediaFormat::Hevc,
-            3 => MediaFormat::Vp9,
-            4 => MediaFormat::H263,
-            5 => MediaFormat::Mpeg2v,
-            6 => MediaFormat::Theora,
-            7 => MediaFormat::Avc,
-            _ => MediaFormat::Qois,
-        }
-    }
 }
 
 fn default_fps() -> String {
@@ -842,10 +883,11 @@ impl FeedMode {
 }
 
 /// `[play]`：`fps` 是字符串（三态没法用纯数字表达），`measured_max_fps`
-/// 只由固件实测回写（0 = 未测），GUI 只读展示。`format` 切片源（八格式全通，
-/// 容器优先裸流回退，见 `video::load_video_clip`）。
-/// `feed` 切供片（默认 `clip`，老文件缺键照读；`[play] pipeline` 已删除，
-/// 旧键未知忽略，不再照读）。
+/// 只由固件实测回写（0 = 未测），GUI 只读展示。`format` 旧键已删除
+/// （片源改走 `[playlist]`，每项按路径自动检测，残留按 serde 默认忽略，无别名；
+/// 旧 `[play] pipeline` 同理未知忽略，不再照读）。
+/// `feed` 切供片（默认 `clip`，老文件缺键照读；每项有效档 = `decode.<fmt>.fetch`
+/// 覆盖 else 全局，见 `decode::effective_feed`）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PlayConfig {
@@ -853,9 +895,6 @@ pub struct PlayConfig {
     pub fps: String,
     #[serde(default)]
     pub measured_max_fps: u32,
-    /// 片源格式（默认 qois，老文件照读）。
-    #[serde(default = "default_play_format")]
-    pub format: MediaFormat,
     /// 供片模式（默认 clip，老文件缺键照读；只切 `Clip` 内部拿帧方式）。
     #[serde(default)]
     pub feed: FeedMode,
@@ -866,7 +905,6 @@ impl Default for PlayConfig {
         Self {
             fps: default_fps(),
             measured_max_fps: 0,
-            format: MediaFormat::Qois,
             feed: FeedMode::Clip,
         }
     }

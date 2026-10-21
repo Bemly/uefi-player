@@ -74,6 +74,19 @@ cargo run --manifest-path tools/qemu-matrix/Cargo.toml --target "$(rustc -vV | s
   旧 7 行为映射（`render_additions` 为空）：staged/zero_copy/stream→对应 feed +
   `render.blt`；single→NEW `feed=single`；legacy_blt/direct/u64→clip+eager +
   对应 render/workers/accel（u64 步进由 `copy_block` 位宽分发覆盖）。
+- 播放列表模型（`[playlist] loop` + `[[playlist.items]] path`，`[play] format` 旧键已删除）：
+  每项按路径自动检测（qois 后缀 / `frameNNNN.raw` 目录扫描 / mp4 容器探针
+  hevc>avc>vp9 首匹配胜出 / .hevc/.265 / .ivf / .h263 / .m2v / .ogv；
+  失败该项 `playlist: skip` 警告跳过，不断播；空列表直接报错）。
+  `loop` 三档：`loop_list` 回绕 / `loop_single` 重播当前项 / `once` 播完即停。
+  壁纸同模型（`[wallpaper]` enable/loop/fps/preload/popup_freeze +
+  `[[wallpaper.items]]`，`format`/`frames` 旧键已删除，列表长度治理 B 过渡）。
+  串口新标记：`playlist: items={n} loop={mode}` /
+  `playlist: item {i}/{n} path={path} fmt={:?} feed={}` /
+  `wallpaper: gallery items={n} loop={mode} preloaded {m} frames (preload {p})`；
+  逐项 `video: fmt=` / `video: feed=` / `decode: fmt=` / `play: path=` 保持原口径。
+  多文件夹具复用既有 `needs_*` 标志（同 case 置多个即同镜像多片源，无新标志；
+  两个 mp4 变体同名同路，一 case 只取其一，以 avc/hev 两轨代表覆盖容器探针）。
 - 每个 case 独立镜像、独立 QEMU 进程（`player.toml` 内联在 `matrix/` 分组文件里），
   互不干扰；超时即 FAIL（固件 `run_menu` 永不返回，只能靠模式匹配 + 超时判定）。
 - 按键经 human monitor（telnet）`sendkey` 注入；`pause_return` 的回车一律再补
@@ -98,5 +111,9 @@ cargo run --manifest-path tools/qemu-matrix/Cargo.toml --target "$(rustc -vV | s
    断言生效 `video: feed=stream` + `fetchovr=<fmt>` 令牌）。
 2. 有新串口日志 → 老 case 的 `expect` 能用就复用，不硬造新 case。
 3. 慢 case（>5min）标 `slow = true`，默认跳过，`--include-slow` 才跑。
+4. 播放列表/画廊 case 按 `playlist-*` / `wallpaper-gallery-*` 样式
+  （`playlist: items=` + 逐项 `playlist: item` + `video: fmt=` + path 行 + soak；
+   画廊断言 `wallpaper: gallery items=` 前缀 + `preload` 封顶语义，不锁具体帧数）。
+   多文件同镜像时复用既有 `needs_*` 标志组合，不加新标志。
 4. 多卷场景用 `extra_volumes`（第二盘起挂 hd2、hd3…）：`{path, text|zeros|efi}` 三选一
    组文件；跨盘 chainload 的被起项直接用 `efi = true`（我们的 efi 改名）。

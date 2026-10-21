@@ -10,11 +10,17 @@ use crate::rules::*;
 use crate::schema::*;
 use crate::transcode::TranscodeState;
 
+/// 播放列表编辑器（`playlist.rs`，同 `impl App`，跨文件只为守 1000 行上限；
+/// `#[path]` 挂载：`main.rs` 未动（不可编辑），故在此声明子模块，
+/// 编译单元为 `crate::app::playlist`，行为与顶层 `mod playlist` 一致）。
+#[path = "playlist.rs"]
+pub(crate) mod playlist;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Page {
     File,
     Accel,
-    Player,
+    Playlist,
     Decode,
     Wallpaper,
     Boot,
@@ -40,10 +46,21 @@ pub(crate) struct App {
     pub(crate) page: Page,
     /// 播放帧率滑杆镜像：0 = auto，1-240 = 限速，241 = max。
     /// `GlassSlider` 只要 `f32`，每帧写回 `cfg.play.fps`。
+    /// （播放页已并入解码页顶：全局默认帧率 + 供片摆在 8 tabs 上方。）
     pub(crate) play_f: f32,
     /// 供片模式滑杆镜像：0-4 对应 `FeedMode::ALL` 下标（`sync_widgets` 随读盘同步，
     /// 否则开档文件载入后滑杆仍停在旧位，下一帧会把已载入的档位盖掉）。
+    /// 家在解码页顶（`[play] feed` 全局默认，逐格式 `fetch` 覆盖它）。
     pub(crate) feed_f: f32,
+    /// 循环模式滑杆镜像：0-2 对应 `LoopMode::ALL` 下标（`sync_widgets` 随读盘同步）。
+    /// 播放列表与壁纸画廊各一（加速/供片滑杆同式，无新件）。
+    pub(crate) playlist_loop_f: f32,
+    pub(crate) wp_loop_f: f32,
+    /// 解码页当前 tab（8 格式单选，默认 `Qois`；只切展示，不落盘）。
+    pub(crate) decode_tab: MediaFormat,
+    /// 列表单选（`None` = 未选；GlassButton 行点选，删除/上下移消费它）。
+    pub(crate) playlist_sel: Option<usize>,
+    pub(crate) wallpaper_sel: Option<usize>,
     /// 解码表滑杆镜像（与 `DecodeTable::ORDER` 同序，同下标）：
     /// 线程 0-1 对应 `DecodeThreads::ALL` 下标，缓冲 0-32（0 = 跟随 `tune.window`），
     /// 供片 0 = 继承全局 `[play] feed`（`None`，落盘不写键），1-5 对应 `FeedMode::ALL` 下标 +1。
@@ -53,10 +70,10 @@ pub(crate) struct App {
     /// 加速档位滑杆镜像：0-30 对应 `AccelLevel::ALL` 下标（`sync_widgets` 随读盘同步，
     /// 否则开档文件载入后滑杆仍停在旧位，下一帧会把已载入的档位盖掉）。
     pub(crate) accel_f: f32,
-    /// 壁纸滑杆镜像：fps 1-30，frames 0-120（0 = 全播），preload 0-32（0 = 不封顶）。
+    /// 壁纸滑杆镜像：fps 1-30，preload 0-32（0 = 不封顶）。
     /// 库内滑杆只吃 `f32`，整数档用 round 镜像（见 Accel 页 `*_f` 字段）。
+    /// 旧 `frames`（过渡封顶）已删：列表长度即过渡长度。
     pub(crate) wp_fps_f: f32,
-    pub(crate) wp_frames_f: f32,
     pub(crate) wp_preload_f: f32,
     /// 微调滑杆镜像：frames 1-120，tile_rows 8-512（步进 8），vsync_fps 15-240，
     /// buffers 0-16（0 = 直写，步进 1）。
@@ -129,12 +146,16 @@ impl App {
             page: Page::File,
             play_f: 0.0,
             feed_f: FeedMode::Clip.index() as f32,
+            playlist_loop_f: LoopMode::LoopList.index() as f32,
+            wp_loop_f: LoopMode::LoopList.index() as f32,
+            decode_tab: MediaFormat::Qois,
+            playlist_sel: None,
+            wallpaper_sel: None,
             dec_threads_f: [0.0; 8],
             dec_buffers_f: [0.0; 8],
             dec_fetch_f: [0.0; 8],
             accel_f: AccelLevel::Auto.index() as f32,
             wp_fps_f: 15.0,
-            wp_frames_f: 0.0,
             wp_preload_f: default_wallpaper_preload() as f32,
             tune_frames_f: default_frames() as f32,
             tune_tile_f: default_tile_rows() as f32,
@@ -160,6 +181,9 @@ impl App {
     pub(crate) fn sync_widgets(&mut self) {
         self.accel_f = self.cfg.accel.level.index() as f32;
         self.feed_f = self.cfg.play.feed.index() as f32;
+        self.playlist_loop_f = self.cfg.playlist.loop_mode.index() as f32;
+        self.wp_loop_f = self.cfg.wallpaper.loop_mode.index() as f32;
+        // 切表不跟读盘走：tab 只切展示，读盘保持当前 tab（见解码页）。
         for (i, fmt) in DecodeTable::ORDER.iter().enumerate() {
             if let Some(d) = self.cfg.decode.get(*fmt) {
                 self.dec_threads_f[i] = d.threads.index() as f32;
@@ -180,22 +204,52 @@ impl App {
             FpsPolicy::Max => 241.0,
             FpsPolicy::Capped(n) => n.min(240).max(1) as f32,
         };
-        self.wp_frames_f = self.cfg.wallpaper.frames.min(120) as f32;
         self.wp_preload_f = self.cfg.wallpaper.preload.min(32) as f32;
         self.tune_frames_f = self.cfg.render.tune.frames.clamp(1, 120) as f32;
         self.tune_tile_f = self.cfg.render.tune.tile_rows.clamp(8, 512) as f32;
         self.tune_vsync_fps_f = self.cfg.render.tune.vsync_fps.clamp(15, 240) as f32;
         self.tune_buffers_f = self.cfg.render.tune.buffers.min(16) as f32;
+        // 越界单选回到列表内（删行后旧下标悬空，下一帧点行即覆盖）。
+        if let Some(s) = self.playlist_sel {
+            if s >= self.cfg.playlist.items.len() {
+                self.playlist_sel = None;
+            }
+        }
+        if let Some(s) = self.wallpaper_sel {
+            if s >= self.cfg.wallpaper.items.len() {
+                self.wallpaper_sel = None;
+            }
+        }
     }
 
-    /// 滑杆/摘要共用的档位文本。
+    /// 滑杆/摘要共用的档位文本（播放列表制：帧率 × 条目数 × 循环）。
     pub(crate) fn play_text(&self) -> String {
         let base = match parse_fps(&self.cfg.play.fps) {
             FpsPolicy::Auto => t!("play.text_auto").into_owned(),
             FpsPolicy::Max => t!("play.text_max").into_owned(),
             FpsPolicy::Capped(n) => format!("{} fps", n),
         };
-        format!("{} {}", base, self.cfg.play.format.file_str())
+        format!(
+            "{} x {} ({})",
+            base,
+            self.cfg.playlist.items.len(),
+            self.cfg.playlist.loop_mode.file_str()
+        )
+    }
+
+    /// 壁纸摘要行（画廊列表制：开关 × 帧率 × 条目数 × 循环 × 预载 × 冻结）。
+    pub(crate) fn wallpaper_text(&self) -> String {
+        if !self.cfg.wallpaper.enable {
+            return String::from("off");
+        }
+        format!(
+            "on {}/{}/x{}/pre{}/fz{}",
+            self.wp_fps_text(),
+            self.cfg.wallpaper.loop_mode.file_str(),
+            self.cfg.wallpaper.items.len(),
+            self.cfg.wallpaper.preload,
+            self.cfg.wallpaper.popup_freeze as u8,
+        )
     }
 
     /// 壁纸帧率滑杆文本（三态与播放同构；auto 跟 vsync，详见固件 `effective_wallpaper_fps`）。
@@ -205,57 +259,6 @@ impl App {
             FpsPolicy::Max => t!("play.text_max").into_owned(),
             FpsPolicy::Capped(n) => format!("{} fps", n.min(240).max(1)),
         }
-    }
-
-    /// 片源格式行（播放/壁纸共用六按钮，与下同形；
-    /// 壁纸页曾只有 qois/raw 双按钮，现八格式全通故合流，MP4 三轨收拢为一钮）。
-    pub(crate) fn format_row(&mut self, ui: &mut egui::Ui, cur: MediaFormat) -> MediaFormat {
-        self.format_row_all(ui, cur)
-    }
-
-    /// 播放片源行（六颗玻璃按钮，横向自动换行；走 MP4 容器的三轨收拢为一颗
-    /// “MP4 视频”钮（选中态 = 当前是三轨任一），点中才在下方子行单选三轨；
-    /// 无 GlassButton 禁用态问题故不置灰——blt 行置灰是引擎对照，本行无此需求）。
-    pub(crate) fn format_row_all(&mut self, ui: &mut egui::Ui, cur: MediaFormat) -> MediaFormat {
-        const MAIN: [MediaFormat; 5] = [
-            MediaFormat::Qois,
-            MediaFormat::Raw,
-            MediaFormat::H263,
-            MediaFormat::Mpeg2v,
-            MediaFormat::Theora,
-        ];
-        let mut next = cur;
-        ui.horizontal_wrapped(|ui| {
-            for v in MAIN.iter().copied() {
-                // MP4 钮插在 Raw 之后（原 Hevc 槽位），保持其余五钮相对顺序不动。
-                if v == MediaFormat::H263 {
-                    let mp4_sel = cur.is_mp4();
-                    if self.option_button(ui, mp4_sel, &t!("format.mp4")) {
-                        // 已在组内则保持子选项不动，否则默认落 Hevc（子行首颗）。
-                        next = if mp4_sel { cur } else { MediaFormat::Hevc };
-                    }
-                }
-                if self.option_button(ui, cur == v, &crate::text::format_name(v)) {
-                    next = v;
-                }
-            }
-        });
-        next
-    }
-
-    /// MP4 容器子选项行（三颗玻璃按钮：HEVC/H.264/VP9，同上单选的镜像，
-    /// 选中态与主行同步；走 MP4 容器的格式收拢在此行，裸流格式只在主行）。
-    pub(crate) fn format_mp4_row(&mut self, ui: &mut egui::Ui, cur: MediaFormat) -> MediaFormat {
-        const MP4: [MediaFormat; 3] = [MediaFormat::Hevc, MediaFormat::Avc, MediaFormat::Vp9];
-        let mut next = cur;
-        ui.horizontal_wrapped(|ui| {
-            for v in MP4 {
-                if self.option_button(ui, cur == v, &crate::text::format_name(v)) {
-                    next = v;
-                }
-            }
-        });
-        next
     }
 
     /// 实测行：有值报数，无值提示切 auto 下次启动测。
@@ -577,7 +580,7 @@ impl eframe::App for App {
                 ui.horizontal(|ui| {
                     ui.selectable_value(&mut self.page, Page::File, t!("nav.file"));
                     ui.selectable_value(&mut self.page, Page::Accel, t!("nav.accel"));
-                    ui.selectable_value(&mut self.page, Page::Player, t!("nav.player"));
+                    ui.selectable_value(&mut self.page, Page::Playlist, t!("nav.playlist"));
                     ui.selectable_value(&mut self.page, Page::Decode, t!("nav.decode"));
                     ui.selectable_value(&mut self.page, Page::Wallpaper, t!("nav.wallpaper"));
                     ui.selectable_value(&mut self.page, Page::Boot, t!("nav.boot"));
@@ -656,7 +659,7 @@ impl eframe::App for App {
                     ui.heading(t!("nav.sections"));
                     self.nav_button(ui, Page::File, t!("nav.file").into_owned());
                     self.nav_button(ui, Page::Accel, t!("nav.accel").into_owned());
-                    self.nav_button(ui, Page::Player, t!("nav.player").into_owned());
+                    self.nav_button(ui, Page::Playlist, t!("nav.playlist").into_owned());
                     self.nav_button(ui, Page::Decode, t!("nav.decode").into_owned());
                     self.nav_button(ui, Page::Wallpaper, t!("nav.wallpaper").into_owned());
                     self.nav_button(ui, Page::Boot, t!("nav.boot").into_owned());
@@ -669,14 +672,7 @@ impl eframe::App for App {
                     ui.small(t!("sum.workers", v = self.cfg.schedule.workers.file_str()));
                     ui.small(t!("sum.dist", v = self.cfg.schedule.dist.file_str()));
                     ui.small(t!("sum.vsync", v = self.cfg.render.vsync.file_str()));
-                    ui.small(t!(
-                        "sum.wallpaper",
-                        v = if self.cfg.wallpaper.enable {
-                            "on"
-                        } else {
-                            "off"
-                        }
-                    ));
+                    ui.small(t!("sum.wallpaper", v = self.wallpaper_text()));
                     ui.small(t!("sum.play", v = self.play_text()));
                     ui.small(self.measured_line());
                     ui.small(t!("sum.version", v = self.cfg.version));

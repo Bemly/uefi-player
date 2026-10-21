@@ -45,21 +45,31 @@ window    = 4           # 流式供片窗口（`[play] feed = "stream"` 的解�
 [play]
 fps = "auto"            # auto | max | 1..240
                         # auto: 首启实测最大帧率并回写，按 min(视频帧率, 实测*3/4) 跑
-format = "qois"         # 片源格式：qois（1080p/video.qois）| raw（1080p/frameNNNN.raw）
-                        # | hevc（video.mp4 hev 轨优先，无则 video.hevc Annex-B）
-                        # | avc（video.mp4 avc 轨，石雨堂拆 avcC → Annex-B 软解）
-                        # | vp9（video.mp4 vp09 轨优先，无则 video.ivf）
-                        # | h263（video.h263 裸流）| mpeg2v（video.m2v 裸基本流，只收 4:2:0）
-                        # | theora（video.ogv，OggS 磁盘原格式，只收 4:2:0）；
-                        #   旧文件缺键按 qois 照读
 feed = "clip"           # 供片模式：clip（开机全量预解码，默认）| staged（qois 显式三段，
                         # 其余七格式结构等价 clip）| stream（window 窗口边播边解，
                         # 游标之后淘汰）| zero_copy（单复用缓冲即时解码）
                         # | single（每帧重读文件+重解码，零缓存下限对照，NEW）；
                         # 只切 Clip 内部拿帧方式，不管上传路（blt/direct/mp/nano/dynamic 零改）；
                         # 多核（mp_draw）/动态调度/壁纸恒 clip/eager；旧文件缺键按 clip 照读；
-                        # 生效值可被 `[decode.<fmt>] fetch` 按格式覆盖（串口 `video: feed=` 取覆盖值）
+                        # 生效值可被 `[decode.<fmt>] fetch` 按当前项检测格式覆盖
+                        # （串口 `video: feed=` 取覆盖值）
 measured_max_fps = 0    # 固件实测回写（0 = 未测）；GUI 只读展示
+# format 旧键已删除（改逐项自动检测；旧文件残留键按 serde 默认忽略）。
+
+# 播放列表（新增正典；`loop` + 项数组，固件逐项自动检测格式）：
+[playlist]
+loop = "loop_list"      # loop_list（播完回绕，默认）| loop_single（重播当前项）
+                        # | once（播完最后一项即停，回菜单）
+[[playlist.items]]
+path = "1080p/video.mp4"   # 容器探针：hev 轨优先，无则 avc/vp09（hevc>avc>vp9 首匹配胜出）
+[[playlist.items]]
+path = "1080p/video.hevc"  # Annex-B 裸流（.hevc/.265）
+[[playlist.items]]
+path = "1080p/video.qois"  # u32le 帧长 + QOI 串接
+# loop_single 重播当前项；once 播完最后一项即停（回菜单）；
+# 检测失败/探针无匹配轨该项跳过 + 警告（`playlist: skip`），空列表直接报错；
+# 完整检测序见 docs/player.md（qois → raw 目录扫描 → mp4 探针 → hevc → ivf →
+# h263 → m2v → ogv）。
 
 # 解码表（统一控制平面，八格式各独立五键）：
 # threads bsp_only/all（有状态格式 all 解析但警告并驻 bsp_only；qois/raw 即时兑现）；
@@ -118,19 +128,22 @@ workers = "auto"        # manual 后端多核开关：auto | bsp_only | all（�
 dist = "auto"           # manual 后端分工：auto | static | tile | dynamic（只对 direct+all 有效）
 
 [wallpaper]
-enable = false          # 菜单背景 + 引导过渡总开关
-format = "raw"          # 片源格式（与 [play] 同一矩阵，八格式全通）：
-                          # raw（wallpaper/frameNNNN.raw，默认）| qois（wallpaper/wall.qois）
-                          # | hevc（wall.mp4 hev 轨优先，无则 wall.hevc）
-                          # | avc（wall.mp4 avc 轨）| vp9（wall.mp4 vp09 轨优先，无则 wall.ivf）
-                          # | h263（wall.h263）| mpeg2v（wall.m2v）| theora（wall.ogv）
-popup_freeze = true     # 选项弹窗时冻结壁纸（false 则行区继续播；GUI 有开关）
+enable = false          # 菜单背景 + 引导过渡总开关（关 = decor 为 None，壁纸不 halt 任何流程）
+loop = "loop_list"      # loop_list（默认）| loop_single | once（与 [playlist] loop 同构）
 fps = "15"               # 背景帧率三态（与 [play] fps 同构）：auto（最左，跟 vsync；
-                          # vsync 关则不限速）| max（最右，不限速）| 1-240（中间显式封顶）
-                          # 默认 "15"
-frames = 0              # B 过渡封顶帧数（0 = 全播预载集）
-preload = 8             # 预载帧数上限（1-32；0 = 不封顶，和播片一样拉满；
-                          # 1080p BGRA 单帧约 8MB，长动画注意内存）
+                           # vsync 关则不限速）| max（最右，不限速）| 1-240（中间显式封顶）
+                           # 默认 "15"
+preload = 8             # 按项预载封顶（每项 Clip 截断到 preload 帧，0 = 不封顶；
+                           # 1080p BGRA 单帧约 8MB，长动画注意内存）
+popup_freeze = true     # 选项弹窗时冻结壁纸（false 则行区继续播；GUI 有开关）
+[[wallpaper.items]]
+path = "wallpaper/wall.mp4"   # 自动检测（与播放列表同一规则；容器/裸流均可）
+[[wallpaper.items]]
+path = "wallpaper/wall.qois"  # qois 单文件预解码（与播片同代价）
+# format/frames 旧键已删除（改逐项自动检测 + 列表长度治理 B 过渡；旧文件残留键忽略）。
+# enable 仍是总开关；gallery 为空（无项/全坏）= 静默无壁纸（菜单/引导照走，串口警告）。
+# 共存规则：wall.*（`wallpaper/` 下）与播片项（常放 `1080p/` 下）分目录存放，
+# 同一检测矩阵，互不抢片源；B 过渡播列表全长（preload 仍按项截断）。
 
 [boot]
 auto = true             # 多卷自动发现总开关（关 = 只列本卷 BLS，老行为）
@@ -191,7 +204,10 @@ executor = "all"        # 诊断项 a 跑哪条执行器线：all（默认，都
   （blt/direct/mp/nano/dynamic 零改，只消费 `next_frame`/`rewind`/`len`/`frame`）。
   多核（`mp_draw`）/动态调度/壁纸恒 `clip`/`eager`（壁纸随机访问循环，按 tag 裁决）。
   缺键老文件按 `clip` 照读，现路行为不变。
+  feed 是全局默认：每项生效值 = 本项检测格式的 `[decode.<fmt>] fetch`
+  显式值，否则全局 feed（串口 `video: feed=` 取生效值）。
 - `[decode.<fmt>]`（八格式 qois/raw/hevc/avc/vp9/h263/mpeg2v/theora，每表五键，缺表缺键按默认照读）：
+  按项当前检测格式生效（与 `[play] format` 旧键脱钩，改跟自动检测）；
   `threads=all` 在 qois/raw 上即时兑现（`honored (frame-parallel safe)` 行），
   在有状态软解码上解析但警告并驻 `bsp_only`
   （`decode: <Fmt> threads all deferred (staying bsp_only)` 行，矩阵断言用）；
@@ -200,8 +216,23 @@ executor = "all"        # 诊断项 a 跑哪条执行器线：all（默认，都
   `[play] feed`，显式值只覆盖本格式生效供片（串口 `video: feed=` 取覆盖值 +
   ` fetchovr=<fmt>` 令牌行，矩阵断言子串；壁纸恒 eager 无视覆盖）。
   串口另有 `decode: fmt=<Dbg> threads=...` 解析行（矩阵断言用）。
-- 旧键/旧值：`[play] pipeline`、`[render] workers`、`[render] dist` 已删除
-  （残留键按 serde 默认忽略；`pipeline` 旧文件按 `clip` 跑）；
+- `[playlist]`（新增正典）：`loop` 三档（`loop_list` 默认回绕 /
+  `loop_single` 重播当前项 / `once` 播完最后一项即停回菜单），缺表缺键按默认照读；
+  `[[playlist.items]] path` 逐项自动检测（检测序见 `docs/player.md`），失败该项跳过 +
+  警告（`playlist: skip`），空列表直接报错（`playlist: empty list, nothing to play`）。
+  旧文件无 `[playlist]` 即空列表（播片侧报错，不断开机；矩阵里播片 case 必带至少一项）。
+- `[wallpaper]`（画廊模型）：`enable` 仍是总开关（关 = decor 为 None，
+  壁纸不 halt 任何流程）；`loop` 与播放列表同构（默认 `loop_list`）；
+  `fps` 三态同 `[play]`（默认 `"15"`）；`preload` 改按项封顶
+  （每项 Clip 截断，0 = 不封顶）；`popup_freeze` 不变；
+  列表长度治理 B 过渡（`frames` 旧键已删除）；`format` 旧键已删除
+  （改逐项自动检测，残留键按 serde 默认忽略）。gallery 为空
+  （无项/全坏）= 静默无壁纸（菜单/引导照走，串口警告）。
+  串口画廊行：`wallpaper: gallery items={n} loop={mode} preloaded {m} frames (preload {p})`。
+- 旧键/旧值：`[play] pipeline`、`[play] format`、`[render] workers`、`[render] dist`、
+  `[wallpaper] format`、`[wallpaper] frames` 已删除
+  （残留键按 serde 默认忽略；`pipeline` 旧文件按 `clip` 跑；无 `[playlist]` 旧文件
+  即空列表，播片侧报错）；
   值别名 `avx512`（→`avx512f`）、`on`（→`static`）、整数壁纸 `fps` 已摘除，
   命中即整文件回默认 + 警告（`cfg: parse error` 行），不再静默照读。
 - `async.executor`：只决定诊断项 `a` 跑 `nano`/`dynamic` 哪条线（`all` 都跑）；

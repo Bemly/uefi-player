@@ -41,7 +41,20 @@ description = "player.toml 跨平台可视化编辑器（host 工具，与 UEFI 
 #   QOI 编码出 qois；手写三份不如一个现货，见 transcode.rs 头注释）。
 #   解码复用：mp4 源走 shiguredo_mp4 + rusty_h264-decoder 0.16/rusty_h265 0.6.2/
 #   vp9dec 0.1.1（与固件同版本；h263/mpeg2v 源暂只走裸流直通，后继再接）。
+# - 列表拖拽排序（host std，播放列表/壁纸画廊行重排；固件侧不受影响）：
+#   `egui_dnd 0.16`（lucasmerlin/hello_egui，MIT，
+#   crates.io 现货，持续维护，MSRV >= 1.80 < 本仓 1.92；
+#   host-only，no_std-irrelevant，固件零依赖）。
+#   轮子 verdict：SPEC 写 `egui_dnd 0.18`，但实测 `cargo tree` 显示
+#   0.18 拉 `egui 0.37`，与本仓 `egui 0.35` 双版本冲突（`egui::Ui`
+#   类型不通，编译不过）；`egui_dnd 0.16` 拉的正是 `egui 0.35`，
+#   同轮同用法，故用 `0.16`（caret），属 verdict 的版本 skew fallback。
+#   搜过手写上/下按钮（零依赖单步挪，已保留为兜底）与
+#   `egui_extras` 表格排序器（要拖入整套表格件，与玻璃行不搭，故不用）。
+#   用法：`dnd(ui, id).with_animation_time(0.0).show(下标 id 行, …)`，
+#   落点 `update_vec` 写回（重复路径靠下标 id 区分，见 `playlist.rs` 头注释）。
 [dependencies]
+egui_dnd = "0.16"
 eframe = { version = "0.35", default-features = false, features = ["accesskit", "default_fonts", "wgpu", "wayland", "x11"] }
 egui = "0.35"
 egui-wgpu = "0.35"

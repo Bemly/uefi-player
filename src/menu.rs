@@ -102,7 +102,8 @@ fn wait_key_or_animate(screen: &mut Screen, wp: &mut Option<WpState>) -> (char, 
                     .upload_frame_region(WP_W, WP_H, WP_TOP, st.set.frame(st.idx))
                     .is_ok()
                 {
-                    st.idx += 1;
+                    // 画廊步进：list 回绕，once 到末帧停留（见 `wallpaper::next_gallery_index`）。
+                    st.idx = wallpaper::next_gallery_index(st.idx, st.set.len());
                 } else {
                     kill_wp = true;
                 }

@@ -272,6 +272,10 @@ pub(crate) fn default_wallpaper_preload() -> u32 {
     8
 }
 
+pub(crate) fn default_loop_mode() -> LoopMode {
+    LoopMode::LoopList
+}
+
 pub(crate) fn default_tile_rows() -> u32 {
     64
 }
@@ -417,20 +421,50 @@ impl MediaFormat {
             Self::Avc => "avc",
         }
     }
+}
 
-    /// 是否走 MP4 容器（GUI 主行收拢为一颗“MP4 视频”按钮，子行再单选三轨；
-    /// 固件 schema 不变，落盘仍是 `hevc`/`avc`/`vp9` 小写串）。
-    pub(crate) fn is_mp4(self) -> bool {
-        matches!(self, Self::Hevc | Self::Avc | Self::Vp9)
+/// 播放列表循环模式（与固件 `LoopMode` 同构；小写蛇形序列化，默认 `loop_list`）。
+/// `LoopSingle` = 当前条目循环；`LoopList` = 列表循环；`Once` = 播完即停（返回菜单）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum LoopMode {
+    LoopSingle,
+    #[default]
+    LoopList,
+    Once,
+}
+
+impl LoopMode {
+    pub(crate) const ALL: [Self; 3] = [Self::LoopSingle, Self::LoopList, Self::Once];
+    pub(crate) fn file_str(self) -> &'static str {
+        match self {
+            Self::LoopSingle => "loop_single",
+            Self::LoopList => "loop_list",
+            Self::Once => "once",
+        }
+    }
+    /// 滑杆档位 0-2（`ALL` 的下标，`LoopSingle=0`）。
+    pub(crate) fn index(self) -> usize {
+        Self::ALL.iter().position(|&v| v == self).unwrap_or(1)
     }
 }
 
-pub(crate) fn default_play_format() -> MediaFormat {
-    MediaFormat::Qois
+/// 播放列表单条（`[[playlist.items]]` / `[[wallpaper.items]]` 唯一键 `path`；
+/// 固件按扩展名 + MP4 探轨自动识别格式，失败跳过 + `log::warn!`，不断播）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub(crate) struct PlaylistItem {
+    #[serde(default)]
+    pub(crate) path: String,
 }
 
-pub(crate) fn default_wallpaper_format() -> MediaFormat {
-    MediaFormat::Raw
+/// `[playlist]`：`loop` + `[[playlist.items]]`（顺序即播放序；空列表 = `Err`，无静默菜单）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub(crate) struct PlaylistConfig {
+    #[serde(rename = "loop", default = "default_loop_mode")]
+    pub(crate) loop_mode: LoopMode,
+    #[serde(default)]
+    pub(crate) items: Vec<PlaylistItem>,
 }
 
 /// `[play] feed`：解码供片模式（与固件 `FeedMode` 同构；`file_str` 即落盘串）。
@@ -577,11 +611,9 @@ impl DecodeTable {
 
 /// `[play]`：`fps` 是字符串（三态没法用纯数字表达），`measured_max_fps`
 /// 只由固件实测回写（0 = 未测），这里只读展示 + 重测清零。
-/// `format` 切片源：qois 读 `1080p/video.qois`，raw 读 `1080p/frameNNNN.raw`，
-/// hevc 读 `1080p/video.hevc`（Annex-B 软解），vp9 读 `1080p/video.ivf`（软解），
-/// h263/mpeg2v/theora 格式可选、解码后继（固件明确报错，不断解析）。
-/// `feed` 切解码供片：clip 全预解码（默认，老文件缺键照读）；
-/// staged/stream/zero_copy/single 只供 qois（mp/dynamic/壁纸恒 clip）。
+/// `feed` 是解码供片全局默认（`clip` 全预解码，默认，老文件缺键照读；
+/// 逐格式 `decode.<fmt>.fetch` 覆盖它，壁纸恒 `clip` 忽略覆盖）。
+/// 旧 `format` 键已删（逐条目自动识别）：老文件残留直接忽略（未知键 serde 默认忽略）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub(crate) struct PlayConfig {
@@ -589,8 +621,6 @@ pub(crate) struct PlayConfig {
     pub(crate) fps: String,
     #[serde(default)]
     pub(crate) measured_max_fps: u32,
-    #[serde(default = "default_play_format")]
-    pub(crate) format: MediaFormat,
     #[serde(default)]
     pub(crate) feed: FeedMode,
 }
@@ -685,35 +715,41 @@ pub(crate) struct AsyncConfig {
 /// `[wallpaper] fps`：纯字符串三态（整数老文件不再兼容：`fps = 15` 即整文件
 /// 回默认 + 警告，见矩阵 `wallpaper_fps_int_rejected`）。
 /// 与固件同口径（`[play] fps` 同构）。
+/// `[wallpaper]` 新式画廊列表（与固件 `WallpaperListConfig` 同构）：
+/// `enable` 仍是总开关（关 = None，装饰永不 halt）；
+/// `loop` + `[[wallpaper.items]]` 逐条目自动识别（顺序即播放序）；
+/// `fps` 同播放三态；`preload` 是逐条目封顶（每条截到 `preload`，0 = 不封顶，
+/// 8MB/帧 bound）；`popup_freeze` 保留；旧 `format`/`frames` 键已删
+/// （老文件残留直接忽略，未知键 serde 默认忽略）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
-pub(crate) struct WallpaperConfig {
+pub(crate) struct WallpaperListConfig {
     pub(crate) enable: bool,
+    #[serde(rename = "loop", default = "default_loop_mode")]
+    pub(crate) loop_mode: LoopMode,
     #[serde(default = "default_wallpaper_fps")]
     pub(crate) fps: String,
-    #[serde(default)]
-    pub(crate) frames: u32,
     #[serde(default = "default_wallpaper_preload")]
     pub(crate) preload: u32,
-    #[serde(default = "default_wallpaper_format")]
-    pub(crate) format: MediaFormat,
     #[serde(default = "default_true")]
     pub(crate) popup_freeze: bool,
+    #[serde(default)]
+    pub(crate) items: Vec<PlaylistItem>,
 }
 
 pub(crate) fn default_true() -> bool {
     true
 }
 
-impl Default for WallpaperConfig {
+impl Default for WallpaperListConfig {
     fn default() -> Self {
         Self {
             enable: false,
+            loop_mode: LoopMode::LoopList,
             fps: default_wallpaper_fps(),
-            frames: 0,
             preload: default_wallpaper_preload(),
-            format: MediaFormat::Raw,
             popup_freeze: true,
+            items: Vec::new(),
         }
     }
 }
@@ -723,7 +759,6 @@ impl Default for PlayConfig {
         Self {
             fps: default_fps(),
             measured_max_fps: 0,
-            format: MediaFormat::Qois,
             feed: FeedMode::Clip,
         }
     }
@@ -736,8 +771,9 @@ pub(crate) struct FileConfig {
     pub(crate) accel: AccelConfig,
     pub(crate) render: RenderConfig,
     pub(crate) play: PlayConfig,
+    pub(crate) playlist: PlaylistConfig,
     pub(crate) decode: DecodeTable,
-    pub(crate) wallpaper: WallpaperConfig,
+    pub(crate) wallpaper: WallpaperListConfig,
     pub(crate) boot: BootConfig,
     pub(crate) schedule: ScheduleConfig,
     pub(crate) r#async: AsyncConfig,
@@ -750,8 +786,9 @@ impl Default for FileConfig {
             accel: AccelConfig::default(),
             render: RenderConfig::default(),
             play: PlayConfig::default(),
+            playlist: PlaylistConfig::default(),
             decode: DecodeTable::default(),
-            wallpaper: WallpaperConfig::default(),
+            wallpaper: WallpaperListConfig::default(),
             boot: BootConfig::default(),
             schedule: ScheduleConfig::default(),
             r#async: AsyncConfig::default(),
@@ -842,13 +879,76 @@ mod schema_tests {
         let mut cfg = FileConfig::default();
         cfg.wallpaper.enable = true;
         cfg.wallpaper.fps = String::from("20");
-        cfg.wallpaper.frames = 30;
-        cfg.wallpaper.format = MediaFormat::Qois;
+        cfg.wallpaper.loop_mode = LoopMode::Once;
+        cfg.wallpaper.preload = 4;
+        cfg.wallpaper.popup_freeze = false;
+        cfg.wallpaper.items = vec![
+            PlaylistItem {
+                path: String::from("wallpaper/wall.mp4"),
+            },
+            PlaylistItem {
+                path: String::from("wallpaper/wall.qois"),
+            },
+        ];
         let text = toml::to_string(&cfg).unwrap();
+        assert!(
+            text.contains("loop = \"once\""),
+            "loop key missing in {text}"
+        );
+        assert!(
+            text.contains("[[wallpaper.items]]"),
+            "items missing in {text}"
+        );
         let back: FileConfig = toml::from_str(&text).unwrap();
         assert!(back.wallpaper.enable);
         assert_eq!(back.wallpaper.fps, "20");
-        assert_eq!(back.wallpaper.frames, 30);
-        assert_eq!(back.wallpaper.format, MediaFormat::Qois);
+        assert_eq!(back.wallpaper.loop_mode, LoopMode::Once);
+        assert_eq!(back.wallpaper.preload, 4);
+        assert!(!back.wallpaper.popup_freeze);
+        assert_eq!(back.wallpaper.items.len(), 2);
+        assert_eq!(back, cfg);
+    }
+
+    #[test]
+    pub(crate) fn playlist_roundtrip() {
+        let mut cfg = FileConfig::default();
+        cfg.playlist.loop_mode = LoopMode::LoopSingle;
+        cfg.playlist.items = vec![
+            PlaylistItem {
+                path: String::from("1080p/video.mp4"),
+            },
+            PlaylistItem {
+                path: String::from("1080p/video.hevc"),
+            },
+            PlaylistItem {
+                path: String::from("1080p/video.qois"),
+            },
+        ];
+        let text = toml::to_string(&cfg).unwrap();
+        assert!(
+            text.contains("loop = \"loop_single\""),
+            "loop key missing in {text}"
+        );
+        assert!(
+            text.contains("[[playlist.items]]"),
+            "items missing in {text}"
+        );
+        let back: FileConfig = toml::from_str(&text).unwrap();
+        assert_eq!(back.playlist.loop_mode, LoopMode::LoopSingle);
+        assert_eq!(back.playlist.items.len(), 3);
+        assert_eq!(back.playlist.items[0].path, "1080p/video.mp4");
+        assert_eq!(back, cfg);
+        // 缺表老文件：空列表 + loop_list。
+        let legacy: FileConfig = toml::from_str("version = 1\n").unwrap();
+        assert!(legacy.playlist.items.is_empty());
+        assert_eq!(legacy.playlist.loop_mode, LoopMode::LoopList);
+        // 旧 `[play] format` / `[wallpaper] format,frames` 残留直接忽略，不断解析。
+        let old: FileConfig = toml::from_str(
+            "version = 1\n[play]\nfps = \"max\"\nformat = \"raw\"\n[wallpaper]\nformat = \"qois\"\nframes = 30\n",
+        )
+        .unwrap();
+        assert_eq!(old.play.fps, "max");
+        assert!(old.playlist.items.is_empty());
+        assert!(old.wallpaper.items.is_empty());
     }
 }

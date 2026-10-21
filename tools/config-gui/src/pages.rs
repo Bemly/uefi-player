@@ -275,9 +275,18 @@ impl App {
                 });
                 ui.small(async_desc(self.cfg.r#async.executor));
             }
-            Page::Player => {
-                ui.heading(t!("play.heading"));
-                ui.small(t!("play.page_hint"));
+            Page::Playlist => {
+                self.playlist_page(ui);
+            }
+            Page::Decode => {
+                ui.heading(t!("decode.heading"));
+                ui.small(t!("decode.hint"));
+                ui.add_space(4.0);
+                // 全局默认（家在解码页顶）：播放帧率 + 供片。
+                // `[play] feed` 是全局默认，逐格式 `fetch` 覆盖它（`None` = 继承）；
+                // 壁纸恒 `clip`，忽略覆盖。
+                ui.label(t!("decode.global_heading"));
+                ui.small(t!("decode.global_hint"));
                 ui.add_space(4.0);
                 ui.label(t!("play.fps"));
                 // 三段滑杆：0 = auto，1-240 = 限速，241 = max。
@@ -300,16 +309,18 @@ impl App {
                 };
                 ui.small(t!("play.hint"));
                 ui.add_space(4.0);
-                ui.label(t!("play.format"));
-                self.cfg.play.format = self.format_row_all(ui, self.cfg.play.format);
-                // MP4 容器子选项只在主行选中 MP4 时展开（其余格式无子选项）。
-                if self.cfg.play.format.is_mp4() {
-                    ui.small(t!("format.mp4_sub"));
-                    self.cfg.play.format = self.format_mp4_row(ui, self.cfg.play.format);
-                    ui.small(t!("format.mp4_sub_hint"));
-                }
-                ui.small(format_desc(self.cfg.play.format));
-                ui.small(t!("play.format_hint"));
+                ui.horizontal(|ui| {
+                    ui.label(self.measured_line());
+                    if egui_glass::GlassButton::new(t!("play.rebench"))
+                        .show(ui)
+                        .clicked()
+                    {
+                        // 清零并存盘：下次启动 auto 会重测。
+                        self.cfg.play.measured_max_fps = 0;
+                        let p = self.path.clone();
+                        self.save_to(&p);
+                    }
+                });
                 ui.add_space(4.0);
                 ui.label(t!("play.feed"));
                 // 供片滑杆：0-4 拨 `FeedMode::ALL` 下标，文本行同步显示当前档 + 说明。
@@ -331,26 +342,26 @@ impl App {
                 self.cfg.play.feed = FeedMode::ALL[self.feed_f.round().clamp(0.0, 4.0) as usize];
                 ui.small(t!("play.feed_hint"));
                 ui.add_space(10.0);
-                ui.horizontal(|ui| {
-                    ui.label(self.measured_line());
-                    if egui_glass::GlassButton::new(t!("play.rebench"))
-                        .show(ui)
-                        .clicked()
-                    {
-                        // 清零并存盘：下次启动 auto 会重测。
-                        self.cfg.play.measured_max_fps = 0;
-                        let p = self.path.clone();
-                        self.save_to(&p);
+                // 8 格式 tabs（GlassButton 顶栏，选中描蓝 + ●；只切展示，不落盘）。
+                ui.label(t!("decode.tabs_heading"));
+                ui.small(t!("decode.tabs_hint"));
+                ui.horizontal_wrapped(|ui| {
+                    for fmt in DecodeTable::ORDER.iter().copied() {
+                        let selected = self.decode_tab == fmt;
+                        if self.option_button(ui, selected, &format_name(fmt)) {
+                            self.decode_tab = fmt;
+                        }
                     }
                 });
-            }
-            Page::Decode => {
-                ui.heading(t!("decode.heading"));
-                ui.small(t!("decode.hint"));
                 ui.add_space(4.0);
-                // 8 格式逐组：线程滑杆 + 零拷开关 + 流式开关 + 缓冲滑杆 + 供片覆盖滑杆
-                //（八格式全表，`qois` 帧级并行可兑现、`raw` 零解码占位；全部玻璃件，组间隔日留白）。
-                for (i, fmt) in DecodeTable::ORDER.iter().copied().enumerate() {
+                // 选中 tab 的 5 控件（线程滑杆 + 零拷开关 + 流式开关 + 缓冲滑杆 +
+                // 供片覆盖滑杆；八格式全表，`qois` 帧级并行可兑现、`raw` 零解码占位）。
+                {
+                    let fmt = self.decode_tab;
+                    let i = DecodeTable::ORDER
+                        .iter()
+                        .position(|&f| f == fmt)
+                        .unwrap_or(0);
                     ui.label(format_name(fmt));
                     ui.small(format_desc(fmt));
                     // 线程：0-1 拨 `DecodeThreads::ALL` 下标。
@@ -463,7 +474,6 @@ impl App {
                         };
                     }
                     ui.small(t!("play.feed_hint"));
-                    ui.add_space(10.0);
                 }
             }
             Page::Wallpaper => {
@@ -480,29 +490,12 @@ impl App {
                     }
                 });
                 ui.small(wp_enable_desc(self.cfg.wallpaper.enable));
-                // 关壁纸时格式/帧率/帧数/预载全不可选，整组隐藏。
+                // 关壁纸时循环/帧率/预载/冻结/列表全不可选，整组隐藏。
+                // 顺序与 `[wallpaper]` 表一致：loop → fps → preload → popup_freeze → items。
                 if self.cfg.wallpaper.enable {
                     ui.add_space(10.0);
-                    ui.label(t!("wallpaper.format"));
-                    self.cfg.wallpaper.format = self.format_row(ui, self.cfg.wallpaper.format);
-                    // MP4 容器子选项只在主行选中 MP4 时展开（其余格式无子选项）。
-                    if self.cfg.wallpaper.format.is_mp4() {
-                        ui.small(t!("format.mp4_sub"));
-                        self.cfg.wallpaper.format =
-                            self.format_mp4_row(ui, self.cfg.wallpaper.format);
-                        ui.small(t!("format.mp4_sub_hint"));
-                    }
-                    ui.small(format_desc(self.cfg.wallpaper.format));
-                    ui.add_space(10.0);
-                    ui.label(t!("wallpaper.popup_freeze"));
-                    let froze = self.switch_row(
-                        ui,
-                        self.cfg.wallpaper.popup_freeze,
-                        &t!("boot.on"),
-                        &t!("boot.off"),
-                    );
-                    self.cfg.wallpaper.popup_freeze = froze;
-                    ui.small(t!("wallpaper.popup_freeze_hint"));
+                    // 循环（`playlist.rs`，与播放列表同编辑器）。
+                    self.wallpaper_loop_row(ui);
                     ui.add_space(10.0);
                     ui.label(t!("wallpaper.fps"));
                     // 三段滑杆（与播放帧率同构）：0 = auto（跟 vsync），1-240 = 限速，241 = max。
@@ -524,26 +517,8 @@ impl App {
                     };
                     ui.small(t!("wallpaper.fps_hint"));
                     ui.add_space(10.0);
-                    ui.label(t!("wallpaper.frames"));
-                    let frames_label = if self.cfg.wallpaper.frames == 0 {
-                        t!("wallpaper.frames_all").into_owned()
-                    } else {
-                        format!("{} frames", self.cfg.wallpaper.frames)
-                    };
-                    egui_glass::GlassSlider::new(&mut self.wp_frames_f, 0.0..=120.0)
-                        .text(frames_label)
-                        .step_by(1.0)
-                        .style(if self.dark {
-                            egui_glass::GlassStyle::dark()
-                        } else {
-                            egui_glass::GlassStyle::regular()
-                        })
-                        .show(ui);
-                    self.cfg.wallpaper.frames = self.wp_frames_f.round().clamp(0.0, 120.0) as u32;
-                    ui.small(t!("wallpaper.frames_hint"));
-                    ui.add_space(10.0);
                     ui.label(t!("wallpaper.preload"));
-                    // 最左 0 = 不封顶（和播片一样拉满），1-32 封顶帧数。
+                    // 最左 0 = 不封顶（逐条目截到 `preload`，0 = uncapped），1-32 封顶帧数。
                     let preload_label = if self.cfg.wallpaper.preload == 0 {
                         t!("wallpaper.preload_full").into_owned()
                     } else {
@@ -560,6 +535,19 @@ impl App {
                         .show(ui);
                     self.cfg.wallpaper.preload = self.wp_preload_f.round().clamp(0.0, 32.0) as u32;
                     ui.small(t!("wallpaper.preload_hint"));
+                    ui.add_space(10.0);
+                    ui.label(t!("wallpaper.popup_freeze"));
+                    let froze = self.switch_row(
+                        ui,
+                        self.cfg.wallpaper.popup_freeze,
+                        &t!("boot.on"),
+                        &t!("boot.off"),
+                    );
+                    self.cfg.wallpaper.popup_freeze = froze;
+                    ui.small(t!("wallpaper.popup_freeze_hint"));
+                    ui.add_space(10.0);
+                    ui.label(t!("wallpaper.list_heading"));
+                    self.wallpaper_items_editor(ui);
                 }
             }
             Page::Boot => {
@@ -623,20 +611,14 @@ impl App {
                 ui.label(t!("sum.backend", v = self.cfg.schedule.backend.file_str()));
                 ui.label(t!("sum.vsync", v = self.cfg.render.vsync.file_str()));
                 ui.label(self.render_measured_line());
+                ui.label(t!("sum.wallpaper", v = self.wallpaper_text()));
                 ui.label(t!(
-                    "sum.wallpaper",
-                    v = if self.cfg.wallpaper.enable {
-                        format!(
-                            "on {}/{}/{}f/pre{}/fz{}",
-                            self.cfg.wallpaper.format.file_str(),
-                            self.wp_fps_text(),
-                            self.cfg.wallpaper.frames,
-                            self.cfg.wallpaper.preload,
-                            self.cfg.wallpaper.popup_freeze as u8,
-                        )
-                    } else {
-                        String::from("off")
-                    }
+                    "sum.playlist",
+                    v = format!(
+                        "{} items loop={}",
+                        self.cfg.playlist.items.len(),
+                        self.cfg.playlist.loop_mode.file_str(),
+                    )
                 ));
                 ui.label(t!("sum.play", v = self.play_text()));
                 ui.label(t!("sum.async", v = self.cfg.r#async.executor.file_str()));

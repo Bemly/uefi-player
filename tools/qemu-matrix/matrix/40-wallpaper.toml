@@ -1,5 +1,11 @@
 # 40-wallpaper.toml：QEMU 黑盒矩阵分组（`matrix/` 目录，按用例前缀分组，合并后等价原 `matrix.toml`）。
-# 共 7 cases，单文件 ≤1000 行（AGENTS 口径）。新增 case 按前缀落对应文件，并写 `covers`。
+# 共 6 cases，单文件 ≤1000 行（AGENTS 口径）。新增 case 按前缀落对应文件，并写 `covers`。
+#
+# 壁纸画廊模型（`[wallpaper]` enable/loop/fps/preload/popup_freeze + `[[wallpaper.items]] path`，
+# 见 `docs/wallpaper.md`）：`format`/`frames` 旧键已删除（残留按 serde 默认忽略），
+# 每项按路径自动检测（与播放列表同一 `detect_clip_format`，raw 走 gallery 目录扫描）；
+# 旧单格式 case（wallpaper-qois/wallpaper-avc）已删除，覆盖收敛到 gallery-list；
+# 列表长度治理 B 过渡（`frames` 由项数代替），`preload` 按项封顶（0 = 不封顶）。
 
 [[case]]
 name = "boot-menu"
@@ -30,10 +36,10 @@ keys = [
 ]
 expect = ["popup: back to idle", { pat = "popup: open (frozen)", count = 2 }]
 
-# 壁纸开：2 帧黑场，无缺片警告；弹窗 → p → 7 照常响应。
+# 壁纸开：2 帧黑场画廊（raw 目录扫描），无缺片警告；弹窗 → p → 7 照常响应。
 [[case]]
 name = "wallpaper-on"
-covers = ["src/wallpaper.rs"]
+covers = ["src/wallpaper.rs", "src/video/"]
 timeout_sec = 180
 needs_wallpaper = 2
 config = """
@@ -47,7 +53,14 @@ vsync = "off"
 fps = "max"
 [wallpaper]
 enable = true
-fps = 15
+loop = "loop_list"
+fps = "15"
+preload = 8
+popup_freeze = true
+[[wallpaper.items]]
+path = "wallpaper/frame0000.raw"
+[[wallpaper.items]]
+path = "wallpaper/frame0001.raw"
 [schedule]
 backend = "manual"
 workers = "bsp_only"
@@ -59,13 +72,13 @@ keys = [
   { send = "p", wait_after = 3 },
   { send = "7", wait_for = ["menu: ready"], wait_after = 5 },
 ]
-expect = ["AVX is "]
+expect = ["AVX is ", "wallpaper: gallery items=2 loop=loop_list"]
 forbid = ["panicked at", "CpuDeadLoop", "menu bg skipped"]
 
-# 壁纸 live：popup_freeze=false 时行区继续播（`popup: open (live)`），q 回壁纸。
+# 壁纸 live：popup_freeze=false 时行区继续播（`popup: open (live)`），q 回壁纸（画廊形状同 on）。
 [[case]]
 name = "wallpaper-live"
-covers = ["src/wallpaper.rs"]
+covers = ["src/wallpaper.rs", "src/video/"]
 timeout_sec = 180
 needs_wallpaper = 2
 config = """
@@ -79,8 +92,14 @@ vsync = "off"
 fps = "max"
 [wallpaper]
 enable = true
-fps = 15
+loop = "loop_list"
+fps = "15"
+preload = 8
 popup_freeze = false
+[[wallpaper.items]]
+path = "wallpaper/frame0000.raw"
+[[wallpaper.items]]
+path = "wallpaper/frame0001.raw"
 [schedule]
 backend = "manual"
 workers = "bsp_only"
@@ -91,49 +110,16 @@ keys = [
   { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
   { send = "q", wait_after = 2 },
 ]
-expect = ["popup: open (live)", "popup: back to idle"]
+expect = ["popup: open (live)", "popup: back to idle", "wallpaper: gallery items=2 loop=loop_list"]
 forbid = ["panicked at", "CpuDeadLoop", "menu bg skipped"]
 
-# 壁纸 qois：wall.qois 预解码循环（复用测试视频真帧）；弹窗 → p → 7 照常响应。
-# 统一 Clip 的 qois 分支在壁纸侧的证明（与 raw 的 wallpaper-on 对称）。
+# 壁纸画廊列表（gallery-list）：qois + mp4（avc 轨容器探针）两项混合画廊，
+# 开机预解码循环；弹窗 → p → 7 照常响应（旧 qois/avc 单格式 case 的收敛证明）。
 [[case]]
-name = "wallpaper-qois"
-covers = ["src/wallpaper.rs", "src/video/", "usb_reports/1080p/video.qois"]
+name = "wallpaper-gallery-list"
+covers = ["src/wallpaper.rs", "src/video/", "usb_reports/1080p/video.qois", "src/diag/data/wall-avc.mp4"]
 timeout_sec = 180
 needs_wallpaper_qois = true
-config = """
-version = 1
-[accel]
-level = "auto"
-[render]
-mode = "direct"
-vsync = "off"
-[play]
-fps = "max"
-[wallpaper]
-enable = true
-fps = 15
-format = "qois"
-[schedule]
-backend = "manual"
-workers = "bsp_only"
-dist = "static"
-"""
-boot_expect = ["cfg: version=1", "idle: ready"]
-keys = [
-  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
-  { send = "p", wait_after = 3 },
-  { send = "7", wait_for = ["menu: ready"], wait_after = 5 },
-]
-expect = ["AVX is "]
-forbid = ["panicked at", "CpuDeadLoop", "menu bg skipped"]
-
-# 壁纸 avc：wall.mp4（1080p avc 轨）容器拆轨预解码循环；弹窗 → p → 0 照常响应。
-# 统一 Clip 的 MP4 分支在壁纸侧的证明（与 qois 的 wallpaper-qois 对称）。
-[[case]]
-name = "wallpaper-avc"
-covers = ["src/wallpaper.rs", "src/video/", "src/diag/data/wall-avc.mp4"]
-timeout_sec = 180
 needs_avcwallpaper = true
 config = """
 version = 1
@@ -146,8 +132,14 @@ vsync = "off"
 fps = "max"
 [wallpaper]
 enable = true
-fps = 15
-format = "avc"
+loop = "loop_list"
+fps = "15"
+preload = 8
+popup_freeze = true
+[[wallpaper.items]]
+path = "wallpaper/wall.qois"
+[[wallpaper.items]]
+path = "wallpaper/wall.mp4"
 [schedule]
 backend = "manual"
 workers = "bsp_only"
@@ -157,16 +149,16 @@ boot_expect = ["cfg: version=1", "idle: ready"]
 keys = [
   { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
   { send = "p", wait_after = 3 },
-  { send = "0", wait_for = ["menu: ready"], wait_after = 5 },
+  { send = "7", wait_for = ["menu: ready"], wait_after = 5 },
 ]
-expect = ["wallpaper: preloaded 10 frames"]
+expect = ["wallpaper: gallery items=2 loop=loop_list", "AVX is "]
 forbid = ["panicked at", "CpuDeadLoop", "menu bg skipped"]
 
-# 壁纸预载拉满：preload = 0 不封顶（3 帧黑场全进内存，和播片一样）；
-# 串口 preloaded 计数即断言。无按键：只验开机预载（待机即停）。
+# 壁纸预载拉满：preload = 0 不封顶（3 帧黑场画廊全进内存，和播片一样）；
+# 串口画廊标记即断言。无按键：只验开机预载（待机即停）。
 [[case]]
 name = "wallpaper-preload-full"
-covers = ["src/wallpaper.rs"]
+covers = ["src/wallpaper.rs", "src/video/"]
 timeout_sec = 120
 needs_wallpaper = 3
 config = """
@@ -180,20 +172,28 @@ vsync = "off"
 fps = "max"
 [wallpaper]
 enable = true
-fps = 15
+loop = "loop_list"
+fps = "15"
 preload = 0
+popup_freeze = true
+[[wallpaper.items]]
+path = "wallpaper/frame0000.raw"
+[[wallpaper.items]]
+path = "wallpaper/frame0001.raw"
+[[wallpaper.items]]
+path = "wallpaper/frame0002.raw"
 [schedule]
 backend = "manual"
 workers = "bsp_only"
 dist = "static"
 """
 boot_expect = ["cfg: version=1", "idle: ready"]
-expect = ["wallpaper: preloaded 3 frames"]
+expect = ["wallpaper: gallery items=3 loop=loop_list preloaded"]
 
 # 壁纸帧率 max：三态滑杆最右（不限速通路不断播；无按键，只验待机保活）。
 [[case]]
 name = "wallpaper-fps-max"
-covers = ["src/wallpaper.rs"]
+covers = ["src/wallpaper.rs", "src/video/"]
 timeout_sec = 120
 needs_wallpaper = 2
 config = """
@@ -207,14 +207,21 @@ vsync = "off"
 fps = "max"
 [wallpaper]
 enable = true
+loop = "loop_list"
 fps = "max"
+preload = 8
+popup_freeze = true
+[[wallpaper.items]]
+path = "wallpaper/frame0000.raw"
+[[wallpaper.items]]
+path = "wallpaper/frame0001.raw"
 [schedule]
 backend = "manual"
 workers = "bsp_only"
 dist = "static"
 """
 boot_expect = ["cfg: version=1", "idle: ready"]
-expect = ["wallpaper: preloaded 2 frames"]
+expect = ["wallpaper: gallery items=2 loop=loop_list"]
 soak_sec = 10
 
 # 引导 chainload：弹窗（等计数标记）0 选第一项，被起镜像是同一份 efi

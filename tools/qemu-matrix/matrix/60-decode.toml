@@ -1,12 +1,15 @@
 # 60-decode.toml：QEMU 黑盒矩阵分组（`matrix/` 目录，解码表 + 零拷×多核槽位路径）。
 # 共 11 cases（解码 9 + 槽位 2），单文件 ≤1000 行（AGENTS 口径）。
-
+#
 # 解码表（`[decode.<fmt>]` 八格式各五键：threads bsp_only/all + zero_copy/streaming 布尔 +
 # buffers 0=跟随 tune.window/1-32 显式 + fetch 缺省继承全局 feed）。
+# 播放列表化后：`[play] format` 旧键已删除，每例以单项 `[[playlist.items]]`
+# 选片（路径自动检测定格式，`play.fmt=` 开机断言随之删除）；断言改为
+# 列表行（`playlist: item 1/1 path=`）+ 解析行（`decode: fmt=`）+ 回退/兑现行 +
+# 生效行（`video: fmt=`/`video: feed=`）+ path 行 + soak 保活，不断言画质。
 # threads=all：qois/raw 无状态即时兑现（`honored (frame-parallel safe)`）；有状态六软解
 # （单核顺序状态机）解析但警告并驻 bsp_only。fetch 显式覆盖本格式生效供片
 # （`video: feed=` 取覆盖值 + ` fetchovr=<fmt>` 令牌），缺省继承 `[play] feed`；壁纸恒 eager 无视覆盖。
-# 断言：解析（`decode: fmt=`）+ 回退/兑现行 + path 行 + soak 保活，不断言画质。
 [[case]]
 name = "video-decode-hevc"
 covers = ["src/video/decoder", "src/video.rs", "src/diag/data/hevc_probe_main.265"]
@@ -21,8 +24,11 @@ mode = "direct"
 vsync = "off"
 [play]
 fps = "max"
-format = "hevc"
 feed = "clip"
+[playlist]
+loop = "loop_list"
+[[playlist.items]]
+path = "1080p/video.hevc"
 [wallpaper]
 enable = false
 [schedule]
@@ -35,13 +41,13 @@ zero_copy = true
 streaming = true
 buffers = 8
 """
-boot_expect = ["cfg: version=1", "play.fmt=Hevc", "idle: ready"]
+boot_expect = ["cfg: version=1", "play.feed=Clip", "idle: ready"]
 keys = [
   { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
   { send = "p", wait_after = 3 },
   { send = "0", wait_for = ["menu: ready"], wait_after = 5 },
 ]
-expect = ["video: fmt=Hevc", "decode: fmt=Hevc", "decode: Hevc threads all deferred", "play: path=direct_loop"]
+expect = ["playlist: item 1/1 path=1080p/video.hevc", "video: fmt=Hevc", "decode: fmt=Hevc", "decode: Hevc threads all deferred", "play: path=direct_loop"]
 soak_sec = 10
 
 [[case]]
@@ -58,8 +64,11 @@ mode = "direct"
 vsync = "off"
 [play]
 fps = "max"
-format = "avc"
 feed = "clip"
+[playlist]
+loop = "loop_list"
+[[playlist.items]]
+path = "1080p/video.mp4"
 [wallpaper]
 enable = false
 [schedule]
@@ -72,13 +81,13 @@ zero_copy = true
 streaming = true
 buffers = 8
 """
-boot_expect = ["cfg: version=1", "play.fmt=Avc", "idle: ready"]
+boot_expect = ["cfg: version=1", "play.feed=Clip", "idle: ready"]
 keys = [
   { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
   { send = "p", wait_after = 3 },
   { send = "0", wait_for = ["menu: ready"], wait_after = 5 },
 ]
-expect = ["video: fmt=Avc", "decode: fmt=Avc", "decode: Avc threads all deferred", "play: path=direct_loop"]
+expect = ["playlist: item 1/1 path=1080p/video.mp4", "video: fmt=Avc", "decode: fmt=Avc", "decode: Avc threads all deferred", "play: path=direct_loop"]
 soak_sec = 10
 
 [[case]]
@@ -95,8 +104,11 @@ mode = "direct"
 vsync = "off"
 [play]
 fps = "max"
-format = "vp9"
 feed = "clip"
+[playlist]
+loop = "loop_list"
+[[playlist.items]]
+path = "1080p/video.ivf"
 [wallpaper]
 enable = false
 [schedule]
@@ -109,13 +121,13 @@ zero_copy = true
 streaming = true
 buffers = 8
 """
-boot_expect = ["cfg: version=1", "play.fmt=Vp9", "idle: ready"]
+boot_expect = ["cfg: version=1", "play.feed=Clip", "idle: ready"]
 keys = [
   { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
   { send = "p", wait_after = 3 },
   { send = "0", wait_for = ["menu: ready"], wait_after = 5 },
 ]
-expect = ["video: fmt=Vp9", "decode: fmt=Vp9", "decode: Vp9 threads all deferred", "play: path=direct_loop"]
+expect = ["playlist: item 1/1 path=1080p/video.ivf", "video: fmt=Vp9", "decode: fmt=Vp9", "decode: Vp9 threads all deferred", "play: path=direct_loop"]
 soak_sec = 10
 
 [[case]]
@@ -132,8 +144,11 @@ mode = "direct"
 vsync = "off"
 [play]
 fps = "max"
-format = "h263"
 feed = "clip"
+[playlist]
+loop = "loop_list"
+[[playlist.items]]
+path = "1080p/video.h263"
 [wallpaper]
 enable = false
 [schedule]
@@ -146,13 +161,13 @@ zero_copy = true
 streaming = true
 buffers = 8
 """
-boot_expect = ["cfg: version=1", "play.fmt=H263", "idle: ready"]
+boot_expect = ["cfg: version=1", "play.feed=Clip", "idle: ready"]
 keys = [
   { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
   { send = "p", wait_after = 3 },
   { send = "0", wait_for = ["menu: ready"], wait_after = 5 },
 ]
-expect = ["video: fmt=H263", "decode: fmt=H263", "decode: H263 threads all deferred", "play: path=direct_loop"]
+expect = ["playlist: item 1/1 path=1080p/video.h263", "video: fmt=H263", "decode: fmt=H263", "decode: H263 threads all deferred", "play: path=direct_loop"]
 soak_sec = 10
 
 [[case]]
@@ -169,8 +184,11 @@ mode = "direct"
 vsync = "off"
 [play]
 fps = "max"
-format = "mpeg2v"
 feed = "clip"
+[playlist]
+loop = "loop_list"
+[[playlist.items]]
+path = "1080p/video.m2v"
 [wallpaper]
 enable = false
 [schedule]
@@ -183,13 +201,13 @@ zero_copy = true
 streaming = true
 buffers = 8
 """
-boot_expect = ["cfg: version=1", "play.fmt=Mpeg2v", "idle: ready"]
+boot_expect = ["cfg: version=1", "play.feed=Clip", "idle: ready"]
 keys = [
   { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
   { send = "p", wait_after = 3 },
   { send = "0", wait_for = ["menu: ready"], wait_after = 5 },
 ]
-expect = ["video: fmt=Mpeg2v", "decode: fmt=Mpeg2v", "decode: Mpeg2v threads all deferred", "play: path=direct_loop"]
+expect = ["playlist: item 1/1 path=1080p/video.m2v", "video: fmt=Mpeg2v", "decode: fmt=Mpeg2v", "decode: Mpeg2v threads all deferred", "play: path=direct_loop"]
 soak_sec = 10
 
 [[case]]
@@ -206,8 +224,11 @@ mode = "direct"
 vsync = "off"
 [play]
 fps = "max"
-format = "theora"
 feed = "clip"
+[playlist]
+loop = "loop_list"
+[[playlist.items]]
+path = "1080p/video.ogv"
 [wallpaper]
 enable = false
 [schedule]
@@ -220,13 +241,13 @@ zero_copy = true
 streaming = true
 buffers = 8
 """
-boot_expect = ["cfg: version=1", "play.fmt=Theora", "idle: ready"]
+boot_expect = ["cfg: version=1", "play.feed=Clip", "idle: ready"]
 keys = [
   { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
   { send = "p", wait_after = 3 },
   { send = "0", wait_for = ["menu: ready"], wait_after = 5 },
 ]
-expect = ["video: fmt=Theora", "decode: fmt=Theora", "decode: Theora threads all deferred", "play: path=direct_loop"]
+expect = ["playlist: item 1/1 path=1080p/video.ogv", "video: fmt=Theora", "decode: fmt=Theora", "decode: Theora threads all deferred", "play: path=direct_loop"]
 soak_sec = 10
 
 # 解码 qois：无状态逐帧 threads=all 即时兑现（`honored (frame-parallel safe)` 行，不断言画质）。
@@ -245,6 +266,10 @@ vsync = "off"
 [play]
 fps = "max"
 feed = "clip"
+[playlist]
+loop = "loop_list"
+[[playlist.items]]
+path = "1080p/video.qois"
 [wallpaper]
 enable = false
 [schedule]
@@ -257,9 +282,9 @@ zero_copy = true
 streaming = true
 buffers = 8
 """
-boot_expect = ["cfg: version=1", "play.fmt=Qois", "idle: ready"]
+boot_expect = ["cfg: version=1", "play.feed=Clip", "idle: ready"]
 keys = [{ send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 }, { send = "p", wait_after = 3 }, { send = "0", wait_for = ["menu: ready"], wait_after = 5 }]
-expect = ["video: fmt=Qois", "decode: fmt=Qois", "honored (frame-parallel safe)", "play: path=direct_loop"]
+expect = ["playlist: item 1/1 path=1080p/video.qois", "video: fmt=Qois", "decode: fmt=Qois", "honored (frame-parallel safe)", "play: path=direct_loop"]
 soak_sec = 10
 
 # 解码 raw：零解码直搬 threads=all 即时兑现（`honored` 行）；黑场 2 帧只走通路。
@@ -277,8 +302,11 @@ mode = "direct"
 vsync = "off"
 [play]
 fps = "max"
-format = "raw"
 feed = "clip"
+[playlist]
+loop = "loop_list"
+[[playlist.items]]
+path = "1080p/frame0000.raw"
 [wallpaper]
 enable = false
 [schedule]
@@ -291,9 +319,9 @@ zero_copy = true
 streaming = true
 buffers = 8
 """
-boot_expect = ["cfg: version=1", "play.fmt=Raw", "idle: ready"]
+boot_expect = ["cfg: version=1", "play.feed=Clip", "idle: ready"]
 keys = [{ send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 }, { send = "p", wait_after = 3 }, { send = "0", wait_for = ["menu: ready"], wait_after = 5 }]
-expect = ["video: fmt=Raw", "decode: fmt=Raw", "honored (frame-parallel safe)", "play: path=direct_loop"]
+expect = ["playlist: item 1/1 path=1080p/frame0000.raw", "video: fmt=Raw", "decode: fmt=Raw", "honored (frame-parallel safe)", "play: path=direct_loop"]
 soak_sec = 15
 
 # 取数覆盖（`[decode.hevc] fetch=stream` 盖全局 feed=clip）：生效 `video: feed=stream` + ` fetchovr=hevc` 令牌；壁纸无视覆盖。
@@ -311,8 +339,11 @@ mode = "direct"
 vsync = "off"
 [play]
 fps = "max"
-format = "hevc"
 feed = "clip"
+[playlist]
+loop = "loop_list"
+[[playlist.items]]
+path = "1080p/video.hevc"
 [wallpaper]
 enable = false
 [schedule]
@@ -322,9 +353,9 @@ dist = "static"
 [decode.hevc]
 fetch = "stream"
 """
-boot_expect = ["cfg: version=1", "play.fmt=Hevc", "play.feed=Clip", "idle: ready"]
+boot_expect = ["cfg: version=1", "play.feed=Clip", "idle: ready"]
 keys = [{ send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 }, { send = "p", wait_after = 3 }, { send = "0", wait_for = ["menu: ready"], wait_after = 5 }]
-expect = ["video: fmt=Hevc", "video: feed=stream", "decode: fmt=Hevc", "fetchovr=hevc", "play: path=direct_loop"]
+expect = ["playlist: item 1/1 path=1080p/video.hevc", "video: fmt=Hevc", "video: feed=stream", "decode: fmt=Hevc", "fetchovr=hevc", "play: path=direct_loop"]
 soak_sec = 10
 
 # 零拷×多核（qois/raw 帧并行 + workers=all + feed 档走 mp_slots 按核槽位真并行解码；
@@ -343,8 +374,11 @@ mode = "direct"
 vsync = "off"
 [play]
 fps = "max"
-format = "qois"
 feed = "zero_copy"
+[playlist]
+loop = "loop_list"
+[[playlist.items]]
+path = "1080p/video.qois"
 [wallpaper]
 enable = false
 [schedule]
@@ -352,9 +386,9 @@ backend = "manual"
 workers = "all"
 dist = "static"
 """
-boot_expect = ["cfg: version=1", "play.fmt=Qois", "play.feed=ZeroCopy", "idle: ready"]
+boot_expect = ["cfg: version=1", "play.feed=ZeroCopy", "idle: ready"]
 keys = [{ send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 }, { send = "p", wait_after = 3 }, { send = "0", wait_for = ["menu: ready"], wait_after = 5 }]
-expect = ["play: path=mp_slots frame-parallel fmt=qois fetch=zero_copy", "mp: slots scan qois chunks=", "video: fmt=Qois"]
+expect = ["playlist: item 1/1 path=1080p/video.qois", "play: path=mp_slots frame-parallel fmt=qois fetch=zero_copy", "mp: slots scan qois chunks=", "video: fmt=Qois"]
 soak_sec = 10
 
 # 同上，raw 黑场 2 帧 + feed=stream（换一档供片，覆盖另一触发组合）。
@@ -372,8 +406,11 @@ mode = "direct"
 vsync = "off"
 [play]
 fps = "max"
-format = "raw"
 feed = "stream"
+[playlist]
+loop = "loop_list"
+[[playlist.items]]
+path = "1080p/frame0000.raw"
 [wallpaper]
 enable = false
 [schedule]
@@ -381,7 +418,7 @@ backend = "manual"
 workers = "all"
 dist = "static"
 """
-boot_expect = ["cfg: version=1", "play.fmt=Raw", "play.feed=Stream", "idle: ready"]
+boot_expect = ["cfg: version=1", "play.feed=Stream", "idle: ready"]
 keys = [{ send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 }, { send = "p", wait_after = 3 }, { send = "0", wait_for = ["menu: ready"], wait_after = 5 }]
-expect = ["play: path=mp_slots frame-parallel fmt=raw fetch=stream", "mp: slots scan raw frames=2 1920x1080", "video: fmt=Raw"]
+expect = ["playlist: item 1/1 path=1080p/frame0000.raw", "play: path=mp_slots frame-parallel fmt=raw fetch=stream", "mp: slots scan raw frames=2 1920x1080", "video: fmt=Raw"]
 soak_sec = 10
