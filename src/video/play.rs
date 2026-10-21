@@ -1,5 +1,6 @@
 //! `video::play`：片源加载与播放目标裁决（`[play] format/fps/feed` + `[decode.*]` 矩阵）。
-//! `need_eager_clip` 决全量/懒形态（mp/dynamic 恒 eager，壁纸恒 eager 见 `feed_for`）；
+//! `need_eager_clip` 决全量/懒形态（dynamic 恒 eager，mp 恒 eager 但 slots 例外走 lazy，
+//! 壁纸恒 eager 见 `feed_for`）；
 //! `load_video_clip` 八格式落同一 `Clip`；`resolve_play_target`/`measure_max_fps` 决限速目标。
 
 use super::decoder::Clip;
@@ -15,12 +16,18 @@ pub(crate) fn need_eager_clip() -> bool {
     // mp/dynamic 恒 eager（全前视行区切分）；其余懒/全量按 feed 走 clip 路。
     // wallpaper 恒 eager 由 `feed_for` tag 裁决（此处不分支）。
     // single 零缓存：eager 会一次全解（正确但多内存），mp/dynamic 下仍 eager（矩阵要求）。
+    // slots 例外（manual direct+all + qois/raw + 零拷系供片）：走 lazy 保留编码源，
+    // AP 逐核真解码（见 `mp_slots`）；dynamic 后端恒 true（`dynamic_draw` 仍吃 eager）。
     match config::schedule_backend() {
         config::ScheduleBackend::Dynamic => true,
         config::ScheduleBackend::Nano => false,
         config::ScheduleBackend::Manual => {
-            config::effective_render() == config::RenderMode::Direct
-                && config::effective_workers() == config::WorkersMode::All
+            let direct_all = config::effective_render() == config::RenderMode::Direct
+                && config::effective_workers() == config::WorkersMode::All;
+            if direct_all && super::mp::mp_slots::slots_feed_eligible() {
+                return false;
+            }
+            direct_all
         }
     }
 }
@@ -87,14 +94,34 @@ pub(crate) fn load_video_clip(fs: &mut Fs, eager: bool) -> Result<Clip> {
         clip.w,
         clip.h
     );
-    // 供片断言行（矩阵用，不断言画质）：feed 档（配置文件拼写）+ 每格式生效窗
-    // （`decode.<fmt>.buffers` 显式 1-32 覆盖，0 跟随 `tune.window` 全局默认）+
-    // 解码面回显（threads/zero_copy/streaming/buffers，parse + fallback 断言用）。
-    log::info!(
-        "video: feed={} window={}",
-        config::play_feed().as_str(),
-        config::decode_window(fmt),
-    );
+    // 供片断言行（矩阵用，不断言画质）：有效 feed 档（每格式 fetch 覆盖全局后的值，
+    // 配置文件拼写）+ 每格式生效窗（`decode.<fmt>.buffers` 显式 1-32 覆盖，
+    // 0 跟随 `tune.window` 全局默认）+ 解码面回显（threads/zero_copy/streaming/buffers，
+    // parse + fallback 断言用）。覆盖激活时追加 ` fetchovr=<fmt>` token（新子串，旧子串逐字保留）。
+    {
+        let eff = config::effective_feed(fmt);
+        let window = config::decode_window(fmt);
+        if config::decode_fetch(fmt).is_some() {
+            let fkey = match fmt {
+                MediaFormat::Qois => "qois",
+                MediaFormat::Raw => "raw",
+                MediaFormat::Hevc => "hevc",
+                MediaFormat::Vp9 => "vp9",
+                MediaFormat::H263 => "h263",
+                MediaFormat::Mpeg2v => "mpeg2v",
+                MediaFormat::Theora => "theora",
+                MediaFormat::Avc => "avc",
+            };
+            log::info!(
+                "video: feed={} window={} fetchovr={}",
+                eff.as_str(),
+                window,
+                fkey,
+            );
+        } else {
+            log::info!("video: feed={} window={}", eff.as_str(), window,);
+        }
+    }
     log::info!(
         "decode: fmt={:?} threads={} zero_copy={} streaming={} buffers={} window={}",
         fmt,

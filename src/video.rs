@@ -14,6 +14,7 @@ pub mod exec;
 pub mod loops;
 pub mod mp;
 pub mod play;
+pub mod sync;
 
 pub(crate) use self::loops::{blt_loop, direct_loop};
 pub use self::mp::OSD_ROWS;

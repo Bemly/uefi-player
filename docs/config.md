@@ -57,18 +57,33 @@ feed = "clip"           # 供片模式：clip（开机全量预解码，默认�
                         # 游标之后淘汰）| zero_copy（单复用缓冲即时解码）
                         # | single（每帧重读文件+重解码，零缓存下限对照，NEW）；
                         # 只切 Clip 内部拿帧方式，不管上传路（blt/direct/mp/nano/dynamic 零改）；
-                        # 多核（mp_draw）/动态调度/壁纸恒 clip/eager；旧文件缺键按 clip 照读
+                        # 多核（mp_draw）/动态调度/壁纸恒 clip/eager；旧文件缺键按 clip 照读；
+                        # 生效值可被 `[decode.<fmt>] fetch` 按格式覆盖（串口 `video: feed=` 取覆盖值）
 measured_max_fps = 0    # 固件实测回写（0 = 未测）；GUI 只读展示
 
-# 解码表（统一控制平面，每格式独立四键；qois/raw 无表）：
-# threads bsp_only/all（有状态格式 all 解析但警告并驻 bsp_only）；
-# zero_copy/streaming 布尔（全格式可行）；buffers 0=跟随 tune.window/1-32 显式。
-# 缺表缺键按默认照读（threads=bsp_only，布尔关，buffers=0）。
-[decode.hevc]
-threads = "bsp_only"    # bsp_only | all
+# 解码表（统一控制平面，八格式各独立五键）：
+# threads bsp_only/all（有状态格式 all 解析但警告并驻 bsp_only；qois/raw 即时兑现）；
+# zero_copy/streaming 布尔（全格式可行）；buffers 0=跟随 tune.window/1-32 显式；
+# fetch 缺省继承全局 [play] feed，显式 clip/staged/stream/zero_copy/single 只覆盖本格式
+# （壁纸恒 eager 无视覆盖；串口生效 `video: feed=` + ` fetchovr=<fmt>` 令牌）。
+# 缺表缺键按默认照读（threads=bsp_only，布尔关，buffers=0，fetch 继承全局）。
+[decode.qois]
+threads = "bsp_only"    # bsp_only | all（无状态，all 即时兑现 honored 行）
 zero_copy = false       # 单缓冲即时解码开关
 streaming = false       # 边播边解开关
 buffers = 0             # 0=跟随 tune.window，1-32 显式覆盖
+# fetch 缺省不写 = 继承全局 feed；显式如 fetch = "stream" 只覆盖本格式
+[decode.raw]
+threads = "bsp_only"    # bsp_only | all（零解码，all 即时兑现 honored 行）
+zero_copy = false
+streaming = false
+buffers = 0
+[decode.hevc]
+threads = "bsp_only"    # bsp_only | all（有状态，all 解析但警告并驻 bsp_only）
+zero_copy = false       # 单缓冲即时解码开关
+streaming = false       # 边播边解开关
+buffers = 0             # 0=跟随 tune.window，1-32 显式覆盖
+# fetch = "stream"      # 显式覆盖示例：本格式生效 feed 取 stream（全局 clip 不变）
 [decode.avc]
 threads = "bsp_only"
 zero_copy = false
@@ -176,12 +191,15 @@ executor = "all"        # 诊断项 a 跑哪条执行器线：all（默认，都
   （blt/direct/mp/nano/dynamic 零改，只消费 `next_frame`/`rewind`/`len`/`frame`）。
   多核（`mp_draw`）/动态调度/壁纸恒 `clip`/`eager`（壁纸随机访问循环，按 tag 裁决）。
   缺键老文件按 `clip` 照读，现路行为不变。
-- `[decode.<fmt>]`（hevc/avc/vp9/h263/mpeg2v/theora，每表四键，缺表缺键按默认照读）：
-  `threads=all` 在有状态软解码上解析但警告并驻 `bsp_only`
-  （`decode: <Fmt> threads all deferred (staying bsp_only)` 行，矩阵断言用；
-  qois/raw 无表，`all` 即时生效）；`zero_copy`/`streaming` 布尔全格式可行；
-  `buffers=0` 跟随 `tune.window`（1-32），显式 1-32 按格式覆盖；
-  `tune.window` 仍是全局默认。串口另有 `decode: fmt=<Fmt>` 解析行（矩阵断言用）。
+- `[decode.<fmt>]`（八格式 qois/raw/hevc/avc/vp9/h263/mpeg2v/theora，每表五键，缺表缺键按默认照读）：
+  `threads=all` 在 qois/raw 上即时兑现（`honored (frame-parallel safe)` 行），
+  在有状态软解码上解析但警告并驻 `bsp_only`
+  （`decode: <Fmt> threads all deferred (staying bsp_only)` 行，矩阵断言用）；
+  `zero_copy`/`streaming` 布尔全格式可行；`buffers=0` 跟随 `tune.window`（1-32），
+  显式 1-32 按格式覆盖，`tune.window` 仍是全局默认；`fetch` 缺省（None）继承全局
+  `[play] feed`，显式值只覆盖本格式生效供片（串口 `video: feed=` 取覆盖值 +
+  ` fetchovr=<fmt>` 令牌行，矩阵断言子串；壁纸恒 eager 无视覆盖）。
+  串口另有 `decode: fmt=<Dbg> threads=...` 解析行（矩阵断言用）。
 - 旧键/旧值：`[play] pipeline`、`[render] workers`、`[render] dist` 已删除
   （残留键按 serde 默认忽略；`pipeline` 旧文件按 `clip` 跑）；
   值别名 `avx512`（→`avx512f`）、`on`（→`static`）、整数壁纸 `fps` 已摘除，

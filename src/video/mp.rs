@@ -1,17 +1,26 @@
-//! `video::mp`：全核并行播放（`direct + all`，`mp_draw` + OSD + 确定性掉帧）。
-//! `PlayTask` 常驻 AP + 世代同步；BSP 判迟全核执行同一结论。拆分仅为 ≤1000 行，不改行为。
-//!
 //! 统一控制面分工（解码并行）：`mp_draw` 恒 `clip`/`eager`（需全前视做行区切分，
 //! `need_eager_clip` 强制，`single`/窗懒不进此路）；BSP 解码（load 期全量，播时
 //! 只拷屏），AP 只拷行区（`copy_block` 位宽选路，永不解码有状态流、永不碰 GOP/Blt；
 //! Blt 整推只 BSP）。解码-while-上传流水在 `blt`/`direct`/`nano` 懒侧（窗预取+环形
 //! 多缓冲，见 `decoder::lazy`），本路以全量帧表换确定性（`tile`/`dynamic` 同）。
+//!
+//! zero-copy×mp 帧分区（`mp_slots` 子模块，本文件只分发）：格式 qois/raw
+//! （帧独立，见 `decoder::source` 可行性头）+ 全核 + 有效供片 zero_copy/single/
+//! stream（`workers=all` 快照）时，帧按核分区、各核解码进自家槽环（`SlotRing`），
+//! BSP 按序整推且独判掉帧（确定性规则不变）；其余一律走下述行分区 eager 路
+//! （逐字节旧行为）。新标记行（矩阵 follow-up 断言用）：
+//! `play: path=mp_slots frame-parallel fmt=<qois|raw> fetch=<feed> cores=<n> slots=<n>`。
+//!
+//! dynamic 行边界发布经 `graphics::mp_copy::BoundGate`（`SeqGate`，替代旧
+//! `bounds`+`bgen` 裸数组对；AP 读侧 tsc-bounded 重试，失败沿用旧行区）。
+//! 校准会话（`mp_copy::MpDrive`）沿用 raw 数组，行为零改。
 
 use super::decoder::Clip;
 use super::{VIDEO_H, VIDEO_W, rdtsc};
 use crate::config::{self, CopyWidth, DistMode};
 use crate::error::Result;
 use crate::fs::Fs;
+use crate::graphics::mp_copy::{BoundGate, publish_bound_gate, read_bound_gate};
 use crate::graphics::{Screen, copy_block, dynamic_row_bounds};
 use crate::video::ascii_font::FONT_8X16;
 use alloc::boxed::Box;
@@ -24,6 +33,10 @@ use uefi::boot::{EventType, Tpl, create_event, get_handle_for_protocol, open_pro
 use uefi::proto::console::gop::{BltOp, BltPixel, BltRegion, GraphicsOutput};
 use uefi::proto::pi::mp::MpServices;
 use uefi::{Status, boot};
+
+/// qois/raw 零拷×多核帧分区槽环路（本文件只分发，主体见该模块；`mp.rs` 保持 ≤1000 行）。
+#[path = "mp_slots.rs"]
+pub(crate) mod mp_slots;
 
 type PixelPoint = u8;
 type Frame = Vec<PixelPoint>;
@@ -48,7 +61,7 @@ struct PlayTask<'a> {
     /// P2 位宽（`config::copy_width` 快照；AP/BSP 同值，见 `copy_block` 门控）。
     copy: u8,
     /// P2 调度（`config::effective_dist` 快照；tile 时 BSP+AP 从 `tile` 领活；
-    /// dynamic 时 BSP+AP 按 `bounds` 加权分行，`bgen` 做发布世代）。
+    /// dynamic 时 BSP+AP 按发布门加权分行，`seq` 做发布世代）。
     dist: u8,
     tile: &'a AtomicUsize,
     tile_rows: usize,
@@ -56,12 +69,10 @@ struct PlayTask<'a> {
     /// P4-dynamic 源：全帧指针表（`[total_frames]`，每帧行 stride 对齐；
     /// static/tile 沿用 `core_frame_ptrs` 切片，本字段仅 dynamic 有效）。
     dyn_frames: *const *const u8,
-    /// P4-dynamic 边界：n+1 项行号（首项恒 `OSD_ROWS`，AP 不盖 OSD 字，
-    /// 与 tile 同策略）。BSP 写、AP 只读，`bgen` 做发布。
-    bounds: *const AtomicUsize,
-    /// P4-dynamic 发布世代：BSP 改完 `bounds` 后 bump；AP 每轮对世代--
-    /// 不一致才重载自己的行区（无 tile 游标那样的每块原子开销）。
-    bgen: *const AtomicUsize,
+    /// P4-dynamic 行边界发布门（`mp_copy::BoundGate`，n+1 项行号，首项恒 `OSD_ROWS`，
+    /// AP 不盖 OSD 字，与 tile 同策略）。BSP 独写发布、AP 无锁快照读
+    /// （`read_bound_gate` tsc-bounded 重试，失败沿用旧行区）。
+    seq: *const BoundGate,
     /// P4-dynamic 计时：每核本轮搬运行耗时（BSP 读来算下轮权重，EWMA 平滑）。
     btimes: *const AtomicUsize,
     /// 后缓冲影子槽（`tune.buffers > 0` 时）：`sh_n` 个槽指针（每槽
@@ -141,9 +152,8 @@ extern "efiapi" fn play_task(arg: *mut c_void) {
     let n_cores = ctx.num_cores;
     // P2：本核搬运位宽（快照自 boot 时 `resolve_accel`，全核一致）。
     let copy_w = CopyWidth::from_u8(ctx.copy);
-    // P4-dynamic 本核状态：已见发布世代 + 当前行区（首轮全 MAX/等分，见下）。
+    // P4-dynamic 本核行区（首轮等分，见下；BSP 每轮发布后按快照装载）。
     // BSP 另有一张 EWMA 均值表（`avg`），每轮按各核耗时重算权重。
-    let mut local_bgen = usize::MAX;
     // 影子整推发布世代（首轮无 push 可等，0 即就绪）。
     let mut local_push = 0usize;
     // 混合 Blt 整推失败只记一次 warning（随后轮次静默走 CPU 回退）。
@@ -262,20 +272,15 @@ extern "efiapi" fn play_task(arg: *mut c_void) {
         //    无游标原子开销；OSD 行恒划在边界外，AP 不盖字，与 tile 同策略）。
         let tiled = !dynamic && ctx.dist == DistMode::Tile as u8;
         if dynamic {
-            let g = unsafe { (*ctx.bgen).load(Ordering::Acquire) };
-            if g != local_bgen {
-                local_bgen = g;
-                dy0 = unsafe {
-                    (*ctx.bounds.add(my_id))
-                        .load(Ordering::Acquire)
-                        .min(ctx.height)
-                };
-                dy1 = unsafe {
-                    (*ctx.bounds.add(my_id + 1))
-                        .load(Ordering::Acquire)
-                        .min(ctx.height)
-                        .max(dy0)
-                };
+            // SeqGate 快照读（发布侧 `mp_draw` 建门 + BSP 独写；读撕裂则
+            // `read_bound_gate` 内 tsc-bounded 重试，到界 false 即沿用旧行区——
+            // 行区只影响本轮负载分布，不影响正确性；发布值不变时读回相同，
+            // 与旧“世代不变不重载”等价，无需世代计数器）。
+            let gate = unsafe { &*ctx.seq };
+            let mut tmp = [0usize; 129];
+            if read_bound_gate(gate, n_cores + 1, &mut tmp, ctx.tps) {
+                dy0 = tmp[my_id].min(ctx.height);
+                dy1 = tmp[my_id + 1].min(ctx.height).max(dy0);
             }
             let src_frame = unsafe { *ctx.dyn_frames.add(fi) };
             let t0 = rdtsc();
@@ -364,23 +369,12 @@ extern "efiapi" fn play_task(arg: *mut c_void) {
                 avg[i] = if avg[i] == 0 { t } else { (avg[i] * 3 + t) / 4 };
             }
             let b = dynamic_row_bounds(&avg, n_cores, OSD_ROWS, ctx.height);
-            for (i, v) in b.iter().enumerate() {
-                unsafe { (*ctx.bounds.add(i)).store(*v, Ordering::Relaxed) };
-            }
-            local_bgen = local_bgen.wrapping_add(1);
-            unsafe { (*ctx.bgen).store(local_bgen, Ordering::SeqCst) };
+            // SeqGate 发布（BSP 独写；AP 下轮快照读即见新边界，
+            // 撕裂读只影响本轮负载分布，不影响正确性）。
+            publish_bound_gate(unsafe { &*ctx.seq }, &b);
             // BSP 自己的下一轮行区：刚发布的最热边界，直接装载。
-            dy0 = unsafe {
-                (*ctx.bounds.add(my_id))
-                    .load(Ordering::Relaxed)
-                    .min(ctx.height)
-            };
-            dy1 = unsafe {
-                (*ctx.bounds.add(my_id + 1))
-                    .load(Ordering::Relaxed)
-                    .min(ctx.height)
-                    .max(dy0)
-            };
+            dy0 = b[my_id].min(ctx.height);
+            dy1 = b[my_id + 1].min(ctx.height).max(dy0);
         }
 
         // 3.3 OSD/统计（BSP）：画进出屏基址——有影子时画槽，随整推上屏
@@ -496,17 +490,25 @@ extern "efiapi" fn play_task(arg: *mut c_void) {
 
 pub fn mp_draw(
     screen: &mut Screen,
-    clip: Clip,
+    mut clip: Clip,
     _width: usize,
     _height: usize,
     target: Option<u32>,
     tps: u64,
 ) -> Result {
-    // 1 切片（`Clip` 已预解码：qois 整文件解码 / raw 整目录直读，
+    // 1 切片（行分区 eager 路：`Clip` 已预解码：qois 整文件解码 / raw 整目录直读，
     // 双格式同一下游切分；坏帧记数在 `Clip` 内，见 `decoder.rs`）。
     let mp_handle = get_handle_for_protocol::<MpServices>()?;
     let mp = open_protocol_exclusive::<MpServices>(mp_handle)?;
     let n_cores = mp.get_number_of_processors()?.enabled;
+    // zero-copy×mp 帧分区：qois/raw 无状态帧并行 + 全核 + 零拷/单例/流式供片 +
+    // lazy 编码源就绪时，帧按核分区、各核真解码进槽环、BSP 按序整推（见 `mp_slots`）；
+    // eager Clip 走下述行分区 eager 路（防双解码浪费）；lazy 残留（单核/配置漂移）
+    // 就地补全，确保下述行分区恒吃 eager（逐字节旧行为）。
+    if mp_slots::use_frame_slots(n_cores) && clip.lazy.is_some() {
+        return mp_slots::mp_draw_slots(screen, clip, target, tps);
+    }
+    clip.ensure_eager()?;
     // 片源几何（qois 取文件头一致值，raw 取定值 1920x1080）。
     let (width, height) = (clip.w, clip.h);
 
@@ -525,8 +527,16 @@ pub fn mp_draw(
     let stride_bytes = scr_stride * 4; // 屏幕物理跨度
     let row_bytes = width * 4; // 视频实际宽度
     // P4-dynamic 开关（`video_run` 只在 direct+all 时进 `mp_draw`，
-    // 此时 `effective_dist` 的 direct+all 短路已过，本值即真实调度）。
-    let dynamic = config::effective_dist() == DistMode::Dynamic;
+    // 此时 `effective_dist` 的 direct+all 短路已过，本值即真实调度；
+    // `BoundGate` 定长 129（≤128 核），超限回落 static 并记 warn，不断播）。
+    let mut dynamic = config::effective_dist() == DistMode::Dynamic;
+    if dynamic && n_cores > crate::graphics::mp_copy::BOUND_GATE_MAX_CORES {
+        log::warn!(
+            "play: dynamic cores {} exceed bound gate, fallback static",
+            n_cores
+        );
+        dynamic = false;
+    }
 
     // `Clip` 帧已是 BGRA `BltPixel`：reinterpret 为字节做行切分（零拷贝视图，
     // 下游 `copy_block` 按字节搬运，与旧 `single_raw` 同布局）。
@@ -627,35 +637,27 @@ pub fn mp_draw(
     };
 
     // --- P4-dynamic 共享状态（Box 漏存，会话期常驻；播完不回收，同既有风格） ---
-    let (dyn_frames_ptr, bounds, bgen, btimes): (
+    // 行边界经 `BoundGate` 发布（替代旧 `bounds`+`bgen` 裸数组对；校准侧不动）。
+    let (dyn_frames_ptr, seq_ptr, btimes): (
         *const *const u8,
-        *const AtomicUsize,
-        *const AtomicUsize,
+        *const BoundGate,
         *const AtomicUsize,
     ) = if dynamic {
         let frame_addrs: Vec<*const u8> = dyn_frames.iter().map(|f| f.as_ptr()).collect();
         let fp = Box::leak(frame_addrs.into_boxed_slice()).as_ptr();
         // 首轮等分 `[OSD_ROWS, scr_height)`；BSP 首轮栅栏后即按实测重算发布。
         let init = dynamic_row_bounds(&vec![0u64; n_cores.max(1)], n_cores, OSD_ROWS, scr_height);
-        let mut bv = Vec::with_capacity(n_cores + 1);
-        for v in init {
-            bv.push(AtomicUsize::new(v));
-        }
-        let bp: *const AtomicUsize = Box::leak(bv.into_boxed_slice()).as_ptr();
-        let gp: *const AtomicUsize = Box::leak(Box::new(AtomicUsize::new(0)));
+        let gate: &'static BoundGate = Box::leak(Box::new(BoundGate::new()));
+        publish_bound_gate(gate, &init);
+        log::info!("mp: bound SeqGate armed n={}", n_cores);
         let mut tv = Vec::with_capacity(n_cores.max(1));
         for _ in 0..n_cores.max(1) {
             tv.push(AtomicUsize::new(0));
         }
         let tp: *const AtomicUsize = Box::leak(tv.into_boxed_slice()).as_ptr();
-        (fp, bp, gp, tp)
+        (fp, gate, tp)
     } else {
-        (
-            core::ptr::null(),
-            core::ptr::null(),
-            core::ptr::null(),
-            core::ptr::null(),
-        )
+        (core::ptr::null(), core::ptr::null(), core::ptr::null())
     };
 
     let (scr_width, scr_height) = screen.get_gop().current_mode_info().resolution();
@@ -736,8 +738,7 @@ pub fn mp_draw(
         drop_gen,
         drop_flag,
         dyn_frames: dyn_frames_ptr,
-        bounds,
-        bgen,
+        seq: seq_ptr,
         btimes,
         sh_slots: sh_slots_ptr,
         sh_n,

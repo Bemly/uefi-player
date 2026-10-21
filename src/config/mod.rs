@@ -56,7 +56,8 @@
 //! zero_copy = false       # 单选开关（默认 false；feed=zero_copy 照常零拷，本项叠加 hint）
 //! streaming = false       # 单选开关（默认 false；feed=stream 照常窗口，本项叠加 hint）
 //! buffers = 0             # 滑杆下标（0 = 跟随 tune.window 全局默认，1-32 显式覆盖每格式）
-//!                         # 其余 [decode.avc/vp9/h263/mpeg2v/theora/qois/raw] 同四键
+//!                         # 其余 [decode.avc/vp9/h263/mpeg2v/theora/qois/raw] 同五键
+//! fetch = "clip"            # 可选覆盖（默认缺键 = 继承全局 [play] feed；显式值只覆盖本格式；壁纸恒 clip 忽略覆盖）
 //! [wallpaper]
 //! enable = false          # 菜单背景 + 引导过渡总开关（默认关）
 //! format = "raw"          # 片源格式："raw"（wallpaper/frameNNNN.raw）| "qois"（wallpaper/wall.qois）
@@ -98,7 +99,8 @@ mod decode;
 mod types;
 
 pub use decode::{
-    decode_buffers, decode_streaming, decode_threads, decode_window, decode_zero_copy,
+    decode_buffers, decode_effective_feed, decode_fetch, decode_streaming, decode_threads,
+    decode_window, decode_zero_copy, effective_feed,
 };
 pub use types::*;
 

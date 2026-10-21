@@ -1,0 +1,387 @@
+# 60-decode.toml：QEMU 黑盒矩阵分组（`matrix/` 目录，解码表 + 零拷×多核槽位路径）。
+# 共 11 cases（解码 9 + 槽位 2），单文件 ≤1000 行（AGENTS 口径）。
+
+# 解码表（`[decode.<fmt>]` 八格式各五键：threads bsp_only/all + zero_copy/streaming 布尔 +
+# buffers 0=跟随 tune.window/1-32 显式 + fetch 缺省继承全局 feed）。
+# threads=all：qois/raw 无状态即时兑现（`honored (frame-parallel safe)`）；有状态六软解
+# （单核顺序状态机）解析但警告并驻 bsp_only。fetch 显式覆盖本格式生效供片
+# （`video: feed=` 取覆盖值 + ` fetchovr=<fmt>` 令牌），缺省继承 `[play] feed`；壁纸恒 eager 无视覆盖。
+# 断言：解析（`decode: fmt=`）+ 回退/兑现行 + path 行 + soak 保活，不断言画质。
+[[case]]
+name = "video-decode-hevc"
+covers = ["src/video/decoder", "src/video.rs", "src/diag/data/hevc_probe_main.265"]
+timeout_sec = 180
+needs_hevcvideo = true
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+vsync = "off"
+[play]
+fps = "max"
+format = "hevc"
+feed = "clip"
+[wallpaper]
+enable = false
+[schedule]
+backend = "manual"
+workers = "bsp_only"
+dist = "static"
+[decode.hevc]
+threads = "all"
+zero_copy = true
+streaming = true
+buffers = 8
+"""
+boot_expect = ["cfg: version=1", "play.fmt=Hevc", "idle: ready"]
+keys = [
+  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
+  { send = "p", wait_after = 3 },
+  { send = "0", wait_for = ["menu: ready"], wait_after = 5 },
+]
+expect = ["video: fmt=Hevc", "decode: fmt=Hevc", "decode: Hevc threads all deferred", "play: path=direct_loop"]
+soak_sec = 10
+
+[[case]]
+name = "video-decode-avc"
+covers = ["src/video/decoder", "src/video.rs", "src/diag/data/video-avc.mp4"]
+timeout_sec = 180
+needs_avcvideo = true
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+vsync = "off"
+[play]
+fps = "max"
+format = "avc"
+feed = "clip"
+[wallpaper]
+enable = false
+[schedule]
+backend = "manual"
+workers = "bsp_only"
+dist = "static"
+[decode.avc]
+threads = "all"
+zero_copy = true
+streaming = true
+buffers = 8
+"""
+boot_expect = ["cfg: version=1", "play.fmt=Avc", "idle: ready"]
+keys = [
+  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
+  { send = "p", wait_after = 3 },
+  { send = "0", wait_for = ["menu: ready"], wait_after = 5 },
+]
+expect = ["video: fmt=Avc", "decode: fmt=Avc", "decode: Avc threads all deferred", "play: path=direct_loop"]
+soak_sec = 10
+
+[[case]]
+name = "video-decode-vp9"
+covers = ["src/video/decoder", "src/video.rs", "src/diag/data/vp9_probe.ivf"]
+timeout_sec = 180
+needs_vp9video = true
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+vsync = "off"
+[play]
+fps = "max"
+format = "vp9"
+feed = "clip"
+[wallpaper]
+enable = false
+[schedule]
+backend = "manual"
+workers = "bsp_only"
+dist = "static"
+[decode.vp9]
+threads = "all"
+zero_copy = true
+streaming = true
+buffers = 8
+"""
+boot_expect = ["cfg: version=1", "play.fmt=Vp9", "idle: ready"]
+keys = [
+  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
+  { send = "p", wait_after = 3 },
+  { send = "0", wait_for = ["menu: ready"], wait_after = 5 },
+]
+expect = ["video: fmt=Vp9", "decode: fmt=Vp9", "decode: Vp9 threads all deferred", "play: path=direct_loop"]
+soak_sec = 10
+
+[[case]]
+name = "video-decode-h263"
+covers = ["src/video/decoder", "src/video.rs", "src/diag/data/video.h263"]
+timeout_sec = 180
+needs_h263video = true
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+vsync = "off"
+[play]
+fps = "max"
+format = "h263"
+feed = "clip"
+[wallpaper]
+enable = false
+[schedule]
+backend = "manual"
+workers = "bsp_only"
+dist = "static"
+[decode.h263]
+threads = "all"
+zero_copy = true
+streaming = true
+buffers = 8
+"""
+boot_expect = ["cfg: version=1", "play.fmt=H263", "idle: ready"]
+keys = [
+  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
+  { send = "p", wait_after = 3 },
+  { send = "0", wait_for = ["menu: ready"], wait_after = 5 },
+]
+expect = ["video: fmt=H263", "decode: fmt=H263", "decode: H263 threads all deferred", "play: path=direct_loop"]
+soak_sec = 10
+
+[[case]]
+name = "video-decode-mpeg2v"
+covers = ["src/video/decoder", "src/video.rs", "src/diag/data/video.m2v"]
+timeout_sec = 180
+needs_mpeg2vvideo = true
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+vsync = "off"
+[play]
+fps = "max"
+format = "mpeg2v"
+feed = "clip"
+[wallpaper]
+enable = false
+[schedule]
+backend = "manual"
+workers = "bsp_only"
+dist = "static"
+[decode.mpeg2v]
+threads = "all"
+zero_copy = true
+streaming = true
+buffers = 8
+"""
+boot_expect = ["cfg: version=1", "play.fmt=Mpeg2v", "idle: ready"]
+keys = [
+  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
+  { send = "p", wait_after = 3 },
+  { send = "0", wait_for = ["menu: ready"], wait_after = 5 },
+]
+expect = ["video: fmt=Mpeg2v", "decode: fmt=Mpeg2v", "decode: Mpeg2v threads all deferred", "play: path=direct_loop"]
+soak_sec = 10
+
+[[case]]
+name = "video-decode-theora"
+covers = ["src/video/decoder", "src/video.rs", "src/diag/data/video.ogv"]
+timeout_sec = 180
+needs_theoravideo = true
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+vsync = "off"
+[play]
+fps = "max"
+format = "theora"
+feed = "clip"
+[wallpaper]
+enable = false
+[schedule]
+backend = "manual"
+workers = "bsp_only"
+dist = "static"
+[decode.theora]
+threads = "all"
+zero_copy = true
+streaming = true
+buffers = 8
+"""
+boot_expect = ["cfg: version=1", "play.fmt=Theora", "idle: ready"]
+keys = [
+  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
+  { send = "p", wait_after = 3 },
+  { send = "0", wait_for = ["menu: ready"], wait_after = 5 },
+]
+expect = ["video: fmt=Theora", "decode: fmt=Theora", "decode: Theora threads all deferred", "play: path=direct_loop"]
+soak_sec = 10
+
+# 解码 qois：无状态逐帧 threads=all 即时兑现（`honored (frame-parallel safe)` 行，不断言画质）。
+[[case]]
+name = "video-decode-qois"
+covers = ["src/video/decoder", "src/video.rs", "usb_reports/1080p/video.qois"]
+timeout_sec = 180
+needs_video = true
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+vsync = "off"
+[play]
+fps = "max"
+feed = "clip"
+[wallpaper]
+enable = false
+[schedule]
+backend = "manual"
+workers = "bsp_only"
+dist = "static"
+[decode.qois]
+threads = "all"
+zero_copy = true
+streaming = true
+buffers = 8
+"""
+boot_expect = ["cfg: version=1", "play.fmt=Qois", "idle: ready"]
+keys = [{ send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 }, { send = "p", wait_after = 3 }, { send = "0", wait_for = ["menu: ready"], wait_after = 5 }]
+expect = ["video: fmt=Qois", "decode: fmt=Qois", "honored (frame-parallel safe)", "play: path=direct_loop"]
+soak_sec = 10
+
+# 解码 raw：零解码直搬 threads=all 即时兑现（`honored` 行）；黑场 2 帧只走通路。
+[[case]]
+name = "video-decode-raw"
+covers = ["src/video.rs", "src/video/"]
+timeout_sec = 180
+needs_rawvideo = 2
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+vsync = "off"
+[play]
+fps = "max"
+format = "raw"
+feed = "clip"
+[wallpaper]
+enable = false
+[schedule]
+backend = "manual"
+workers = "bsp_only"
+dist = "static"
+[decode.raw]
+threads = "all"
+zero_copy = true
+streaming = true
+buffers = 8
+"""
+boot_expect = ["cfg: version=1", "play.fmt=Raw", "idle: ready"]
+keys = [{ send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 }, { send = "p", wait_after = 3 }, { send = "0", wait_for = ["menu: ready"], wait_after = 5 }]
+expect = ["video: fmt=Raw", "decode: fmt=Raw", "honored (frame-parallel safe)", "play: path=direct_loop"]
+soak_sec = 15
+
+# 取数覆盖（`[decode.hevc] fetch=stream` 盖全局 feed=clip）：生效 `video: feed=stream` + ` fetchovr=hevc` 令牌；壁纸无视覆盖。
+[[case]]
+name = "video-decode-fetch-override"
+covers = ["src/video/decoder", "src/video.rs", "src/diag/data/hevc_probe_main.265"]
+timeout_sec = 180
+needs_hevcvideo = true
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+vsync = "off"
+[play]
+fps = "max"
+format = "hevc"
+feed = "clip"
+[wallpaper]
+enable = false
+[schedule]
+backend = "manual"
+workers = "bsp_only"
+dist = "static"
+[decode.hevc]
+fetch = "stream"
+"""
+boot_expect = ["cfg: version=1", "play.fmt=Hevc", "play.feed=Clip", "idle: ready"]
+keys = [{ send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 }, { send = "p", wait_after = 3 }, { send = "0", wait_for = ["menu: ready"], wait_after = 5 }]
+expect = ["video: fmt=Hevc", "video: feed=stream", "decode: fmt=Hevc", "fetchovr=hevc", "play: path=direct_loop"]
+soak_sec = 10
+
+# 零拷×多核（qois/raw 帧并行 + workers=all + feed 档走 mp_slots 按核槽位真并行解码；
+# BSP scan-split 后按序收槽，独判掉帧）：断言新标记行 + scan 行 + path 行，不断言画质。
+[[case]]
+name = "video-mp-slots-qois"
+covers = ["src/video/mp_slots.rs", "src/video/decoder", "src/video.rs", "usb_reports/1080p/video.qois"]
+timeout_sec = 180
+needs_video = true
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+vsync = "off"
+[play]
+fps = "max"
+format = "qois"
+feed = "zero_copy"
+[wallpaper]
+enable = false
+[schedule]
+backend = "manual"
+workers = "all"
+dist = "static"
+"""
+boot_expect = ["cfg: version=1", "play.fmt=Qois", "play.feed=ZeroCopy", "idle: ready"]
+keys = [{ send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 }, { send = "p", wait_after = 3 }, { send = "0", wait_for = ["menu: ready"], wait_after = 5 }]
+expect = ["play: path=mp_slots frame-parallel fmt=qois fetch=zero_copy", "mp: slots scan qois chunks=", "video: fmt=Qois"]
+soak_sec = 10
+
+# 同上，raw 黑场 2 帧 + feed=stream（换一档供片，覆盖另一触发组合）。
+[[case]]
+name = "video-mp-slots-raw"
+covers = ["src/video/mp_slots.rs", "src/video/decoder", "src/video.rs"]
+timeout_sec = 180
+needs_rawvideo = 2
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+vsync = "off"
+[play]
+fps = "max"
+format = "raw"
+feed = "stream"
+[wallpaper]
+enable = false
+[schedule]
+backend = "manual"
+workers = "all"
+dist = "static"
+"""
+boot_expect = ["cfg: version=1", "play.fmt=Raw", "play.feed=Stream", "idle: ready"]
+keys = [{ send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 }, { send = "p", wait_after = 3 }, { send = "0", wait_for = ["menu: ready"], wait_after = 5 }]
+expect = ["play: path=mp_slots frame-parallel fmt=raw fetch=stream", "mp: slots scan raw frames=2 1920x1080", "video: fmt=Raw"]
+soak_sec = 10

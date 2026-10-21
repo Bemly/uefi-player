@@ -8,16 +8,22 @@
 //!   OSD + 限速/掉帧独判（确定性与手写一致：AP 无判帧权，只有 BSP 的结论算数）。
 //!   只直写前台：`render=blt`（Blt 引擎单线程）/ 无 MP / 单核回 nano 泵；
 //!   `tune.buffers>0`（影子环 v1 不支持）回 manual（影子整推只在手写路）。
+//!   数据面经 `SlotRing` 槽环（steal task 解码进槽 `Full` 发布，BSP 按
+//!   `next_full_min_gen` 消费最低世代槽、整推后 `release_empty`；固定槽-带
+//!   映射，帧号 sidecar 防 stale 上传）；控制面（分发/steal）仍归执行器。
+//!   新标记行（矩阵 follow-up 断言用）：
+//!   `play: dynamic slots armed bands=<n> slots=<n>`（建环时记一笔）
+//!   + 原有 `play: path=dynamic_draw (...)` 行逐字保留。
 //!
 //! 共享纪律（沿用 `mp_draw` 风格，会话期常驻，播完不回收）：
-//! - 任务全 `'static`（行带地址按 `usize` 传，原子量 `Box::leak`），`Send` 天然成立；
-//! - 执行器数组与 MP 协议句柄常驻 BSP 栈（帧内不返回，见 `BSPDriver` 自持），
-//!   AP 经裸指针按 `who_am_i` 取自己的那台（每台只被一核 poll）；
-//! - AP 永不碰 GOP（BSP 才画 OSD），`Screen` 活着，裸指针安全。
+//!
+//! 等待纪律（看门狗铁律）：BSP 的 done 等待与槽消费等待一律 tsc-bounded
+//!  （5·tps 熔断；超时按丢帧/缺带降级，不断流）；steal task 的槽认领同样
+//!   bounded（失配 stale 全槽由 BSP 开帧清理，见 `BSPDriver::run`）。
 //!
 //! 统一控制面：`nano_pump` 全档供片直通（含 `single` 零缓存重解 + `stream` 窗预取，
 //!   取帧→上传→限速/掉帧，BSP 单泵）；`dynamic_draw` 恒 `eager`（需全前视分带，load 期
-//!   已强制，AP 只 steal 行拷，永不解码、永不碰 GOP）。解码 SIMD 单比特跟随全局。
+//!   已强制，AP 只 steal 行拷、永不碰 GOP）。解码 SIMD 单比特跟随全局。
 
 use alloc::boxed::Box;
 use alloc::format;
@@ -40,6 +46,7 @@ use crate::error::{NyaStatus, Result};
 use crate::graphics::{Screen, copy_block};
 use crate::video::ascii_font::FONT_8X16;
 use crate::video::decoder::Clip;
+use crate::video::sync::{SlotRing, SlotState};
 use crate::video::{pace_or_drop, rdtsc};
 
 /// OSD 顶条行数（与手写路 `OSD_ROWS` 同值；steal 分带恒跳过，AP 不盖字）。
@@ -144,6 +151,10 @@ struct BSPDriver {
     scr_h: usize,
     nbands: usize,
     per: usize,
+    /// 槽环（`[nbands]`，槽 b 只装带 b 的行字节；steal task 产出，BSP 消费），
+    /// + 帧号 sidecar（`[nbands]`，task 存 fi 后 `publish_full`，BSP 验号防 stale）。
+    ring: &'static SlotRing<32>,
+    seqs: &'static [AtomicUsize],
     copy_w: CopyWidth,
     target: Option<u32>,
     tps: u64,
@@ -151,7 +162,9 @@ struct BSPDriver {
 }
 
 impl BSPDriver {
-    /// 分带 spawn → 等 done==N → OSD → 限速/掉帧独判（BSP 说了算）。
+    /// 分带 spawn（steal task 解码进槽）→ BSP 消费槽整推 → OSD → 限速/掉帧独判。
+    /// 等待一律 tsc-bounded（5·tps 熔断）：done 超时则按已有槽降级消费，
+    /// 槽超时则记缺带 drop；stale 槽（上一轮超时残留）开帧清理 + 消费时验号。
     fn run(&self) -> Result {
         // SAFETY：0 号执行器只被 BSP poll（AP 按号取自己的，见 `exec_ap`）。
         let exec0 = unsafe { &*self.exec0 };
@@ -183,7 +196,21 @@ impl BSPDriver {
             }
             let fi = idx % self.total.max(1);
             let src = self.addrs[fi] as usize;
-            // 2. 分带 spawn（空带跳过；带数 ≤ 64 = 队列容量，满不了）。
+            // 开帧清理：上一轮 done 超时残留的 stale Full（帧号 != fi）直接
+            // 认领释放，免得本轮 task 认领失败（单消费 BSP，无竞争）。
+            for b in 0..self.nbands {
+                if let Some(slot) = self.ring.get(b) {
+                    if slot.state() == SlotState::Full
+                        && self.seqs[b].load(Ordering::Acquire) != fi
+                        && slot.try_acquire_drain()
+                    {
+                        slot.release_empty();
+                    }
+                }
+            }
+            // 2. 分带 spawn（空带跳过；steal task 把行带拷进槽 b 后 Full 发布，
+            //    槽认领同样 bounded——失配只发生在 stale 清理漏网时，band 缺席
+            //    由 BSP 消费侧记 miss，不断流）。
             let mut n = 0usize;
             for b in 0..self.nbands {
                 let y0 = OSD_ROWS + b * self.per;
@@ -192,16 +219,24 @@ impl BSPDriver {
                     continue;
                 }
                 let done = self.done;
-                let (fb, stride, w) = (self.fb_base, self.stride_bytes, self.copy_w);
+                let (ring, seqs) = (self.ring, self.seqs);
+                let (src, stride) = (src, self.stride_bytes);
                 let task = async move {
-                    let mut y = y0;
-                    while y < y1 {
-                        unsafe {
-                            let d = (fb as *mut u8).add(y * stride);
-                            let s = (src as *const u8).add(y * stride);
-                            copy_block(d, s, stride, w);
+                    // 固定槽-带映射：槽 b 只装带 b（BSP 消费侧验帧号防 stale）。
+                    if let Some(slot) = ring.get(b) {
+                        if slot.try_acquire_fill() {
+                            unsafe {
+                                let dst = slot.as_bytes_mut();
+                                let sbase = src as *const u8;
+                                for (r, y) in (y0..y1).enumerate() {
+                                    let d = dst.as_mut_ptr().add(r * stride);
+                                    let s = sbase.add(y * stride);
+                                    core::ptr::copy_nonoverlapping(s, d, stride);
+                                }
+                            }
+                            seqs[b].store(fi, Ordering::Release);
+                            slot.publish_full();
                         }
-                        y += 1;
                     }
                     done.fetch_add(1, Ordering::SeqCst);
                 };
@@ -212,11 +247,60 @@ impl BSPDriver {
                 })?;
                 n += 1;
             }
-            // 3. 等 done==N（BSP 轮询 0 号执行器，顺手执行自己分到的带）。
-            while self.done.load(Ordering::Acquire) < n {
-                exec0.run_step(tick(), &mut cx);
+            // 3. 等 done==n（BSP 轮询 0 号执行器，顺手执行自己分到的带；
+            //    tsc-bounded：5·tps 到界即降级消费已有槽，缺带记 miss，不断流）。
+            {
+                let deadline = rdtsc().saturating_add(5 * self.tps.max(1));
+                while self.done.load(Ordering::Acquire) < n {
+                    exec0.run_step(tick(), &mut cx);
+                    if rdtsc() >= deadline {
+                        break;
+                    }
+                }
+                self.done.store(0, Ordering::SeqCst);
             }
-            self.done.store(0, Ordering::SeqCst);
+            // 3.5 BSP 消费槽 → 整推（最低世代优先；验帧号防 stale，失配释放；
+            //    缺槽/超时按缺带记 drops，与迟到判丢同口径，BSP 独判）。
+            {
+                let deadline = rdtsc().saturating_add(5 * self.tps.max(1));
+                let mut got = 0usize;
+                for _ in 0..n {
+                    let mut idx_opt = None;
+                    while rdtsc() < deadline {
+                        idx_opt = self.ring.next_full_min_gen();
+                        if idx_opt.is_some() {
+                            break;
+                        }
+                        core::hint::spin_loop();
+                    }
+                    let Some(b) = idx_opt else { break };
+                    let slot = match self.ring.get(b) {
+                        Some(s) => s,
+                        None => continue,
+                    };
+                    if !slot.try_acquire_drain() {
+                        continue;
+                    }
+                    if self.seqs[b].load(Ordering::Acquire) != fi {
+                        // stale（上一轮超时残留，task 已重产）：释放，不上传。
+                        slot.release_empty();
+                        continue;
+                    }
+                    let y0 = OSD_ROWS + b * self.per;
+                    let y1 = (y0 + self.per).min(self.scr_h);
+                    unsafe {
+                        let bytes = slot.as_bytes();
+                        for (r, y) in (y0..y1).enumerate() {
+                            let d = (self.fb_base as *mut u8).add(y * self.stride_bytes);
+                            let s = bytes.as_ptr().add(r * self.stride_bytes);
+                            copy_block(d, s, self.stride_bytes, self.copy_w);
+                        }
+                    }
+                    slot.release_empty();
+                    got += 1;
+                }
+                drops += (n as u64).saturating_sub(got as u64);
+            }
             // 4. OSD（BSP 独画，AP 行区已跳过顶条）。
             {
                 let end_ticks = rdtsc();
@@ -308,11 +392,37 @@ pub fn dynamic_draw(
         return nano_pump(screen, clip, width, height, target, tps);
     }
     log::info!("play: path=dynamic_draw ({} cores, steal bands)", n_cores);
-
-    // --- 片源整备：全帧 stride 对齐表（行区划分推迟到分带时） ---
+    // --- 几何 + 分带 + 槽环后备（`clip` 尚未 drop，槽分配失败可回 nano 泵） ---
+    // 分带 `[OSD_ROWS, scr_h)` 等分（末带兜余行）；32 上限对齐 `SlotRing<32>`
+    // （`sync` 断言 N≤32；>32 核由 steal 分摊，行为见文件头）。
     let (scr_w, scr_h) = screen.get_gop().current_mode_info().resolution();
     let (scr_w, scr_h) = (scr_w as usize, scr_h as usize);
     let stride_bytes = screen.get_gop().current_mode_info().stride() * 4;
+    let nbands = n_cores.min(32).max(1);
+    let per = scr_h.saturating_sub(OSD_ROWS).div_ceil(nbands).max(1);
+    // 槽环后备（`nbands` 槽 × 每带 `per` 行；steal task 产带字节，BSP 消费整推，
+    // 会话期常驻，播完不回收）。
+    let slot_len = per.saturating_mul(stride_bytes).max(1);
+    let mut backing: Vec<u8> = Vec::new();
+    if backing.try_reserve_exact(nbands * slot_len).is_err() {
+        log::warn!("play: dynamic slots alloc failed, fallback nano_pump");
+        return nano_pump(screen, clip, width, height, target, tps);
+    }
+    backing.extend(core::iter::repeat(0u8).take(nbands * slot_len));
+    let backing_leaked: &'static mut [u8] = Box::leak(backing.into_boxed_slice());
+    let ring: &'static SlotRing<32> = Box::leak(Box::new(unsafe {
+        SlotRing::new(backing_leaked.as_mut_ptr(), slot_len, nbands)
+    }));
+    let mut seqv: Vec<AtomicUsize> = Vec::new();
+    for _ in 0..nbands {
+        seqv.push(AtomicUsize::new(usize::MAX));
+    }
+    let seqs: &'static [AtomicUsize] = Box::leak(seqv.into_boxed_slice());
+    log::info!(
+        "play: dynamic slots armed bands={} slots={}",
+        nbands,
+        nbands
+    );
     let (vw, vh) = (clip.w, clip.h);
     let row_bytes = vw * 4;
     let mut full: Vec<Vec<u8>> = Vec::new();
@@ -359,10 +469,7 @@ pub fn dynamic_draw(
     }
     let fb_base = screen.get_gop().frame_buffer().as_mut_ptr() as usize;
     let done: &'static AtomicUsize = Box::leak(Box::new(AtomicUsize::new(0)));
-    // 分带：`[OSD_ROWS, scr_h)` 等分（末带兜余行），64 上限对齐 steal 队列容量。
-    let nbands = n_cores.min(64).max(1);
-    let span = scr_h.saturating_sub(OSD_ROWS);
-    let per = span.div_ceil(nbands).max(1);
+    // 分带几何沿用上文（`nbands`/`per` 已按 `SlotRing<32>` 上限裁定）。
 
     // --- 起 AP（BSP 不进 AP 函数，0 号执行器归 BSP 轮询） ---
     let event = unsafe { create_event(EventType::empty(), Tpl::CALLBACK, None, None)? };
@@ -395,6 +502,8 @@ pub fn dynamic_draw(
         scr_h,
         nbands,
         per,
+        ring,
+        seqs,
         copy_w: config::copy_width(),
         target,
         tps,

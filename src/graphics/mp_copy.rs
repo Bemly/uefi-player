@@ -5,6 +5,15 @@
 //!
 //! 统一控制面搬运核：BSP/AP 行区分工（`copy_block` 位宽选路），AP 永不碰 GOP/Blt；
 //! 解码-while-上传流水的上传半即此（BSP 先解后推，AP 拷影子/前台行区，BSP 整推）。
+//!
+//! SeqGate 行边界发布（播放侧 `video::mp` dynamic 路用；校准侧 `MpCalCtx.bounds`
+//! + `mode`/`round` 原封不动——校准数组分配在只读 `calibrate.rs`，行为零改，
+//! 只换播放侧的发布/读取机制）：
+//! - 新标记行（矩阵 follow-up 断言用，不断言画质）：
+//!   `mp: bound SeqGate armed n=<cores>`（`mp_draw` 建门时记一笔，
+//!   每会话一次；发布/读取本身静默，重试上限 5·tps，见 `read_bound_gate`）。
+//! - `BoundGate` 定长 129（≤128 核；上限与 `exec`  steal 队深同级，
+//!   超限 dynamic 在 `mp_draw` 侧回落 static，见该处注释）。
 
 use alloc::vec;
 use alloc::vec::Vec;
@@ -17,6 +26,7 @@ use uefi::proto::console::gop::{BltOp, BltPixel, BltRegion, GraphicsOutput};
 use uefi::proto::pi::mp::MpServices;
 
 use crate::config::{self, CopyWidth};
+use crate::video::sync::SeqGate;
 
 /// 时间戳计数。非 x86_64 返回 0（auto 会退回 direct）。
 #[inline(always)]
@@ -37,6 +47,44 @@ pub(crate) fn calibrate_tps() -> u64 {
     let s = tsc();
     uefi::boot::stall(Duration::from_millis(100));
     tsc().saturating_sub(s).saturating_mul(10).max(1)
+}
+
+// ---------- dynamic 行边界的 SeqGate 发布（播放侧；校准侧沿用 raw 数组） ----------
+
+/// SeqGate 上限核数（`BoundGate` 定长 129 = 128 核 + 首项；`exec` steal 队深 64 同级，
+/// 播放 dynamic 实测覆盖不到的量级，超限由 `mp_draw` 回落 static，见该处）。
+pub(crate) const BOUND_GATE_MAX_CORES: usize = 128;
+
+/// dynamic 行边界发布门（n+1 项行号，定长 129 槽；BSP 独写、AP 无锁读，
+/// 协议见 `video::sync::SeqGate`）。校准会话不用它（分配点在只读 `calibrate.rs`）。
+pub(crate) type BoundGate = SeqGate<129>;
+
+/// 发布整组行边界（BSP 独写；`bounds.len()` 须为 n+1 且 n ≤ 128，
+/// 超长截断——调用方已按 `BOUND_GATE_MAX_CORES` 回落，此处只兜底）。
+pub(crate) fn publish_bound_gate(gate: &BoundGate, bounds: &[usize]) {
+    let mut arr = [0usize; 129];
+    let n = bounds.len().min(129);
+    arr[..n].copy_from_slice(&bounds[..n]);
+    gate.publish(&arr);
+}
+
+/// 快照读（AP 侧；`n` 为有效项数 = 核数+1，`out.len()` 须 ≥ n）。
+/// tsc-bounded 重试（5·`tps` 熔断，同 `sync::wait_state_eq` 口径）：
+/// 到界返 false（调用方沿用旧行区——行区只影响负载分布，不影响正确性）。
+pub(crate) fn read_bound_gate(gate: &BoundGate, n: usize, out: &mut [usize], tps: u64) -> bool {
+    let deadline = tsc().saturating_add(5 * tps.max(1));
+    let mut tmp = [0usize; 129];
+    loop {
+        if gate.try_read(&mut tmp) {
+            let m = n.min(129).min(out.len());
+            out[..m].copy_from_slice(&tmp[..m]);
+            return true;
+        }
+        if tsc() >= deadline {
+            return false;
+        }
+        core::hint::spin_loop();
+    }
 }
 
 // ---------- 矩阵校准的多核会话 ----------

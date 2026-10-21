@@ -6,10 +6,11 @@
 //! - `zero_copy` / `streaming`：单选开关，默认 false（`feed` 照常走对应复用/窗口，
 //!   本项为叠加 hint）；
 //! - `buffers`：滑杆下标，0 跟随 `tune.window` 全局默认，1-32 显式覆盖每格式。
+//! - `fetch`：每格式供片覆盖（None = 继承全局 `[play] feed`；显式值只覆盖本格式，壁纸恒 clip 忽略覆盖）。
 
 use core::sync::atomic::{AtomicU8, AtomicU32, Ordering};
 
-use super::{DecodeTable, DecodeThreads, MediaFormat};
+use super::{DecodeTable, DecodeThreads, FeedMode, MediaFormat};
 
 /// 每格式线程档（0 = bsp_only 默认，1 = all 请求值；生效见 `decode_threads`）。
 static DEC_THREADS_QOIS: AtomicU8 = AtomicU8::new(0);
@@ -47,6 +48,15 @@ static DEC_BUF_H263: AtomicU32 = AtomicU32::new(0);
 static DEC_BUF_MPEG2V: AtomicU32 = AtomicU32::new(0);
 static DEC_BUF_THEORA: AtomicU32 = AtomicU32::new(0);
 static DEC_BUF_AVC: AtomicU32 = AtomicU32::new(0);
+/// 每格式供片覆盖（0xFF = None 继承全局，0-4 = FeedMode 判别值；已钳制）。
+static DEC_FETCH_QOIS: AtomicU8 = AtomicU8::new(0xFF);
+static DEC_FETCH_RAW: AtomicU8 = AtomicU8::new(0xFF);
+static DEC_FETCH_HEVC: AtomicU8 = AtomicU8::new(0xFF);
+static DEC_FETCH_VP9: AtomicU8 = AtomicU8::new(0xFF);
+static DEC_FETCH_H263: AtomicU8 = AtomicU8::new(0xFF);
+static DEC_FETCH_MPEG2V: AtomicU8 = AtomicU8::new(0xFF);
+static DEC_FETCH_THEORA: AtomicU8 = AtomicU8::new(0xFF);
+static DEC_FETCH_AVC: AtomicU8 = AtomicU8::new(0xFF);
 
 /// 开机 `load()` 调用：把 `DecodeTable`（缺表缺键全默认）装进原子存储。
 /// `buffers` 钳 0-32（0 = 跟随 `tune.window`）。
@@ -83,6 +93,38 @@ pub(crate) fn store_all(d: &DecodeTable) {
     DEC_BUF_MPEG2V.store(d.mpeg2v.buffers.min(32), Ordering::Relaxed);
     DEC_BUF_THEORA.store(d.theora.buffers.min(32), Ordering::Relaxed);
     DEC_BUF_AVC.store(d.avc.buffers.min(32), Ordering::Relaxed);
+    DEC_FETCH_QOIS.store(
+        d.qois.fetch.map(|f| f.as_u8()).unwrap_or(0xFF),
+        Ordering::Relaxed,
+    );
+    DEC_FETCH_RAW.store(
+        d.raw.fetch.map(|f| f.as_u8()).unwrap_or(0xFF),
+        Ordering::Relaxed,
+    );
+    DEC_FETCH_HEVC.store(
+        d.hevc.fetch.map(|f| f.as_u8()).unwrap_or(0xFF),
+        Ordering::Relaxed,
+    );
+    DEC_FETCH_VP9.store(
+        d.vp9.fetch.map(|f| f.as_u8()).unwrap_or(0xFF),
+        Ordering::Relaxed,
+    );
+    DEC_FETCH_H263.store(
+        d.h263.fetch.map(|f| f.as_u8()).unwrap_or(0xFF),
+        Ordering::Relaxed,
+    );
+    DEC_FETCH_MPEG2V.store(
+        d.mpeg2v.fetch.map(|f| f.as_u8()).unwrap_or(0xFF),
+        Ordering::Relaxed,
+    );
+    DEC_FETCH_THEORA.store(
+        d.theora.fetch.map(|f| f.as_u8()).unwrap_or(0xFF),
+        Ordering::Relaxed,
+    );
+    DEC_FETCH_AVC.store(
+        d.avc.fetch.map(|f| f.as_u8()).unwrap_or(0xFF),
+        Ordering::Relaxed,
+    );
 }
 
 /// 是否有状态软解（顺序解码，其余三项 yes；`qois`/`raw` 非状态）。
@@ -126,10 +168,7 @@ pub fn decode_threads(fmt: MediaFormat) -> DecodeThreads {
         return DecodeThreads::BspOnly;
     }
     if is_stateful_fmt(fmt) {
-        log::warn!(
-            "decode: {} threads all deferred (staying bsp_only)",
-            decode_key(fmt)
-        );
+        log::warn!("decode: {:?} threads all deferred (staying bsp_only)", fmt);
         return DecodeThreads::BspOnly;
     }
     log::info!(
@@ -192,4 +231,36 @@ pub fn decode_window(fmt: MediaFormat) -> usize {
         0 => super::tune_window().clamp(1, 32).max(1) as usize,
         n => n.clamp(1, 32).max(1) as usize,
     }
+}
+
+/// 每格式供片覆盖（`[decode.<fmt>] fetch`，默认 None = 继承全局 `[play] feed`；
+/// 显式 clip/staged/stream/zero_copy/single 只覆盖本格式）。
+/// 无别名，未知键忽略（serde 默认）；壁纸恒 clip，调用方以 tag 裁决忽略本项。
+pub fn decode_fetch(fmt: MediaFormat) -> Option<FeedMode> {
+    let v = match fmt {
+        MediaFormat::Qois => DEC_FETCH_QOIS.load(Ordering::Relaxed),
+        MediaFormat::Raw => DEC_FETCH_RAW.load(Ordering::Relaxed),
+        MediaFormat::Hevc => DEC_FETCH_HEVC.load(Ordering::Relaxed),
+        MediaFormat::Vp9 => DEC_FETCH_VP9.load(Ordering::Relaxed),
+        MediaFormat::H263 => DEC_FETCH_H263.load(Ordering::Relaxed),
+        MediaFormat::Mpeg2v => DEC_FETCH_MPEG2V.load(Ordering::Relaxed),
+        MediaFormat::Theora => DEC_FETCH_THEORA.load(Ordering::Relaxed),
+        MediaFormat::Avc => DEC_FETCH_AVC.load(Ordering::Relaxed),
+    };
+    if v == 0xFF {
+        None
+    } else {
+        Some(FeedMode::from_u8(v))
+    }
+}
+
+/// 有效供片：每格式 `fetch` 覆盖全局 `[play] feed`（None 则继承全局）。
+/// 解码包装按此裁决懒/全量形态；`play.rs` 按此记 `video: feed=` 行。
+pub fn effective_feed(fmt: MediaFormat) -> FeedMode {
+    decode_fetch(fmt).unwrap_or(super::play_feed())
+}
+
+/// `effective_feed` 别名（供 decoder 垫片/旧名调用，同值）。
+pub fn decode_effective_feed(fmt: MediaFormat) -> FeedMode {
+    effective_feed(fmt)
 }

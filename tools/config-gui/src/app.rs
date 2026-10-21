@@ -45,9 +45,11 @@ pub(crate) struct App {
     /// 否则开档文件载入后滑杆仍停在旧位，下一帧会把已载入的档位盖掉）。
     pub(crate) feed_f: f32,
     /// 解码表滑杆镜像（与 `DecodeTable::ORDER` 同序，同下标）：
-    /// 线程 0-1 对应 `DecodeThreads::ALL` 下标，缓冲 0-32（0 = 跟随 `tune.window`）。
-    pub(crate) dec_threads_f: [f32; 6],
-    pub(crate) dec_buffers_f: [f32; 6],
+    /// 线程 0-1 对应 `DecodeThreads::ALL` 下标，缓冲 0-32（0 = 跟随 `tune.window`），
+    /// 供片 0 = 继承全局 `[play] feed`（`None`，落盘不写键），1-5 对应 `FeedMode::ALL` 下标 +1。
+    pub(crate) dec_threads_f: [f32; 8],
+    pub(crate) dec_buffers_f: [f32; 8],
+    pub(crate) dec_fetch_f: [f32; 8],
     /// 加速档位滑杆镜像：0-30 对应 `AccelLevel::ALL` 下标（`sync_widgets` 随读盘同步，
     /// 否则开档文件载入后滑杆仍停在旧位，下一帧会把已载入的档位盖掉）。
     pub(crate) accel_f: f32,
@@ -127,8 +129,9 @@ impl App {
             page: Page::File,
             play_f: 0.0,
             feed_f: FeedMode::Clip.index() as f32,
-            dec_threads_f: [0.0; 6],
-            dec_buffers_f: [0.0; 6],
+            dec_threads_f: [0.0; 8],
+            dec_buffers_f: [0.0; 8],
+            dec_fetch_f: [0.0; 8],
             accel_f: AccelLevel::Auto.index() as f32,
             wp_fps_f: 15.0,
             wp_frames_f: 0.0,
@@ -161,6 +164,10 @@ impl App {
             if let Some(d) = self.cfg.decode.get(*fmt) {
                 self.dec_threads_f[i] = d.threads.index() as f32;
                 self.dec_buffers_f[i] = d.buffers.min(32) as f32;
+                self.dec_fetch_f[i] = match d.fetch {
+                    None => 0.0,
+                    Some(f) => f.index() as f32 + 1.0,
+                };
             }
         }
         self.play_f = match parse_fps(&self.cfg.play.fps) {

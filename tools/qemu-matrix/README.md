@@ -64,11 +64,13 @@ cargo run --manifest-path tools/qemu-matrix/Cargo.toml --target "$(rustc -vV | s
 
 - 统一控制平面（无老管线）：播放只走 `Clip`。`[play] feed` 五档
   （clip/staged/stream/zero_copy/single）只切拿帧方式，上传路
-  （blt/direct/mp_draw/nano_pump/dynamic_draw）零改；每格式解码并发/缓冲由
-  `[decode.<fmt>]` 四键调（threads bsp_only/all + zero_copy/streaming 布尔 +
-  buffers 0=跟随`tune.window`/1-32 显式，六表 hevc/avc/vp9/h263/mpeg2v/theora）。
-  `[play] pipeline` 与 `[render] workers/dist` 旧键已删除（正典只剩 `[schedule]`
-  workers/dist；旧值别名 `avx512`/`on`/整数壁纸 fps 已摘除）。
+  （blt/direct/mp_draw/nano_pump/dynamic_draw）零改；每格式解码并发/缓冲/取数由
+  `[decode.<fmt>]` 五键调（threads bsp_only/all + zero_copy/streaming 布尔 +
+  buffers 0=跟随`tune.window`/1-32 显式 + fetch 缺省继承全局 feed/显式覆盖本格式，
+  八表 qois/raw/hevc/avc/vp9/h263/mpeg2v/theora）。
+  串口 `video: feed=` 恒为生效值（覆盖时取 per-codec 值，另带 ` fetchovr=<fmt>` 令牌）；
+  壁纸恒 eager 无视覆盖。`[play] pipeline` 与 `[render] workers/dist` 旧键已删除
+  （正典只剩 `[schedule]` workers/dist；旧值别名 `avx512`/`on`/整数壁纸 fps 已摘除）。
   旧 7 行为映射（`render_additions` 为空）：staged/zero_copy/stream→对应 feed +
   `render.blt`；single→NEW `feed=single`；legacy_blt/direct/u64→clip+eager +
   对应 render/workers/accel（u64 步进由 `copy_block` 位宽分发覆盖）。
@@ -89,9 +91,11 @@ cargo run --manifest-path tools/qemu-matrix/Cargo.toml --target "$(rustc -vV | s
 ## 新增 case 规范（和 AGENTS 规则配套）
 
 1. 有新配置项/新路径 → 至少加一个 `matrix/` case（config 内联 + expect 串口行）。
-   feed 加档按 `video-feed-*` 样式（`video: feed=` + path 行 + soak）；
+   feed 加档按 `video-feed-*` 样式（`video: feed=` 生效值 + path 行 + soak）；
    decode 加键按 `video-decode-*` 样式（`decode: fmt=` 解析行 +
-   `threads all deferred` 回退警告行 + path 行 + soak，不断言画质）。
+   回退/兑现行（有状态 `threads all deferred` 警告 / qois-raw `honored (frame-parallel safe)`）+
+   path 行 + soak，不断言画质）；fetch 覆盖另加一例（全局 clip + per-codec stream，
+   断言生效 `video: feed=stream` + `fetchovr=<fmt>` 令牌）。
 2. 有新串口日志 → 老 case 的 `expect` 能用就复用，不硬造新 case。
 3. 慢 case（>5min）标 `slow = true`，默认跳过，`--include-slow` 才跑。
 4. 多卷场景用 `extra_volumes`（第二盘起挂 hd2、hd3…）：`{path, text|zeros|efi}` 三选一

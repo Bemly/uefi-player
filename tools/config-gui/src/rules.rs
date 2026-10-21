@@ -248,13 +248,14 @@ mod blackbox_matrix {
         assert_eq!(cfg.render.tune.buffers, default_buffers());
         assert_eq!(cfg.render.measured_vsync_fps, 0);
         assert_eq!(cfg.r#async.executor, AsyncExecutor::All);
-        // 无 `[decode]` 表：6 格式全默认（bsp_only/关/关/跟随窗口）。
+        // 无 `[decode]` 表：8 格式全默认（bsp_only/关/关/跟随窗口/继承全局供片）。
         for fmt in DecodeTable::ORDER {
             let d = cfg.decode.get(fmt).unwrap();
             assert_eq!(d.threads, DecodeThreads::BspOnly);
             assert!(!d.zero_copy);
             assert!(!d.streaming);
             assert_eq!(d.buffers, 0);
+            assert_eq!(d.fetch, None);
         }
     }
 
@@ -355,41 +356,102 @@ mod blackbox_matrix {
         assert_eq!(pipelined.play.feed, FeedMode::Clip);
     }
 
-    /// 解码表回写（6 格式 × threads 2 档 × 零拷/流式开关 × 缓冲代表值，
-    /// 6×2×2×2×4 = 192 组合不断字段；老文件缺表/缺键全按默认照读）。
+    /// 解码表回写（8 格式 × threads 2 档 × 零拷/流式开关 × 缓冲代表值 × 供片采样，
+    /// 8×2×2×2×4×4 = 1024 组合不断字段；`fetch = None`（继承）落盘不写键，
+    /// `Some` 显式五档照读照写；老文件缺表/缺键全按默认照读）。
+    /// 主笛卡尔不加全 fetch 维（×6 即 1536 组合仍可跑，但全量 5 档在此采样 + 下方
+    /// `decode_fetch_all_modes` 全盖，不存在代表集缺口；避主笛卡尔 23 万级膨胀同理）。
     #[test]
     fn decode_roundtrip_matrix() {
+        const FETCH_SAMPLES: [Option<FeedMode>; 4] = [
+            None,
+            Some(FeedMode::Clip),
+            Some(FeedMode::Stream),
+            Some(FeedMode::Single),
+        ];
         let mut n = 0;
         for fmt in DecodeTable::ORDER {
             for t in DecodeThreads::ALL {
                 for zc in [false, true] {
                     for st in [false, true] {
                         for b in [0, 1, 4, 32] {
-                            let mut cfg = FileConfig::default();
-                            {
-                                let d = cfg.decode.get_mut(fmt).unwrap();
-                                d.threads = t;
-                                d.zero_copy = zc;
-                                d.streaming = st;
-                                d.buffers = b;
+                            for f in FETCH_SAMPLES {
+                                let mut cfg = FileConfig::default();
+                                {
+                                    let d = cfg.decode.get_mut(fmt).unwrap();
+                                    d.threads = t;
+                                    d.zero_copy = zc;
+                                    d.streaming = st;
+                                    d.buffers = b;
+                                    d.fetch = f;
+                                }
+                                let text = toml::to_string(&cfg).unwrap();
+                                assert!(text.contains(fmt.file_str()), "{fmt:?} missing in {text}");
+                                // 继承必须写 NO 键（TOML 干净），显式必须写键。
+                                if f.is_none() {
+                                    assert!(
+                                        !text.contains("fetch"),
+                                        "{fmt:?} inherit must not write fetch key in {text}"
+                                    );
+                                } else {
+                                    assert!(
+                                        text.contains(&format!(
+                                            "fetch = \"{}\"",
+                                            f.unwrap().file_str()
+                                        )),
+                                        "{fmt:?}/{f:?} missing fetch key in {text}"
+                                    );
+                                }
+                                let back: FileConfig = toml::from_str(&text).unwrap();
+                                let d = back.decode.get(fmt).unwrap();
+                                assert_eq!(d.threads, t);
+                                assert_eq!(d.zero_copy, zc);
+                                assert_eq!(d.streaming, st);
+                                assert_eq!(d.buffers, b);
+                                assert_eq!(d.fetch, f);
+                                assert_eq!(back, cfg);
+                                n += 1;
                             }
-                            let text = toml::to_string(&cfg).unwrap();
-                            assert!(text.contains(fmt.file_str()), "{fmt:?} missing in {text}");
-                            let back: FileConfig = toml::from_str(&text).unwrap();
-                            let d = back.decode.get(fmt).unwrap();
-                            assert_eq!(d.threads, t);
-                            assert_eq!(d.zero_copy, zc);
-                            assert_eq!(d.streaming, st);
-                            assert_eq!(d.buffers, b);
-                            assert_eq!(back, cfg);
-                            n += 1;
                         }
                     }
                 }
             }
         }
-        assert_eq!(n, 6 * 2 * 2 * 2 * 4);
-        // 老文件缺表：6 格式全默认（bsp_only/关/关/跟随窗口）。
+        assert_eq!(n, 8 * 2 * 2 * 2 * 4 * 4);
+        // 五档全量：单格式（hevc）逐档照读照写（主循环采样之外的 staged/zero_copy 全盖）。
+        for f in FeedMode::ALL {
+            let mut cfg = FileConfig::default();
+            cfg.decode.get_mut(MediaFormat::Hevc).unwrap().fetch = Some(f);
+            let text = toml::to_string(&cfg).unwrap();
+            assert!(
+                text.contains(&format!("fetch = \"{}\"", f.file_str())),
+                "{f:?}"
+            );
+            let back: FileConfig = toml::from_str(&text).unwrap();
+            assert_eq!(back.decode.get(MediaFormat::Hevc).unwrap().fetch, Some(f));
+            assert_eq!(back, cfg);
+        }
+        // qois/raw 同表：显式全键照读照写（前者帧级并行可兑现，后者零解码占位）。
+        for fmt in [MediaFormat::Qois, MediaFormat::Raw] {
+            let mut cfg = FileConfig::default();
+            {
+                let d = cfg.decode.get_mut(fmt).unwrap();
+                d.threads = DecodeThreads::All;
+                d.zero_copy = true;
+                d.streaming = true;
+                d.buffers = 16;
+                d.fetch = Some(FeedMode::ZeroCopy);
+            }
+            let back: FileConfig = toml::from_str(&toml::to_string(&cfg).unwrap()).unwrap();
+            let d = back.decode.get(fmt).unwrap();
+            assert_eq!(d.threads, DecodeThreads::All);
+            assert!(d.zero_copy);
+            assert!(d.streaming);
+            assert_eq!(d.buffers, 16);
+            assert_eq!(d.fetch, Some(FeedMode::ZeroCopy));
+            assert_eq!(back, cfg);
+        }
+        // 老文件缺表：8 格式全默认（bsp_only/关/关/跟随窗口/继承全局供片）。
         let legacy: FileConfig = toml::from_str("version = 1\n[play]\nfps = \"max\"\n").unwrap();
         for fmt in DecodeTable::ORDER {
             let d = legacy.decode.get(fmt).unwrap();
@@ -397,8 +459,9 @@ mod blackbox_matrix {
             assert!(!d.zero_copy);
             assert!(!d.streaming);
             assert_eq!(d.buffers, 0);
+            assert_eq!(d.fetch, None);
         }
-        // 缺键部分表：只写 threads，其余按默认照读。
+        // 缺键部分表：只写 threads，其余按默认照读（含 fetch 继承）。
         let partial: FileConfig =
             toml::from_str("version = 1\n[decode.hevc]\nthreads = \"all\"\n").unwrap();
         let h = partial.decode.get(MediaFormat::Hevc).unwrap();
@@ -406,8 +469,17 @@ mod blackbox_matrix {
         assert!(!h.zero_copy);
         assert!(!h.streaming);
         assert_eq!(h.buffers, 0);
+        assert_eq!(h.fetch, None);
         let a = partial.decode.get(MediaFormat::Avc).unwrap();
         assert_eq!(*a, DecodeConfig::default());
+        // 部分表显式 fetch：照读，其余表仍继承。
+        let explicit: FileConfig =
+            toml::from_str("version = 1\n[decode.vp9]\nfetch = \"stream\"\n").unwrap();
+        assert_eq!(
+            explicit.decode.get(MediaFormat::Vp9).unwrap().fetch,
+            Some(FeedMode::Stream)
+        );
+        assert_eq!(explicit.decode.get(MediaFormat::Hevc).unwrap().fetch, None);
     }
 
     /// 解码缓冲钳制：超限手写值压到 32，0（跟随窗口）保留。

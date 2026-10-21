@@ -45,19 +45,22 @@ use crate::config::{FeedMode, MediaFormat};
 use crate::video::buffer::{BltFrameBuffer, QoiFrameBuffer, RawFrameBuffer};
 use crate::video::demux::split_annexb_aus;
 
-/// 供片裁决（各 `from_*` 包装共用）：返回 `Some` 即走懒解码。
+/// 供片裁决（各 `from_*` 包装共用）：返回 `Some` 即走懒解码；有效供片 = 每格式
+/// `fetch.unwrap_or(全局 feed)`（`config::effective_feed`），显式 clip/staged/stream/
+/// zero_copy/single 只覆盖本格式。
 /// - `clip` 全量预解码（默认，零行为变化）；
 /// - 壁纸恒全量预解码（随机访问循环：idle 菜单背景/引导过渡按索引取帧；
-///   `wallpaper.rs` 零改，故以 `tag` 裁决，矩阵规则见 `docs/player.md`）；
+///   `wallpaper.rs` 零改，故以 `tag` 裁决，矩阵规则见 `docs/player.md`；
+///   壁纸 tag 忽略每格式 fetch 覆盖，恒 clip）；
 /// - `staged` 非 qois 在结构上等价于全预解码（软解码 planar→BGRA 固有分段，
 ///   无 QOI→Raw→Blt 三段可走），直接回全预解码；
 /// - `staged_ok` 由各格式包装传入（只有 qois 为 true）。
-pub(crate) fn feed_for(tag: &str, staged_ok: bool) -> Option<FeedMode> {
-    let m = crate::config::play_feed();
-    if m == FeedMode::Clip {
+pub(crate) fn feed_for(tag: &str, fmt: MediaFormat, staged_ok: bool) -> Option<FeedMode> {
+    if tag == "wallpaper" {
         return None;
     }
-    if tag == "wallpaper" {
+    let m = crate::config::effective_feed(fmt);
+    if m == FeedMode::Clip {
         return None;
     }
     if m == FeedMode::Staged && !staged_ok {
@@ -444,6 +447,12 @@ fn scan_qois(data: &[u8]) -> Vec<Range<usize>> {
     out
 }
 
+/// slots 路 BSP scan-split 复用入口（`scan_qois` 本体，不重写拆帧；
+/// AP 只解不扫，见文件尾 `decode_qois_chunk`）。
+pub(crate) fn scan_qois_chunks(data: &[u8]) -> Vec<Range<usize>> {
+    scan_qois(data)
+}
+
 /// IVF 纯扫描分块（32 字节文件头 + 12 字节帧头 + 负载；截断即止）。
 fn scan_ivf(data: &[u8]) -> Vec<Range<usize>> {
     let mut out = Vec::new();
@@ -645,37 +654,7 @@ pub(crate) fn raw_dir(
     mode: FeedMode,
 ) -> crate::error::Result<super::Clip> {
     // 目录枚举与全预解码同口径（缺目录/空目录直接 Err，boot 语义一致）。
-    let cdir =
-        uefi::CString16::try_from(dir).map_err(|_| crate::error::NyaStatus::FromStrWithBufError)?;
-    let entries = match fs.list_dir(&cdir) {
-        Ok(e) => e,
-        Err(crate::error::NyaStatus::Uefi(err)) if err.status() == uefi::Status::NOT_FOUND => {
-            return Err(crate::error::NyaStatus::_Debug(alloc::format!(
-                "{}: no {} directory",
-                tag,
-                dir
-            )));
-        }
-        Err(e) => {
-            log::warn!("{}: list failed: {:?}", tag, e);
-            return Err(e);
-        }
-    };
-    let mut names: Vec<String> = entries
-        .into_iter()
-        .filter(|(_, is_dir)| !is_dir)
-        .map(|(n, _)| n)
-        .filter(|n| n.to_ascii_lowercase().ends_with(".raw"))
-        .collect();
-    names.sort();
-    if names.is_empty() {
-        return Err(crate::error::NyaStatus::_Debug(alloc::format!(
-            "{}: no frames in {}",
-            tag,
-            dir
-        )));
-    }
-    let names: Vec<String> = names.into_iter().take(want.max(1)).collect();
+    let names = list_raw_names(fs, dir, want, tag)?;
     let total = names.len();
     let source = Source::Raw {
         dir: String::from(dir),
@@ -837,6 +816,98 @@ pub(crate) fn raw_single_dir(
     frame_bytes: usize,
     tag: &str,
 ) -> crate::error::Result<super::Clip> {
+    let names = list_raw_names(fs, dir, want, tag)?;
+    let total = names.len();
+    // raw single 真读盘：目录枚举保留（名表），帧字节逐显示帧 `Fs::read_file` 重读（见 `Source::Raw`）。
+    let source = Source::Raw {
+        dir: String::from(dir),
+        names,
+        pos: 0,
+        frame_bytes,
+    };
+    LazyState::build_single(tag, source, total, Some((1920, 1080)))
+}
+
+// ---------- slots 路 AP 按序号解单块（最小索引入口；BSP 已 scan-split，AP 只解不扫） ----------
+//
+// - qois 块无状态（`u32le` 长度 + QOI 负载帧独立，见 `source` 可行性头）：
+//   按序号纯函数解码，无会话、无跨块状态，N 核各解各块零竞争。
+//   口径与 `source::qoi_into` 同（超大帧拒绝 + 几何一致 + R/B 交换），
+//   坏块返 false（调用方记 drop 跳过，不断流）。
+// - raw 零解码：`frameNNNN.raw` 即 BGRA 直存，`bytes_as_pixels` reinterpret
+//   就是解码（零像素换算、零拷贝视图接管字节所有权）；槽里放的是行区拷贝
+//   （见 `mp_slots::pack_frame`），源字节读后即走，不常驻。
+//   读盘与 `Source::Raw` 臂同式（`Fs::new` 现开现读；是否可并发以后固件实测为准，
+//   BSP 侧 5·tps 熔断兜底，AP 卡死只丢该核帧）。
+
+/// qois 单块解码（`data[range]` → BGRA `out` 复用；`false` = 坏块/几何不符）。
+pub(crate) fn decode_qois_chunk(
+    data: &[u8],
+    range: Range<usize>,
+    w: usize,
+    h: usize,
+    out: &mut Vec<BltPixel>,
+) -> bool {
+    let payload = match data.get(range) {
+        Some(p) => p,
+        None => return false,
+    };
+    let header = match qoi::decode_header(payload) {
+        Ok(hdr) => hdr,
+        Err(_) => return false,
+    };
+    let n = (header.width * header.height) as usize;
+    if n == 0 || n > 16 * 1024 * 1024 {
+        return false;
+    }
+    if (header.width as usize, header.height as usize) != (w, h) {
+        return false;
+    }
+    out.clear();
+    out.resize(n, BltPixel::new(0, 0, 0));
+    let bytes = unsafe {
+        core::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut u8, n.saturating_mul(4))
+    };
+    if qoi::decode_to_buf(bytes, payload).is_err() {
+        return false;
+    }
+    for px in out.iter_mut() {
+        core::mem::swap(&mut px.red, &mut px.blue);
+    }
+    true
+}
+
+/// raw 单帧解码（`dir\name` 读盘 + 长度校验 + reinterpret；`false` = 缺帧/坏帧）。
+pub(crate) fn decode_raw_frame(
+    dir: &str,
+    name: &str,
+    frame_bytes: usize,
+    out: &mut Vec<BltPixel>,
+) -> bool {
+    let path = alloc::format!("{}\\{}", dir, name);
+    let cstr = match uefi::CString16::try_from(path.as_str()) {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    let bytes = match crate::fs::Fs::new().and_then(|mut fs| fs.read_file(&cstr)) {
+        Ok(b) => b,
+        Err(_) => return false,
+    };
+    if bytes.len() != frame_bytes {
+        return false;
+    }
+    *out = super::bytes_as_pixels(bytes);
+    true
+}
+
+/// raw 名表枚举（`raw_dir`/`raw_single_dir`/slots 共用；缺目录/空目录直接 Err，
+/// boot 语义与全预解码一致；串口子串逐字保留）。
+pub(crate) fn list_raw_names(
+    fs: &mut crate::fs::Fs,
+    dir: &str,
+    want: usize,
+    tag: &str,
+) -> crate::error::Result<Vec<String>> {
     let cdir =
         uefi::CString16::try_from(dir).map_err(|_| crate::error::NyaStatus::FromStrWithBufError)?;
     let entries = match fs.list_dir(&cdir) {
@@ -867,14 +938,5 @@ pub(crate) fn raw_single_dir(
             dir
         )));
     }
-    let names: Vec<String> = names.into_iter().take(want.max(1)).collect();
-    let total = names.len();
-    // raw single 真读盘：目录枚举保留（名表），帧字节逐显示帧 `Fs::read_file` 重读（见 `Source::Raw`）。
-    let source = Source::Raw {
-        dir: String::from(dir),
-        names,
-        pos: 0,
-        frame_bytes,
-    };
-    LazyState::build_single(tag, source, total, Some((1920, 1080)))
+    Ok(names.into_iter().take(want.max(1)).collect())
 }

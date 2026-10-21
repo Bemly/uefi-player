@@ -476,7 +476,7 @@ impl FeedMode {
 
 /// 解码线程（与固件 `DecodeThreads` 同构；软解码状态机单核串行，`all` 在有状态
 /// 编解码器上只解析 + 警告 + 按 `bsp_only` 跑，见 `docs/player.md` 可行性节）。
-/// `qois`/`raw` 不进解码表（前者无状态可帧级并行，后者零解码）。
+/// `qois` 帧级并行可兑现，`raw` 零解码占位（同表八格式全键）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum DecodeThreads {
@@ -505,6 +505,8 @@ pub(crate) fn default_decode_buffers() -> u32 {
 
 /// 单格式解码开关（与固件 `[decode.<fmt>]` 同构；`buffers = 0` 跟随
 /// `[render.tune] window`（1-32），显式 1-32 按格式覆盖；`tune.window` 保持全局默认）。
+/// `fetch` 是逐格式供片覆盖（`None` = 继承全局 `[play] feed`，落盘不写键；
+/// `Some` = 显式覆盖五档任一，见 `FeedMode`）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub(crate) struct DecodeConfig {
@@ -513,6 +515,8 @@ pub(crate) struct DecodeConfig {
     pub(crate) streaming: bool,
     #[serde(default = "default_decode_buffers")]
     pub(crate) buffers: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) fetch: Option<FeedMode>,
 }
 
 impl Default for DecodeConfig {
@@ -522,15 +526,18 @@ impl Default for DecodeConfig {
             zero_copy: false,
             streaming: false,
             buffers: 0,
+            fetch: None,
         }
     }
 }
 
-/// `[decode]`：6 软解格式逐格式开关（与固件 `[decode.<fmt>]` 同构；
-/// `qois`/`raw` 不进表，缺表/缺键老文件全按默认照读）。
+/// `[decode]`：8 格式逐格式开关（与固件 `[decode.<fmt>]` 同构；
+/// `qois`/`raw` 同表（前者帧级并行可兑现，后者零解码占位），缺表/缺键老文件全按默认照读）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub(crate) struct DecodeTable {
+    pub(crate) qois: DecodeConfig,
+    pub(crate) raw: DecodeConfig,
     pub(crate) hevc: DecodeConfig,
     pub(crate) avc: DecodeConfig,
     pub(crate) vp9: DecodeConfig,
@@ -540,36 +547,30 @@ pub(crate) struct DecodeTable {
 }
 
 impl DecodeTable {
-    /// 解码页顺序（与 SPEC `gui_controls` 同序；`MediaFormat::ALL` 的软解子集）。
-    pub(crate) const ORDER: [MediaFormat; 6] = [
-        MediaFormat::Hevc,
-        MediaFormat::Avc,
-        MediaFormat::Vp9,
-        MediaFormat::H263,
-        MediaFormat::Mpeg2v,
-        MediaFormat::Theora,
-    ];
+    /// 解码页顺序（与 SPEC `gui_controls` 同序；`MediaFormat::ALL` 全 8 格式）。
+    pub(crate) const ORDER: [MediaFormat; 8] = MediaFormat::ALL;
     pub(crate) fn get(&self, fmt: MediaFormat) -> Option<&DecodeConfig> {
         match fmt {
+            MediaFormat::Qois => Some(&self.qois),
+            MediaFormat::Raw => Some(&self.raw),
             MediaFormat::Hevc => Some(&self.hevc),
             MediaFormat::Avc => Some(&self.avc),
             MediaFormat::Vp9 => Some(&self.vp9),
             MediaFormat::H263 => Some(&self.h263),
             MediaFormat::Mpeg2v => Some(&self.mpeg2v),
             MediaFormat::Theora => Some(&self.theora),
-            // `qois`/`raw` 不进解码表（前者无状态，后者零解码）。
-            MediaFormat::Qois | MediaFormat::Raw => None,
         }
     }
     pub(crate) fn get_mut(&mut self, fmt: MediaFormat) -> Option<&mut DecodeConfig> {
         match fmt {
+            MediaFormat::Qois => Some(&mut self.qois),
+            MediaFormat::Raw => Some(&mut self.raw),
             MediaFormat::Hevc => Some(&mut self.hevc),
             MediaFormat::Avc => Some(&mut self.avc),
             MediaFormat::Vp9 => Some(&mut self.vp9),
             MediaFormat::H263 => Some(&mut self.h263),
             MediaFormat::Mpeg2v => Some(&mut self.mpeg2v),
             MediaFormat::Theora => Some(&mut self.theora),
-            MediaFormat::Qois | MediaFormat::Raw => None,
         }
     }
 }

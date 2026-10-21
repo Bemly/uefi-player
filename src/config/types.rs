@@ -702,14 +702,15 @@ pub(crate) const fn default_decode_buffers() -> u32 {
     0
 }
 
-/// 每格式解码项（`[decode.<fmt>]` 四旋钮，见 `DecodeTable`）：
+/// 每格式解码项（`[decode.<fmt>]` 五键，见 `DecodeTable`）：
 /// - `threads`：`bsp_only`（默认，顺序安全）/`all`（qois/raw 立即兑现，
 ///   有状态告警仍顺序）；
 /// - `zero_copy`：单选开关（默认 false；`feed=zero_copy` 照常走零拷复用，
 ///   本项为叠加 hint，稳态零分配）；
 /// - `streaming`：单选开关（默认 false；`feed=stream` 照常窗口边播边解，
 ///   `raw` 逐文件 + `h263` reader 恒流式）；
-/// - `buffers`：滑杆下标（0 = 跟随 `tune.window` 全局默认，1-32 显式覆盖每格式）。
+/// - `buffers`：滑杆下标（0 = 跟随 `tune.window` 全局默认，1-32 显式覆盖每格式）；
+/// - `fetch`：每格式供片覆盖（默认 None = 继承全局 `[play] feed`；显式值只覆盖本格式，壁纸恒 clip 忽略覆盖）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DecodeEntry {
@@ -721,6 +722,8 @@ pub struct DecodeEntry {
     pub streaming: bool,
     #[serde(default = "default_decode_buffers")]
     pub buffers: u32,
+    #[serde(default)]
+    pub fetch: Option<FeedMode>,
 }
 
 impl Default for DecodeEntry {
@@ -730,13 +733,14 @@ impl Default for DecodeEntry {
             zero_copy: false,
             streaming: false,
             buffers: 0,
+            fetch: None,
         }
     }
 }
 
-/// 每格式解码表（`[decode.<fmt>]`，八格式全键，缺表缺键全默认）：
-/// GUI 解码页只摆六软解（hevc/avc/vp9/h263/mpeg2v/theora 四旋钮）；
-/// qois/raw 项保留（`threads=all` 立即兑现，其余全 yes），供矩阵/串口同口径。
+/// 每格式解码表（`[decode.<fmt>]`，八格式全键，缺表缺键全默认；无别名，未知键忽略）：
+/// GUI 解码页只摆六软解（hevc/avc/vp9/h263/mpeg2v/theora 五键）；
+/// qois/raw 项保留（`threads=all` 立即兑现，其余全 yes；`fetch` 同式覆盖），供矩阵/串口同口径。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct DecodeTable {

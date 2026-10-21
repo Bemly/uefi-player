@@ -166,6 +166,15 @@ pub(crate) fn decode_threads_desc(v: DecodeThreads) -> String {
     .into_owned()
 }
 
+/// 逐格式供片覆盖显示名（`None` = 继承全局 `[play] feed`，落盘不写键；
+/// `Some` 显示 `file_str: desc`，与播放页供片滑杆同式，存盘仍用 `file_str` 小写串）。
+pub(crate) fn decode_fetch_desc(v: Option<FeedMode>) -> String {
+    match v {
+        None => t!("decode.fetch_inherit").into_owned(),
+        Some(f) => format!("{}: {}", f.file_str(), feed_desc(f)),
+    }
+}
+
 /// 转码目标显示名（输出名见 `TranscodeTarget::out_path`，与固件片源名一致）。
 pub(crate) fn transcode_target_name(v: crate::transcode::TranscodeTarget) -> String {
     use crate::transcode::TranscodeTarget;

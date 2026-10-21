@@ -2,13 +2,17 @@
 
 ## 片源格式矩阵（`[play] format`，`Clip` 统一解码）
 
+> 六组展示（GUI 主行同形）：`qois` / `raw` / `MP4{avc,hevc,vp9}` /
+> `h263` / `mpeg2v` / `theora`。线值保持八个扁平小写串（固件 `MediaFormat`
+> 原子存储 + 串口 `video: fmt=` 断言口径，不嵌套；分组只是展示概念）。
+
 | `format` | 片源 | 接线状态 |
 |---|---|---|
 | `qois`（默认） | `1080p/video.qois`（`u32le 帧长 + QOI 帧` 串接）→ 开机全量预解码 | 已接（三条播放路零分支） |
 | `raw` | `1080p/frameNNNN.raw`（1920x1080 BGRA 直存，与壁纸同格式）→ 零解码直读 | 已接（同下游切分） |
-| `hevc` | `1080p/video.mp4`（hev 轨，石雨堂拆包 → Annex-B；无容器回 `video.hevc` Annex-B）→ vendor `rusty_h265` 软解 → YUV420 转 BGRA | 已接（预解码进 `Clip`；坏帧计数跳过，全坏报错；只收 8-bit） |
-| `avc` | `1080p/video.mp4`（avc 轨，石雨堂拆 avcC → Annex-B）→ vendor `rusty_h264_decoder` 软解 → YUV420 转 BGRA | 已接（tight 8-bit 4:2:0；MP4-only，无裸流路） |
-| `vp9` | `1080p/video.mp4`（vp09 轨，样片即裸帧；无容器回 `video.ivf`）→ vendor `vp9dec` 软解 → YUV420 转 BGRA | 已接（只要显示帧，隐藏 altref 跳过；只收 8-bit 4:2:0） |
+| `MP4` → `hevc` | `1080p/video.mp4`（hev 轨，石雨堂拆包 → Annex-B；无容器回 `video.hevc` Annex-B）→ vendor `rusty_h265` 软解 → YUV420 转 BGRA | 已接（预解码进 `Clip`；坏帧计数跳过，全坏报错；只收 8-bit） |
+| `MP4` → `avc` | `1080p/video.mp4`（avc 轨，石雨堂拆 avcC → Annex-B）→ vendor `rusty_h264_decoder` 软解 → YUV420 转 BGRA | 已接（tight 8-bit 4:2:0；MP4-only，无裸流路） |
+| `MP4` → `vp9` | `1080p/video.mp4`（vp09 轨，样片即裸帧；无容器回 `video.ivf`）→ vendor `vp9dec` 软解 → YUV420 转 BGRA | 已接（只要显示帧，隐藏 altref 跳过；只收 8-bit 4:2:0） |
 | `h263` | `1080p/video.h263`（裸 H.263 基线流，无容器）→ vendor `h263-rs`（标准空选项）软解 → YUV420 转 BGRA | 已接（错位/坏包截断，首帧错即报错；基线 `PictType` 上游反转已修正，见 vendor `VENDOR.md`） |
 | `mpeg2v` | `1080p/video.m2v`（裸基本流，接入单元切分）→ vendor `filmcraft-mpeg2v` 软解 → YUV420 转 BGRA | 已接（只收 4:2:0；422/444 记数跳过；AU 失败计数，`flush` 收尾帧） |
 | `theora` | `1080p/video.ogv`（OggS 磁盘原格式，手写拆包 + CRC32 校验）→ vendor `oxideav-theora` 软解 → 显示区裁剪 + 翻转 + YUV420 转 BGRA | 已接（只收 4:2:0；ident/comment/setup 三头缺一即报错） |
@@ -71,9 +75,11 @@
 
 ## 统一控制平面（`[play] feed` × `[decode.<fmt>]`，无老管线）
 
-播放只走 `Clip`：拿帧方式由 `[play] feed` 五档切，单格式解码并发/缓冲由
-`[decode.<fmt>]` 四键调，上传路（`blt`/`direct`/`mp_draw`/`nano_pump`/
-`dynamic_draw`）零改。`[play] pipeline` 与 `[render] workers/dist` 旧键已删除
+播放只走 `Clip`：拿帧方式由 `[play] feed` 五档切，单格式解码并发/缓冲/取数由
+`[decode.<fmt>]` 五键调（八格式 qois/raw/hevc/avc/vp9/h263/mpeg2v/theora 各一表，
+见下节解码表），上传路（`blt`/`direct`/`mp_draw`/`nano_pump`/
+`dynamic_draw`）零改。串口 `video: feed=` 恒为生效值：无覆盖时即全局 feed，
+有 per-codec `fetch` 覆盖时取覆盖值并附 ` fetchovr=<fmt>` 令牌（矩阵断言子串，保持字节一致）。`[play] pipeline` 与 `[render] workers/dist` 旧键已删除
 （正典只剩 `[schedule] workers/dist`；旧文件未知键按 serde 默认忽略，
 旧值别名 `avx512`/`on`/整数壁纸 fps 已摘除，命中即整文件回默认 + 警告）。
 
@@ -89,9 +95,15 @@
 
 - 只切 `Clip` 内部拿帧方式：`blt`/`direct`/`mp_draw`/`nano_pump`/`dynamic_draw`
   上传路零改，只消费 `next_frame`/`rewind`/`len`/`frame`。
+- per-codec 覆盖（`[decode.<fmt>] fetch`）：缺省（None）继承全局 `[play] feed`；
+  显式值（clip/staged/stream/zero_copy/single 任一）只覆盖本格式的生效供片，
+  串口 `video: feed=` 取覆盖值并附 ` fetchovr=<fmt>` 令牌（`<fmt>` 为该格式小写键名，
+  如 `hevc`）；壁纸恒 `eager` 无视覆盖（按 tag 裁决，见固件 `lazy::feed_for`）。
 - 多核（`mp_draw`）/动态调度/壁纸恒 `clip`/`eager`（壁纸随机访问循环，按 tag 裁决，
   见固件 `lazy::feed_for`；`mp_draw`/`dynamic_draw` 启动即 `ensure_eager` 全量，
   不变）；旧文件缺键按 `clip` 照读。
+- 矩阵覆盖：`video-decode-fetch-override` 一例（全局 clip + `[decode.hevc] fetch=stream`，
+  断言生效 `video: feed=stream` + `fetchovr=hevc` + `play: path=direct_loop` + soak）。
 - 矩阵覆盖：`video-feed-*` 7 case（`video: feed=` + path 行 + soak 保活；
   clip/staged/stream/zero_copy/single × qois + stream/single × hevc 代表格式，
   全组合不铺，避 5×8 膨胀）。
@@ -105,7 +117,7 @@
   avc/hevc 懒模式首 `next_frame` 即推整流（hevc 经输出队列仍逐帧出，avc 只留末帧），
   多 slice/B 帧重排语义以联调结论为准；冒烟只用 qois 断言帧数一致。
 
-## 解码表（`[decode.<fmt>]`，每格式独立四键）
+## 解码表（`[decode.<fmt>]`，每格式独立五键）
 
 | 键 | 取值 | 语义 |
 |---|---|---|
@@ -113,23 +125,30 @@
 | `zero_copy` | `false`（默认）\| `true` | 单缓冲即时解码开关（全格式可行；GUI 单选开关） |
 | `streaming` | `false`（默认）\| `true` | 边播边解开关（全格式可行；GUI 单选开关） |
 | `buffers` | `0`（默认，跟随 `tune.window`）\| `1`-`32` 显式 | 解码帧缓存数（GUI 滑杆下标 0=跟随，1-32 显式；`tune.window` 仍是全局默认） |
+| `fetch` | 缺省（None，继承全局 `[play] feed`）\| `"clip"`/`"staged"`/`"stream"`/`"zero_copy"`/`"single"` 显式 | 本格式生效供片覆盖（仅播放侧；壁纸恒 eager 无视覆盖） |
 
-- 六表：`[decode.hevc]` / `[decode.avc]` / `[decode.vp9]` / `[decode.h263]` /
-  `[decode.mpeg2v]` / `[decode.theora]`（qois/raw 无表， trivially 全 yes）。
-- 串口契约（矩阵断言用，不断言画质）：`decode: fmt=<Fmt>` 解析行 +
-  `decode: <Fmt> threads all deferred (staying bsp_only)` 回退警告行（仅 threads=all
-  落有状态格式时）；`video: fmt=` + `play: path=` + soak 保活同旧口径。
+- 八表：`[decode.qois]` / `[decode.raw]` / `[decode.hevc]` / `[decode.avc]` /
+  `[decode.vp9]` / `[decode.h263]` / `[decode.mpeg2v]` / `[decode.theora]`
+  （缺表缺键按默认照读：threads=bsp_only，布尔关，buffers=0，fetch 继承全局）。
+- 串口契约（矩阵断言子串，保持字节一致，不断言画质）：`video: fmt=<Dbg>` 格式分发行；
+  `video: feed=<lower>` 生效供片行（覆盖时取 per-codec 值）；`decode: fmt=<Dbg> threads=...`
+  解码面解析行；per-codec 覆盖另带 ` fetchovr=<fmt>` 令牌行；`play: path=` + soak 保活同旧口径。
+- honored-vs-fallback 矩阵（threads=all 时二选一）：
+  qois/raw 无状态逐帧 → 即时兑现 `honored (frame-parallel safe)` 行；
+  hevc/avc/vp9/h263/mpeg2v/theora 有状态单核顺序状态机 → 解析但警告
+  `decode: <Fmt> threads all deferred (staying bsp_only)` 并驻 `bsp_only`。
 - Per-codec 可行性（全单核现状，`lazy.rs Source` 状态机顺序）：
-  qois 无状态逐帧 → 帧级并行可行，zero_copy/streaming/多缓冲 yes；raw 零解码 → 全 yes；
+  qois 无状态逐帧 → 帧级并行可行，zero_copy/streaming/多缓冲/fetch覆盖 yes；raw 零解码 → 全 yes；
   hevc 有状态 Annex-B + 输出队列/重排 → 解码驻顺序（stage 重叠 demux→decode→convert 待排），
-  zero_copy/streaming/buffers(window) yes；avc 解码序 vs 显示序 + B 帧/多 slice 待联调 →
+  zero_copy/streaming/buffers(window)/fetch覆盖 yes；avc 解码序 vs 显示序 + B 帧/多 slice 待联调 →
   仅顺序，其余 yes；vp9 有状态 + 隐藏 altref 跳过 → 仅顺序，其余 yes；
   h263 流式 reader 有状态、总量未知 → 仅顺序，其余 yes；mpeg2v AU 切分有状态 4:2:0-only →
   仅顺序，其余 yes；theora Ogg 包 + 3 头状态 → 仅顺序，其余 yes。
-- 矩阵覆盖：`video-decode-*` 6 case（每格式一样：`threads = "all"` + `zero_copy/streaming = true`
-  + `buffers = 8` 显式，断言解析 + 回退警告 + soak；画质不断言）。
-- GUI：解码页每格式四行（threads 两档滑杆 + zero_copy/streaming 两个单选开关 +
-  buffers 0-32 滑杆下标），见 SPEC `gui_controls` 24 行。
+- 矩阵覆盖：`video-decode-*` 9 case（8 表各一：threads=all + zero_copy/streaming=true +
+  buffers=8 显式，qois/raw 断言兑现行、六软解断言回退警告；另 `video-decode-fetch-override`
+  一例断言 fetch 覆盖生效 + 令牌；画质不断言）。
+- GUI：解码页每格式五行（threads 两档滑杆 + zero_copy/streaming 两个单选开关 +
+  buffers 0-32 滑杆下标 + fetch 五档滑杆，缺省=继承全局），见 SPEC `gui_controls`。
 
 ## 老管线映射（已删除，仅作旧行为对照）
 

@@ -348,8 +348,8 @@ impl App {
                 ui.heading(t!("decode.heading"));
                 ui.small(t!("decode.hint"));
                 ui.add_space(4.0);
-                // 6 软解格式逐组：线程滑杆 + 零拷开关 + 流式开关 + 缓冲滑杆
-                //（`qois`/`raw` 不进表，无状态/零解码；全部玻璃件，组间隔日留白）。
+                // 8 格式逐组：线程滑杆 + 零拷开关 + 流式开关 + 缓冲滑杆 + 供片覆盖滑杆
+                //（八格式全表，`qois` 帧级并行可兑现、`raw` 零解码占位；全部玻璃件，组间隔日留白）。
                 for (i, fmt) in DecodeTable::ORDER.iter().copied().enumerate() {
                     ui.label(format_name(fmt));
                     ui.small(format_desc(fmt));
@@ -438,6 +438,31 @@ impl App {
                         d.buffers = self.dec_buffers_f[i].round().clamp(0.0, 32.0) as u32;
                     }
                     ui.small(t!("decode.buffers_hint"));
+                    ui.add_space(4.0);
+                    // 供片覆盖：0 = 继承全局 `[play] feed`（落盘不写键），1-5 显式五档。
+                    // 行标题复用 `play.feed`，档位文案复用 `feed.desc_*`，继承文案走
+                    // `decode.fetch_inherit`（唯一新增 locale 键，中英对称）。
+                    ui.label(t!("play.feed"));
+                    let cur_fetch = self.cfg.decode.get(fmt).and_then(|d| d.fetch);
+                    let fetch_label = decode_fetch_desc(cur_fetch);
+                    egui_glass::GlassSlider::new(&mut self.dec_fetch_f[i], 0.0..=5.0)
+                        .text(fetch_label)
+                        .step_by(1.0)
+                        .style(if self.dark {
+                            egui_glass::GlassStyle::dark()
+                        } else {
+                            egui_glass::GlassStyle::regular()
+                        })
+                        .show(ui);
+                    let pos = self.dec_fetch_f[i].round().clamp(0.0, 5.0) as usize;
+                    if let Some(d) = self.cfg.decode.get_mut(fmt) {
+                        d.fetch = if pos == 0 {
+                            None
+                        } else {
+                            Some(FeedMode::ALL[pos - 1])
+                        };
+                    }
+                    ui.small(t!("play.feed_hint"));
                     ui.add_space(10.0);
                 }
             }
