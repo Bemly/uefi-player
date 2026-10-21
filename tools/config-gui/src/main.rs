@@ -31,8 +31,9 @@
 //! 试错记录：曾因 Panel 边界直线误伤过胶囊/薄片，真凶是 `Panel` 默认的
 //! `show_separator_line`（已全关），详见 AGENTS.md。
 //!
-//! 实时背景（`LiveBackdrop`，用户拍板）：折射源只有背景图（根 `live.run`
-//! 纯绘制一遍，不占布局）；页面提示行是中央薄片内的普通内容，不进折射源。
+//! 实时背景（`LiveBackdrop`，用户拍板）：折射源优先动态视频帧（`video_bg`
+//! 托管纹理，无帧/回退即静态背景图），根 `live.run` 纯绘制一遍，不占布局；
+//! 页面提示行是中央薄片内的普通内容，不进折射源。
 //! 顺序是铁律：`live.run` 必须在全部 `Glass*` 之前跑，否则先画的玻璃拿不到
 //! 本帧 `LiveState`，回退到自身 rect 做 backdrop，会把整图压进每颗按钮。
 //! 代价是每帧多一次离屏渲染 + mipmap，本工具页面小，可接受。
@@ -59,6 +60,7 @@ mod rules;
 mod schema;
 mod text;
 mod transcode;
+mod video_bg;
 
 /// 背景图：片源第一帧（构建时用 ffmpeg 从片源抽好，见 `assets/bg.png`；
 /// `ffmpeg -i input.mp4 -vframes 1 assets/bg.png`，1280x720，约 600KB）。
