@@ -122,7 +122,11 @@ pub(crate) struct App {
     /// 主 ctx 的 backdrop 状态（`show_backdrop` 在 twin 里是空转，实测过）。
     /// 无 GPU 时为 None（回退纯色，不断任何流程）。
     /// `_tex`/`_view` 只为保活（native id 悬空即 UB 级黑屏，见保留注释）。
+    /// 动态视频有首帧时不画它（视频 native 同矩形盖位，避免双图叠画）。
     pub(crate) twin_photo: Option<TwinPhoto>,
+    /// 动态背景（GPU 转换版：NV12 上传 + WGSL 转 RGBA，CPU 零像素运算；
+    /// 只在 `live.run` 内画当前 native 帧，无帧回静态底，不断流程）。
+    pub(crate) video_bg: crate::video_bg::VideoBg,
     /// 图库状态（目录跟 `player.toml` 路径走）。
     pub(crate) gallery: GalleryState,
     /// 转码状态（worker 线程跑，UI 只轮询）。
@@ -297,6 +301,9 @@ impl App {
             glass = true;
         }
         let icons = Icons::load(&cc.egui_ctx);
+        // 视频 GPU 转换器要 RenderState（device/queue 克隆；转换提交在 tick 内同步做，
+        // paint 回调里零逻辑，避 nounwind abort）；无 GPU（None）即全程静态底。
+        let video_bg = crate::video_bg::VideoBg::new(cc.wgpu_render_state.clone());
         let mut app = Self {
             path: "player.toml".to_owned(),
             cfg: FileConfig::default(),
@@ -326,6 +333,7 @@ impl App {
             zh: false,
             live,
             twin_photo,
+            video_bg,
             gallery: GalleryState::new(),
             transcode: TranscodeState::new(),
             toast: None,
@@ -1220,8 +1228,14 @@ impl eframe::App for App {
         // 只做中央薄片内的普通内容。
         // 先画的在下：背景图在最底，之后全部面板浮在上。右移让脸出导航
         // （见 `cover_shifted`）。无纸罩（用户明确不要白色遮罩）。
-        // 静态底：twin 图进折射源（native id 自动映射），可见遍同矩形。
+        // 动态优先：有视频首帧即画视频 GPU native 帧（与静态同矩形含右移，
+        // 只在 live 内画，玻璃折射源）；无帧/回退即静态 twin 图。
         let screen = ui.ctx().viewport_rect();
+        // 推进只能在闭包外做（`live.run` 闭包禁写状态/禁时钟，见上游 `live.rs`；
+        // 转换提交也在 tick 内同步做完，paint 回调零逻辑，避 nounwind abort）。
+        if self.glass {
+            self.video_bg.tick(ui.ctx());
+        }
         if let Some(live) = self.live.as_ref() {
             let clear = if self.dark {
                 egui::Color32::BLACK
@@ -1230,6 +1244,17 @@ impl eframe::App for App {
             };
             live.run(ui, clear, |page| {
                 // 注意：只画图，不加 label/分配，保持根光标全新。
+                if let Some((id, w, h)) = self.video_bg.front() {
+                    // 动态帧（GPU native；twin 自动镜像，折射与所见一致）。
+                    let r = Self::cover_shifted(screen, w, h, BG_SHIFT_X);
+                    page.painter().with_clip_rect(screen).image(
+                        id,
+                        r,
+                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                        egui::Color32::WHITE,
+                    );
+                    return;
+                }
                 // twin 图进折射源（native id 自动映射；离屏画不影响可见合成；
                 // 与可见遍同矩形（含右移），折射与所见一致）。
                 if let Some(t) = self.twin_photo.as_ref() {

@@ -53,27 +53,32 @@ description = "player.toml 跨平台可视化编辑器（host 工具，与 UEFI 
 #   `egui_extras` 表格排序器（要拖入整套表格件，与玻璃行不搭，故不用）。
 #   用法：`dnd(ui, id).with_animation_time(0.0).show(下标 id 行, …)`，
 #   落点 `update_vec` 写回（重复路径靠下标 id 区分，见 `playlist.rs` 头注释）。
-# - 静态图片背景（host 全平台，固件侧不受影响；零解码、零线程、零软解）：
-#   片源第一帧构建时用 ffmpeg 抽成 `assets/bg.png`（1280x720，约 600KB，
-#   `include_bytes!` 编进二进制），启动时经 `image 0.25`（与转码同版本，
-#   已在依赖里，不新增）解一次，直接喂 glass 自家的 `set_backdrop`
-#   （`main.rs::load_bg_image`），每帧 `show_backdrop` 满窗画。
-#   曾走过的弯路（排查记录完整，结论保留）：动态硬解版（mac VideoToolbox +
-#   Win/Linux Vulkan Video，双硬解零软解）在 dev 下能跑，但 `native` 纹理
-#   满窗画会吃掉全部玻璃面板（`egui-wgpu 0.35` 原生纹理与背景层共存有坑，
-#   未深究）；自研 `video_bg` 模块（托管纹理/线程/转制）已整段删除，
-#   动态版另议时重写，不留僵尸代码与僵尸依赖。
-#   曾走过的弯路（排查记录完整，结论保留）：动态硬解版（mac VideoToolbox +
-#   Win/Linux Vulkan Video `gpu-video 0.4`，双硬解零软解）在 dev 下能跑，
-#   但 `native` 纹理满窗画会吃掉全部玻璃面板（`egui-wgpu 0.35`
-#   原生纹理与背景层共存有坑，未深究）；托管纹理满窗则面板全在。
-#   故静态图坚持托管纹理；动态版代码已整段移除（`video_bg.rs` 重写，
-#   `yuv_upload.rs` 删除），Linux/Win 动态另议时重写，不留僵尸依赖。
+# - 动态背景 GPU 转换版（host 全平台，固件侧不受影响；CPU 零像素运算，用户拍板）：
+#   解码仍走硬解（mac `shiguredo_video_toolbox 2026.1` VideoToolbox /
+#   Win/Linux `gpu-video 0.4` Vulkan Video `BytesDecoder`，MSRV 1.88/1.85 均 < 本仓 1.92）。
+#   worker 只传 NV12（Y + 交错 UV，不做 BT.601，不转 RGBA）；UI 侧 NV12 经 DMA 直传
+#   两张 R8/RG GPU 纹理，YUV→RGBA 在自研 20 行 WGSL 全屏三角里算（与转码页
+#   `codecs::yuv420_to_rgba` 同 BT.601 全范围口径，(frame)逐字节一致由单测锁死）。
+#   CPU 只剩压缩包搬运 + `write_texture` 提交，零像素数学；上传量 NV12 为 RGBA 的 3/8。
+#   显示封顶 15fps（与壁纸默认 fps 同档）+ 失焦停推（`viewport.focused` 门），
+#   重绘量为旧 60fps 版的 1/4；后台队列深度 4（约 5.6MB 背压）。
+#   真零拷贝（解码显存直显、零上传）走不通，故不用：VideoToolbox 侧轮子只给
+#   `y_plane/uv_plane` CPU 切片（`PixelFormat` 仅 I420/Nv12，无 RGBA 输出，
+#   亦无 CVPixelBuffer 裸句柄可做 IOSurface→Metal→wgpu 导入，改轮子等于 fork）；
+#   Vulkan 侧 `decode_to_wgpu_textures` 产的是轮子自建 Vulkan device 的纹理
+#   （纵与本仓 wgpu 29 同大版本，也跨不过 device，必须走外部内存导入，
+#   无现货轮子）。`default-features = false` 照旧（不要轮子的 wgpu 互操作，
+#   本仓经自有 RenderState 直写 wgpu，无版本耦合）。
+#   玻璃穿透：视频只画在 `live.run` 闭包内（与静态 twin 图同槽位、同右移矩形，
+#   native id 在 `LiveBackdrop::new` 之后登记、twin 自动镜像）；绝不在 live 外
+#   另铺全屏图（旧 native 吃面板坑即此，未深究但已规避）。`set_backdrop` 仍只
+#   服务静态兜底（缺片/首帧未到/硬解失败 → 静态 twin 图 → 纯色）。
+#   静态 `assets/bg.png`（1280x720，约 600KB）保留为兜底。
 #   搜过不用：`egui-video 0.9`（ffmpeg6/7 + SDL2，重 C 依赖）；
 #   `egui-sharkplayer 0.5`（libmpv2 + 要系统库）；`ffmpeg-next 9`
 #   （系统动态库，brew 升版即断 ABI）；`moq-video`（MoQ 网络流，大炮打蚊子，
 #   且 render 要 wgpu 30 与本仓 29 冲突）；内置 ffmpeg 二进制
-#   （每平台 30~80MB，与“同硬件多花体积+进程”无新能力，故不用）。
+#   （每平台 30~80MB，无新能力）。
 [dependencies]
 egui_dnd = "0.16"
 eframe = { version = "0.35", default-features = false, features = ["accesskit", "default_fonts", "wgpu", "wayland", "x11"] }
@@ -98,3 +103,9 @@ ogg = "0.9"
 qoi = "0.4"
 serde = { version = "1", features = ["derive"] }
 toml = "1"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+shiguredo_video_toolbox = "2026.1"
+
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+gpu-video = { version = "0.4", default-features = false }
