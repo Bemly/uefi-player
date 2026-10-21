@@ -62,19 +62,25 @@ mod transcode;
 /// `ffmpeg -i input.mp4 -vframes 1 assets/bg.png`，1280x720，约 600KB）。
 /// 直接喂 glass 自家的 `set_backdrop`（不另起模块、不手写纹理管线）。
 /// 解失败就纯白 256 底（编进包断不了，不断任何流程）。
-fn load_bg_image() -> egui::ColorImage {
-    let fallback = egui::ColorImage::filled([256, 256], egui::Color32::WHITE);
-    let img = match image::load_from_memory(include_bytes!("../assets/bg.png")) {
-        Ok(i) => i.to_rgba8(),
-        Err(_) => return fallback,
-    };
+pub(crate) fn decode_bg() -> Option<(u32, u32, Vec<u8>)> {
+    let img = image::load_from_memory(include_bytes!("../assets/bg.png"))
+        .ok()?
+        .to_rgba8();
     if img.width() == 0 || img.height() == 0 {
-        return fallback;
+        return None;
     }
-    egui::ColorImage::from_rgba_unmultiplied(
-        [img.width() as usize, img.height() as usize],
-        img.as_raw(),
-    )
+    Some((img.width(), img.height(), img.into_raw()))
+}
+
+/// `set_backdrop` 吃的 `ColorImage` 版（与 `decode_bg` 同一包，多解一次，
+/// 启动一次性 ~几十毫秒，可接受；换主题重传也走这里）。
+fn load_bg_image() -> egui::ColorImage {
+    match decode_bg() {
+        Some((w, h, px)) => {
+            egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &px)
+        }
+        None => egui::ColorImage::filled([256, 256], egui::Color32::WHITE),
+    }
 }
 
 /// 窗口图标：`assets/icon-256.rgba` 预烘焙 256x256 RGBA，直编二进制零新依赖

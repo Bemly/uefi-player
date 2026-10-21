@@ -5,7 +5,7 @@ use eframe::egui;
 use rust_i18n::t;
 
 use crate::gallery::GalleryState;
-use crate::load_bg_image;
+use crate::{decode_bg, load_bg_image};
 use crate::rules::*;
 use crate::schema::*;
 use crate::text::*;
@@ -118,10 +118,28 @@ pub(crate) struct App {
     pub(crate) rs: Option<egui_wgpu::RenderState>,
     /// 实时背景：页面跑两遍（可见 + 离屏折射源），开关浮在上层。无 GPU 时为 None。
     pub(crate) live: Option<egui_glass::LiveBackdrop>,
+    /// twin 折射源里的背景图（与可见遍同一张片源第一帧；native id 在
+    /// `LiveBackdrop::new` 之后登记，自动镜像到双胞胎渲染器，离屏画安全）。
+    /// 可见遍用 glass 自家的静态底同一张图；twin 另挂一份是因 twin 读不到
+    /// 主 ctx 的 backdrop 状态（`show_backdrop` 在 twin 里是空转，实测过）。
+    /// 无 GPU 时为 None（回退纯色，不断任何流程）。
+    /// `_tex`/`_view` 只为保活（native id 悬空即 UB 级黑屏，见保留注释）。
+    pub(crate) twin_photo: Option<TwinPhoto>,
     /// 图库状态（目录跟 `player.toml` 路径走）。
     pub(crate) gallery: GalleryState,
     /// 转码状态（worker 线程跑，UI 只轮询）。
     pub(crate) transcode: TranscodeState,
+}
+
+/// twin 用背景图（纹理本体 + 视图保活 + 几何，随 id 一起存）。
+pub(crate) struct TwinPhoto {
+    pub(crate) id: egui::TextureId,
+    pub(crate) w: f32,
+    pub(crate) h: f32,
+    #[allow(dead_code)]
+    tex: egui_wgpu::wgpu::Texture,
+    #[allow(dead_code)]
+    view: egui_wgpu::wgpu::TextureView,
 }
 
 impl App {
@@ -154,12 +172,60 @@ impl App {
         let mut glass = false;
         let mut rs = None;
         let mut live = None;
+        let mut twin_photo = None;
         if let Some(r) = cc.wgpu_render_state.as_ref() {
             // MSAA 数与 NativeOptions 一致（默认不开 MSAA，传 1）。
             egui_glass::init(r, 1);
             // 顺序按官方要求：init → live → set_backdrop（背景图，见 `load_bg_image`）。
             live = Some(egui_glass::LiveBackdrop::new(r, Some(live_fonts)));
             egui_glass::set_backdrop(&cc.egui_ctx, r, &load_bg_image());
+            // twin 折射源图：与可见遍同一包，Rgba8 直传（行距 w*4 天然 256 对齐，
+            // `write_texture` 无需补齐）；native id 登记（live 之后，自动镜像）。
+            if let Some((w, h, px)) = decode_bg() {
+                let tex = r.device.create_texture(&egui_wgpu::wgpu::TextureDescriptor {
+                    label: Some("bg photo twin"),
+                    size: egui_wgpu::wgpu::Extent3d {
+                        width: w,
+                        height: h,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: egui_wgpu::wgpu::TextureDimension::D2,
+                    format: egui_wgpu::wgpu::TextureFormat::Rgba8Unorm,
+                    usage: egui_wgpu::wgpu::TextureUsages::TEXTURE_BINDING
+                        | egui_wgpu::wgpu::TextureUsages::COPY_DST,
+                    view_formats: &[],
+                });
+                r.queue.write_texture(
+                    egui_wgpu::wgpu::TexelCopyTextureInfo {
+                        texture: &tex,
+                        mip_level: 0,
+                        origin: egui_wgpu::wgpu::Origin3d::ZERO,
+                        aspect: egui_wgpu::wgpu::TextureAspect::All,
+                    },
+                    &px,
+                    egui_wgpu::wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(w * 4),
+                        rows_per_image: Some(h),
+                    },
+                    egui_wgpu::wgpu::Extent3d {
+                        width: w,
+                        height: h,
+                        depth_or_array_layers: 1,
+                    },
+                );
+                let view = tex.create_view(&Default::default());
+                let id = egui_glass::register_native_texture(r, &view);
+                twin_photo = Some(TwinPhoto {
+                    id,
+                    w: w as f32,
+                    h: h as f32,
+                    tex,
+                    view,
+                });
+            }
             glass = true;
             rs = Some(r.clone());
         }
@@ -192,6 +258,7 @@ impl App {
             zh: false,
             rs,
             live,
+            twin_photo,
             gallery: GalleryState::new(),
             transcode: TranscodeState::new(),
         };
@@ -798,23 +865,23 @@ impl eframe::App for App {
                             egui::Color32::WHITE
                         };
                         live.run(ui, clear, |page| {
-                            // twin 遍图进折射源：`set_backdrop` 注册时已自动镜像到
-                            // 双胞胎渲染器（见上游 `register_native_texture_in`），
-                            // twin 里直接 `show_backdrop` 即可，无需新纹理；
-                            // 离屏画不影响可见合成，怎么画都安全。
-                            // 顺序与可见遍一致（图→纸罩→字），折射与所见一致。
-                            egui_glass::show_backdrop(page, screen);
-                            // twin 遍纸罩（与可见遍同一块；
-                            // 纯色绘制，`bis3` 实测不影响面板）。
-                            page.painter().rect_filled(
-                                screen,
-                                0.0,
-                                if self.dark {
-                                    egui::Color32::from_black_alpha(120)
-                                } else {
-                                    egui::Color32::from_white_alpha(120)
-                                },
-                            );
+                            // twin 图进折射源（native id 自动映射；离屏画不影响可见合成；
+                            // 可见遍纸罩已摘，这里也不加——用户明确不要白色遮罩）。
+                            if let Some(t) = self.twin_photo.as_ref() {
+                                let scale =
+                                    (screen.width() / t.w).max(screen.height() / t.h);
+                                let sized = egui::vec2(t.w * scale, t.h * scale);
+                                let r = egui::Rect::from_center_size(screen.center(), sized);
+                                page.painter().with_clip_rect(screen).image(
+                                    t.id,
+                                    r,
+                                    egui::Rect::from_min_max(
+                                        egui::pos2(0.0, 0.0),
+                                        egui::pos2(1.0, 1.0),
+                                    ),
+                                    egui::Color32::WHITE,
+                                );
+                            }
                             self.page_backdrop(page)
                         });
                     }
