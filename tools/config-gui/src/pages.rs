@@ -313,19 +313,47 @@ impl App {
                 // 的当代矩阵（mode=blt/direct）只是同名，不是同一个东西。
                 ui.horizontal(|ui| {
                     for v in PlayPipeline::ALL[..4].iter().copied() {
-                        if self.option_button(ui, self.cfg.play.pipeline == v, &crate::text::pipeline_name(v)) {
+                        if self.option_button(
+                            ui,
+                            self.cfg.play.pipeline == v,
+                            &crate::text::pipeline_name(v),
+                        ) {
                             self.cfg.play.pipeline = v;
                         }
                     }
                 });
                 ui.horizontal(|ui| {
                     for v in PlayPipeline::ALL[4..].iter().copied() {
-                        if self.option_button(ui, self.cfg.play.pipeline == v, &crate::text::pipeline_name(v)) {
+                        if self.option_button(
+                            ui,
+                            self.cfg.play.pipeline == v,
+                            &crate::text::pipeline_name(v),
+                        ) {
                             self.cfg.play.pipeline = v;
                         }
                     }
                 });
                 ui.small(t!("play.pipeline_hint"));
+                ui.add_space(4.0);
+                ui.label(t!("play.feed"));
+                // 供片滑杆：0-3 拨 `FeedMode::ALL` 下标，文本行同步显示当前档 + 说明。
+                let cur_feed = self.cfg.play.feed;
+                let feed_label = format!(
+                    "{}: {}",
+                    cur_feed.file_str(),
+                    crate::text::feed_desc(cur_feed)
+                );
+                egui_glass::GlassSlider::new(&mut self.feed_f, 0.0..=3.0)
+                    .text(feed_label)
+                    .step_by(1.0)
+                    .style(if self.dark {
+                        egui_glass::GlassStyle::dark()
+                    } else {
+                        egui_glass::GlassStyle::regular()
+                    })
+                    .show(ui);
+                self.cfg.play.feed = FeedMode::ALL[self.feed_f.round().clamp(0.0, 3.0) as usize];
+                ui.small(t!("play.feed_hint"));
                 ui.add_space(10.0);
                 ui.horizontal(|ui| {
                     ui.label(self.measured_line());

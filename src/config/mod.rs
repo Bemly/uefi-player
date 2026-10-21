@@ -34,8 +34,14 @@
 //! tile_rows = 64   # tile 高（行），MP 自调度切块粒度（8-512）
 //! vsync_fps = 60   # vsync 预算帧率：static 的封顶 + auto 探测达标线（15-240）
 //! buffers   = 0    # 后缓冲帧数（0 = 直写前台，现状；1-16 = 影子环 + 整推，撕裂窗口压成一次 push）
+//! window    = 4    # 流式供片窗口（`[play] feed = "stream"` 的解码帧缓存数，1-32）
 //! [play]
 //! fps = "auto"            # "auto" | "max" | "1".."240"
+//! feed = "clip"           # 供片模式："clip"（全量预解码，默认，老文件缺键照读）
+//!                         # | "staged"（qois 显式三段逐帧，其余七格式等价 clip）
+//!                         # | "stream"（window 窗口边播边解，游标后淘汰）
+//!                         # | "zero_copy"（单复用缓冲即时解码，调用方须立即上传）
+//!                         # 只切 `Clip` 内部拿帧方式，上传路（blt/direct/mp/nano）零改
 //! format = "qois"         # 片源格式："qois"（1080p/video.qois）| "raw"（1080p/frameNNNN.raw）
 //!                         # | "hevc"（1080p/video.hevc，Annex-B 软解）| "vp9"（1080p/video.ivf 软解）
 //!                         # | "h263" | "mpeg2v" | "theora"（格式可选、解码后继，选中即明确报错）
@@ -166,6 +172,10 @@ static TUNE_TILE_ROWS: AtomicU32 = AtomicU32::new(default_tile_rows());
 static TUNE_VSYNC_FPS: AtomicU32 = AtomicU32::new(default_vsync_fps());
 /// 后缓冲帧数（0-16，0 = 直写）。显式旋钮，不进矩阵 bench。
 static TUNE_BUFFERS: AtomicU32 = AtomicU32::new(default_buffers());
+/// 流式供片窗口（1-32，默认 4；`buffers` 同口径的显式旋钮，不进矩阵 bench）。
+static TUNE_WINDOW: AtomicU32 = AtomicU32::new(default_window());
+/// 供片模式（`FeedMode` 判别值；0 = clip 默认，老文件缺键照读）。
+static PLAY_FEED: AtomicU8 = AtomicU8::new(0);
 /// 0 = auto，1 = capped，2 = max（`play.fps` 的解析结果）。
 static PLAY_MODE: AtomicU8 = AtomicU8::new(0);
 static PLAY_CAP: AtomicU32 = AtomicU32::new(0);
@@ -217,6 +227,7 @@ pub fn load() -> Option<String> {
     TUNE_TILE_ROWS.store(cfg.render.tune.tile_rows.clamp(8, 512), Ordering::Relaxed);
     TUNE_VSYNC_FPS.store(cfg.render.tune.vsync_fps.clamp(15, 240), Ordering::Relaxed);
     TUNE_BUFFERS.store(cfg.render.tune.buffers.min(16), Ordering::Relaxed);
+    TUNE_WINDOW.store(cfg.render.tune.window.clamp(1, 32), Ordering::Relaxed);
     match parse_fps(&cfg.play.fps) {
         FpsPolicy::Auto => PLAY_MODE.store(0, Ordering::Relaxed),
         FpsPolicy::Capped(n) => {
@@ -228,6 +239,7 @@ pub fn load() -> Option<String> {
     PLAY_MEASURED.store(cfg.play.measured_max_fps, Ordering::Relaxed);
     PLAY_FORMAT.store(cfg.play.format.as_u8(), Ordering::Relaxed);
     PLAY_PIPELINE.store(cfg.play.pipeline.as_u8(), Ordering::Relaxed);
+    PLAY_FEED.store(cfg.play.feed.as_u8(), Ordering::Relaxed);
     WALLPAPER_FORMAT.store(cfg.wallpaper.format.as_u8(), Ordering::Relaxed);
     WALLPAPER_ENABLE.store(cfg.wallpaper.enable as u8, Ordering::Relaxed);
     match parse_fps(&cfg.wallpaper.fps) {
@@ -250,7 +262,7 @@ pub fn load() -> Option<String> {
     BOOT_STRICT.store(cfg.boot.strict as u8, Ordering::Relaxed);
     ASYNC_EXECUTOR.store(cfg.r#async.executor.as_u8(), Ordering::Relaxed);
     log::info!(
-        "cfg: version={} accel.level={:?} render.mode={:?} sched.backend={:?} workers={:?} dist={:?} vsync={:?} blt_op={:?} tune.frames={} measured(render={:?} workers={:?} dist={:?} vsync={:?} vhalf={} cores={}) play.fps={} play.fmt={:?} measured_max_fps={} wallpaper.fmt={:?} async.executor={:?} boot(auto={} win={} lin={} sh={} uki={} mac={} strict={})",
+        "cfg: version={} accel.level={:?} render.mode={:?} sched.backend={:?} workers={:?} dist={:?} vsync={:?} blt_op={:?} tune.frames={} measured(render={:?} workers={:?} dist={:?} vsync={:?} vhalf={} cores={}) play.fps={} play.fmt={:?} play.feed={:?} measured_max_fps={} wallpaper.fmt={:?} async.executor={:?} boot(auto={} win={} lin={} sh={} uki={} mac={} strict={})",
         cfg.version,
         cfg.accel.level,
         cfg.render.mode,
@@ -268,6 +280,7 @@ pub fn load() -> Option<String> {
         cfg.render.measured_cores,
         cfg.play.fps,
         cfg.play.format,
+        cfg.play.feed,
         cfg.play.measured_max_fps,
         cfg.wallpaper.format,
         cfg.r#async.executor,
@@ -329,6 +342,11 @@ pub fn tune_vsync_fps() -> u32 {
 /// 后缓冲帧数（0-16，已钳制）：0 = 直写前台（现状）；`>0` = 影子环 + 整推。
 pub fn tune_buffers() -> u32 {
     TUNE_BUFFERS.load(Ordering::Relaxed).min(16)
+}
+
+/// 流式供片窗口（`[play] feed = "stream"` 的解码帧缓存数，已钳制 1-32）。
+pub fn tune_window() -> u32 {
+    TUNE_WINDOW.load(Ordering::Relaxed).clamp(1, 32).max(1)
 }
 
 /// 开机微基准测完把结论写进来。
@@ -876,6 +894,11 @@ pub fn play_format() -> MediaFormat {
 /// 播放管线（默认 clip；老文件缺键照读）。
 pub fn play_pipeline() -> PlayPipeline {
     PlayPipeline::from_u8(PLAY_PIPELINE.load(Ordering::Relaxed))
+}
+
+/// 供片模式（默认 clip；老文件缺键照读；只切 `Clip` 内部拿帧方式）。
+pub fn play_feed() -> FeedMode {
+    FeedMode::from_u8(PLAY_FEED.load(Ordering::Relaxed))
 }
 
 /// 实测完把最大帧率写回 `\player.toml`（GUI 下次打开即见）。

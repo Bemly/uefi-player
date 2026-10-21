@@ -85,11 +85,14 @@ pub(crate) fn coerce_loaded(mut cfg: FileConfig, has_schedule: bool) -> FileConf
 }
 
 /// 落盘前钳制 tune（滑杆已钳，这里防手改文件后的脏值回写）。
+/// `window` 是流式供片窗口（1-32，默认 4；只对 staged/stream 生效，
+/// 其余供片忽略本项，不断解析）。
 pub(crate) fn clamp_tune(t: &mut RenderTune) {
     t.frames = t.frames.max(1);
     t.tile_rows = t.tile_rows.clamp(8, 512);
     t.vsync_fps = t.vsync_fps.clamp(15, 240);
     t.buffers = t.buffers.min(16);
+    t.window = t.window.clamp(1, 32);
 }
 
 /// 配置黑盒矩阵：GUI 改配置 → 落盘 → 固件生效，全链路只走 TOML 文本 + 纯规则，
@@ -164,6 +167,7 @@ mod blackbox_matrix {
                     tile_rows: 100,
                     vsync_fps: 77,
                     buffers: 3,
+                    window: 4,
                 },
                 measured_render: m,
                 measured_workers: w,
@@ -177,6 +181,7 @@ mod blackbox_matrix {
                 measured_max_fps: 120,
                 format: MediaFormat::Raw,
                 pipeline: PlayPipeline::Clip,
+                feed: FeedMode::Clip,
             },
             wallpaper: WallpaperConfig {
                 enable: true,
@@ -320,6 +325,36 @@ mod blackbox_matrix {
         assert_eq!(legacy.play.pipeline, PlayPipeline::Clip);
     }
 
+    /// 供片四档 × 窗口代表值回写（clip/staged/stream/zero_copy × 1/4/16/32，
+    /// 不断字段；老文件缺键按 clip/4 照读，现路行为不变）。
+    /// 主笛卡尔不加 feed 维（×4 即 18.6 万组合；`pipeline` 八档同口径另表，
+    /// 全量 4 档在此全盖，不存在代表集缺口）。
+    #[test]
+    fn feed_roundtrip_matrix() {
+        let mut n = 0;
+        for f in FeedMode::ALL {
+            for w in [1, 4, 16, 32] {
+                let mut cfg = FileConfig::default();
+                cfg.play.feed = f;
+                cfg.render.tune.window = w;
+                let text = toml::to_string(&cfg).unwrap();
+                assert!(text.contains(f.file_str()), "{f:?} missing in {text}");
+                let back: FileConfig = toml::from_str(&text).unwrap();
+                assert_eq!(back.play.feed, f);
+                assert_eq!(back.render.tune.window, w);
+                assert_eq!(back, cfg);
+                n += 1;
+            }
+        }
+        assert_eq!(n, 4 * 4);
+        // 老文件缺键：供片按 clip、窗口按 4 照读（现行为不变）。
+        let legacy: FileConfig = toml::from_str("version = 1\n[play]\nfps = \"max\"\n").unwrap();
+        assert_eq!(legacy.play.feed, FeedMode::Clip);
+        let legacy_tune: FileConfig =
+            toml::from_str("version = 1\n[render.tune]\nframes = 30\n").unwrap();
+        assert_eq!(legacy_tune.render.tune.window, default_window());
+    }
+
     /// 执行器线三档位回写（all/nano/dynamic，不丢字段；老文件缺键按 all 照读）。
     #[test]
     fn async_roundtrip_matrix() {
@@ -400,6 +435,7 @@ mod blackbox_matrix {
             tile_rows: 4,
             vsync_fps: 999,
             buffers: 99,
+            window: 0,
         };
         clamp_tune(&mut t);
         assert_eq!(
@@ -408,7 +444,8 @@ mod blackbox_matrix {
                 frames: 1,
                 tile_rows: 8,
                 vsync_fps: 240,
-                buffers: 16
+                buffers: 16,
+                window: 1
             }
         );
         let mut ok = RenderTune {
@@ -416,6 +453,7 @@ mod blackbox_matrix {
             tile_rows: 64,
             vsync_fps: 60,
             buffers: 2,
+            window: 4,
         };
         clamp_tune(&mut ok);
         assert_eq!(
@@ -424,7 +462,8 @@ mod blackbox_matrix {
                 frames: 30,
                 tile_rows: 64,
                 vsync_fps: 60,
-                buffers: 2
+                buffers: 2,
+                window: 4
             }
         );
     }

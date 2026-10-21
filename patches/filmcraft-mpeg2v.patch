@@ -1,0 +1,1944 @@
+diff --git a/crates/mpeg2v/Cargo.toml b/crates/mpeg2v/Cargo.toml
+index ca418fe..5f99dbe 100644
+--- a/crates/mpeg2v/Cargo.toml
++++ b/crates/mpeg2v/Cargo.toml
+@@ -1,21 +1,52 @@
+ [package]
+ name = "filmcraft-mpeg2v"
++version = "0.10.0"
++edition = "2024"
++# VENDOR(uefi-player): upstream declares 1.95; measured floor on this tree is
++# 1.92 (checked 2026-10-21, both feature shapes + tests), so the vendor pins
++# the lower value per repo MSRV policy. Re-measure on every upstream sync.
++rust-version = "1.92"
++license = "MIT OR Apache-2.0"
++repository = "https://github.com/storytold/filmcraft"
+ description = "Clean-room MPEG-2 video (ITU-T H.262 | ISO/IEC 13818-2) and MPEG-1 video (ISO/IEC 11172-2) decoder"
+-version.workspace = true
+-edition.workspace = true
+-license.workspace = true
+-rust-version.workspace = true
+ 
+-[lints]
+-workspace = true
++# NOTE(uefi-player vendor): vendored from git 70f0fc7a (2026-10-20) + no_std port
++# (scalar + `simd`). See VENDOR.md. `std` (default on) implies `simd` and
++# preserves upstream behavior within the pixel gate (fixed-point IDCT replaces
++# the `f32` path; see `src/idct.rs`); `default-features = false` is the
++# firmware shape: no_std + alloc, threads off, scalar twin only unless `simd`
++# is added back (the no_std + `simd` firmware SIMD shape).
++# Upstream is not on crates.io, so this is a path vendor, not a registry version.
+ 
+ [features]
+-default = ["threads"]
++default = ["std", "threads"]
++# Standard library. Off => `#![no_std]` + `alloc`. On => `simd` (the runtime
++# `set_simd_enabled` switch stays the single-bit `[accel]` backer in both).
++std = ["simd"]
++# Integer SSE2 kernels (`asm!` explicit vector registers, no intrinsics, no
++# float vectors, no AVX): fixed-point IDCT row pass + half-pixel `pavgb`
++# averaging in `predict`. Zero dependencies; `#![no_std]`-clean. On =>
++# fast path under the runtime `simd_enabled` switch (single-bit `[accel]`
++# backer, scalar=off/else=on; defaults ON under `std`, OFF under no_std
++# fail-closed until firmware opts in). Off => scalar twin only.
++simd = []
++# Slice-row parallelism via rayon (MPEG-2 slices; MPEG-1 slices always decode in
++# order). The firmware port leaves this off; `threads` without `std` is
++# rejected below by `compile_error!` (rayon needs std). `simd` without `std`
++# is the firmware SIMD shape and is explicitly allowed.
+ threads = ["dep:rayon"]
+ 
+ [dependencies]
+-thiserror = { workspace = true }
+-rayon = { workspace = true, optional = true }
+-
+-[dev-dependencies]
+-filmcraft-testkit = { workspace = true }
++# Unconditional `default-features = false`: only `String` payloads are formatted,
++# so the `std` feature (Path/PathBuf conveniences) changes nothing.
++thiserror = { version = "2", default-features = false }
++# Unconditional: the two IDCT table sites call `libm::cos` in both std and no_std
++# builds (identical tables, minimal diff; already in the firmware closure via
++# rusty_h264-decoder).
++libm = "0.2"
++# Unconditional `Sync` one-time cells for the IDCT/VLC lookup tables
++# (`core::cell::OnceCell` is not `Sync`, so `static`s reject it; `spin::Once`
++# is behavior-identical single-init semantics in both builds; MIT, MSRV 1.38,
++# zero transitive deps with this feature set).
++spin = { version = "0.9", default-features = false, features = ["once"] }
++rayon = { version = "1", optional = true }
+diff --git a/crates/mpeg2v/src/headers.rs b/crates/mpeg2v/src/headers.rs
+index 514aba5..0071f92 100644
+--- a/crates/mpeg2v/src/headers.rs
++++ b/crates/mpeg2v/src/headers.rs
+@@ -3,6 +3,12 @@
+ use crate::bits::Bits;
+ use crate::{Error, Result};
+ 
++// VENDOR(uefi-player): `alloc` paths resolve identically in std and no_std builds.
++use alloc::{boxed::Box, format, string::String, vec::Vec};
++// VENDOR(uefi-player): `vec!` is only used by the `#[cfg(test)]` module below.
++#[cfg(test)]
++use alloc::vec;
++
+ pub const PICTURE_START: u8 = 0x00;
+ pub const SLICE_MIN: u8 = 0x01;
+ pub const SLICE_MAX: u8 = 0xAF;
+diff --git a/crates/mpeg2v/src/idct.rs b/crates/mpeg2v/src/idct.rs
+index f94b935..edebd4f 100644
+--- a/crates/mpeg2v/src/idct.rs
++++ b/crates/mpeg2v/src/idct.rs
+@@ -1,19 +1,52 @@
+-//! 8×8 inverse DCT (H.262 Annex A): the separable 2-D IDCT evaluated in `f32` with even/odd
+-//! symmetry, rounded to the nearest integer and saturated to [-256, 255]. Its error is far inside
+-//! the IEEE Std 1180-1990 accuracy limits the standard requires (checked by the test procedure of
+-//! IEEE 1180 itself, below).
++//! 8×8 inverse DCT (H.262 Annex A): the separable 2-D IDCT evaluated in
++//! fixed point (`S = 16`, direct even/odd-free dot products), rounded once to
++//! the nearest integer and saturated to [-256, 255]. Its error is far inside
++//! the IEEE Std 1180-1990 accuracy limits the standard requires (checked by
++//! the test procedure of IEEE 1180 itself, below).
++//!
++//! Dual path (VENDOR(uefi-player)): the row pass has a scalar twin (always
++//! compiled) and an integer-SSE2 twin (`asm!` explicit `xmm` registers,
++//! `pmaddwd` dots, no intrinsics, no float vectors, no AVX); the column pass
++//! and the final rounding are one shared scalar tail, so both paths are
++//! bit-identical by construction (32-bit modular dots feed exact 64-bit
++//! accumulators — order-independent). The runtime `crate::simd_enabled`
++//! switch picks the row kernel; the DC term is folded exactly (as before),
++//! so `dc_only` and the full transform agree for every DC value.
++//!
++//! Bounds (all plain `i64`, never wrapping, never panicking, every build):
++//! inputs are saturated once to ±32768 (`i16` lane range; a no-op on every
++//! spec-compliant stream and on all accuracy/oracle inputs), basis entries
++//! `|C'| <= 32138 < 32767` (asserted by `basis_fits_i16`): row outputs
++//! `|T| <= 8·32138·32768 < 2^34`, column outputs
++//! `|A| <= 8·32138·2^34 < 2^63`, final numerator
++//! `|d|·2^32 + 8|A| + 2^34 < 2^55`.
+ 
+-use std::sync::OnceLock;
++// VENDOR(uefi-player): one-time lookup tables in both builds. `core::cell`
++// has no `Sync` cell (its OnceCell is rejected for `static`s), so the tiny
++// `spin::Once` is used unconditionally — identical single-init semantics,
++// verified by the table/accuracy tests below in both configurations.
++use spin::Once as OnceLock;
+ 
++/// Fixed-point scale of the basis table below.
++const SCALE_BITS: u32 = 16;
++
++/// `round(M[x][u]·2^16)` as `i16`, with
+ /// `M[x][u] = C(u)/2 · cos((2x+1)uπ/16)`, `C(0) = 1/√2`, `C(u>0) = 1`.
+-fn basis() -> &'static [[f32; 8]; 8] {
+-    static B: OnceLock<[[f32; 8]; 8]> = OnceLock::new();
+-    B.get_or_init(|| {
+-        let mut m = [[0f32; 8]; 8];
++/// `|M| <= 0.5·cos(π/16) < 0.4904`, so every entry fits `i16`
++/// (`round(0.4904·65536) = 32138`; see `basis_fits_i16`).
++fn basis() -> &'static [[i16; 8]; 8] {
++    static B: OnceLock<[[i16; 8]; 8]> = OnceLock::new();
++    B.call_once(|| {
++        let mut m = [[0i16; 8]; 8];
+         for (x, row) in m.iter_mut().enumerate() {
+             for (u, v) in row.iter_mut().enumerate() {
+-                let c = if u == 0 { std::f64::consts::FRAC_1_SQRT_2 } else { 1.0 };
+-                *v = (c / 2.0 * (((2 * x + 1) * u) as f64 * std::f64::consts::PI / 16.0).cos()) as f32;
++                let c = if u == 0 { core::f64::consts::FRAC_1_SQRT_2 } else { 1.0 };
++                // VENDOR(uefi-player): `libm::cos` runs once per process at
++                // table init (not on the hot path) in both std and no_std
++                // builds (identical tables, minimal diff; libm is already in
++                // the firmware closure via rusty_h264-decoder). `f64::round`
++                // is std-only, so the rounding is `libm::round` as well.
++                *v = libm::round(c / 2.0 * libm::cos(((2 * x + 1) * u) as f64 * core::f64::consts::PI / 16.0) * ((1u32 << SCALE_BITS) as f64)) as i16;
+             }
+         }
+         m
+@@ -24,6 +57,13 @@ fn basis() -> &'static [[f32; 8]; 8] {
+ /// may be non-zero.
+ #[inline]
+ pub(crate) fn idct(blk: &mut [i32; 64], dc_only: bool) {
++    // VENDOR(uefi-player): single shared saturation to the `i16` lane range
++    // before dispatch — a no-op on every spec-compliant stream (and on all
++    // accuracy/oracle inputs), so both paths below always agree bit for bit
++    // while adversarial inputs stay deterministic and panic-free.
++    for v in blk.iter_mut() {
++        *v = (*v).clamp(-32768, 32767);
++    }
+     if dc_only {
+         let v = ((blk[0] + 4) >> 3).clamp(-256, 255);
+         blk.fill(v);
+@@ -31,36 +71,106 @@ pub(crate) fn idct(blk: &mut [i32; 64], dc_only: bool) {
+     }
+     let m = basis();
+     // The DC term F[0][0]/8 is added exactly (so ties round as in the DC-only path).
+-    let dc = blk[0] as f32 * 0.125;
++    let dc = blk[0] as i64;
+     blk[0] = 0;
+-    // rows: tmp[v][x] = Σ_u M[x][u] F[v][u]
+-    let mut tmp = [[0f32; 8]; 8];
++    // rows: tmp[v][x] = Σ_u C'[x][u]·F[v][u] (exact `i64`).
++    let mut tmp = [[0i64; 8]; 8];
++    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
++    if crate::simd_enabled() {
++        // VENDOR(uefi-player): `#[target_feature]` double-gates the ABI
++        // premise (SSE2 is x86-64 baseline anyway); the `unsafe` block is
++        // required by edition 2024 even inside the `unsafe fn`.
++        unsafe {
++            row_pass_simd(m, blk, &mut tmp);
++        }
++    } else {
++        row_pass_scalar(m, blk, &mut tmp);
++    }
++    #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
++    row_pass_scalar(m, blk, &mut tmp);
++    // columns + final, shared by both paths: out[y][x] = floor(dc/8 + A/2^32 + 1/2)
++    // with A[y][x] = Σ_v C'[y][v]·tmp[v][x] — a single rounding at the end, so
++    // an all-zero AC tail reproduces the DC-only path exactly for every DC.
++    for y in 0..8 {
++        let my = &m[y];
++        for x in 0..8 {
++            let mut a: i64 = 0;
++            for v in 0..8 {
++                a += my[v] as i64 * tmp[v][x];
++            }
++            blk[y * 8 + x] = (((dc << 32) + 8 * a + (1i64 << 34)) >> 35).clamp(-256, 255) as i32;
++        }
++    }
++}
++
++/// Scalar twin of the row pass (always compiled): direct dots in exact `i64`.
++fn row_pass_scalar(m: &[[i16; 8]; 8], blk: &[i32; 64], tmp: &mut [[i64; 8]; 8]) {
+     for v in 0..8 {
+         let r = &blk[v * 8..v * 8 + 8];
+         if r.iter().all(|&c| c == 0) {
+             continue;
+         }
+-        let f: [f32; 8] = std::array::from_fn(|u| r[u] as f32);
+-        for x in 0..4 {
++        for x in 0..8 {
+             let mx = &m[x];
+-            let e = mx[0] * f[0] + mx[2] * f[2] + mx[4] * f[4] + mx[6] * f[6];
+-            let o = mx[1] * f[1] + mx[3] * f[3] + mx[5] * f[5] + mx[7] * f[7];
+-            tmp[v][x] = e + o;
+-            tmp[v][7 - x] = e - o;
++            let mut t: i64 = 0;
++            for u in 0..8 {
++                t += mx[u] as i64 * r[u] as i64;
++            }
++            tmp[v][x] = t;
+         }
+     }
+-    // columns, eight at a time: out[y][x] = Σ_v M[y][v] tmp[v][x]
+-    for y in 0..4 {
+-        let my = &m[y];
+-        let mut e = [0f32; 8];
+-        let mut o = [0f32; 8];
+-        for x in 0..8 {
+-            e[x] = my[0] * tmp[0][x] + my[2] * tmp[2][x] + my[4] * tmp[4][x] + my[6] * tmp[6][x];
+-            o[x] = my[1] * tmp[1][x] + my[3] * tmp[3][x] + my[5] * tmp[5][x] + my[7] * tmp[7][x];
++}
++
++// VENDOR(uefi-player): integer-SSE2 twin of the row pass above. One dot per
++// `asm!` block: pack the saturated `i32` row to 8×`i16` (`packssdw`, exact),
++// `pmaddwd` the four pair-sums (each `<= 2·32138·32767 < 2^31`, exact as
++// signed `i32`), sign-extend to 64 bits, `paddq`-accumulate — the same exact
++// `i64` dot the scalar twin computes, so the two agree bit for bit.
++// `movdqu` throughout: no alignment requirement, no `nt` stores (small reused
++// buffers — temporal locality, hence no `sfence` either). SSE2 only: no AVX,
++// no XSAVE involvement; the firmware `[accel]` switch is config semantics.
++#[cfg(all(feature = "simd", target_arch = "x86_64"))]
++#[target_feature(enable = "sse2")]
++unsafe fn row_pass_simd(m: &[[i16; 8]; 8], blk: &[i32; 64], tmp: &mut [[i64; 8]; 8]) {
++    for v in 0..8 {
++        let r = &blk[v * 8..v * 8 + 8];
++        if r.iter().all(|&c| c == 0) {
++            continue;
+         }
++        let fptr = r.as_ptr();
+         for x in 0..8 {
+-            blk[y * 8 + x] = ((dc + (e[x] + o[x]) + 0.5).floor() as i32).clamp(-256, 255);
+-            blk[(7 - y) * 8 + x] = ((dc + (e[x] - o[x]) + 0.5).floor() as i32).clamp(-256, 255);
++            // `u128` bit patterns (not `__m128i`) cross the `asm!` boundary —
++            // vector-intrinsic types trip the backend here (see `hw_bench.rs`).
++            // Pure temporaries bind `_`: written and re-read only in-template.
++            unsafe {
++                core::arch::asm!(
++                    "movdqu {f0}, [{fptr}]",
++                    "movdqu {f1}, [{fptr} + 16]",
++                    "packssdw {f0}, {f1}",
++                    "movdqu {cc}, [{cptr}]",
++                    "movdqa {p}, {f0}",
++                    "pmaddwd {p}, {cc}",
++                    "movdqa {s}, {p}",
++                    "psrad {s}, 31",
++                    "movdqa {lo}, {p}",
++                    "punpckldq {lo}, {s}",
++                    "punpckhdq {p}, {s}",
++                    "paddq {lo}, {p}",
++                    "pshufd {p}, {lo}, 238",
++                    "paddq {lo}, {p}",
++                    "movq [{optr}], {lo}",
++                    fptr = in(reg) fptr,
++                    cptr = in(reg) m[x].as_ptr(),
++                    optr = in(reg) &mut tmp[v][x] as *mut i64,
++                    f0 = lateout(xmm_reg) _,
++                    f1 = lateout(xmm_reg) _,
++                    cc = lateout(xmm_reg) _,
++                    p = lateout(xmm_reg) _,
++                    s = lateout(xmm_reg) _,
++                    lo = lateout(xmm_reg) _,
++                    options(nostack, preserves_flags),
++                );
++            }
+         }
+     }
+ }
+@@ -68,6 +178,9 @@ pub(crate) fn idct(blk: &mut [i32; 64], dc_only: bool) {
+ #[cfg(test)]
+ mod tests {
+     use super::*;
++    // VENDOR(uefi-player): `alloc` prelude for the crafted-input vectors
++    // (resolves in every feature shape; host test builds link std anyway).
++    use alloc::vec::Vec;
+ 
+     /// The pseudo-random generator of IEEE Std 1180-1990 (values in [-l, h]).
+     struct Rand(i64);
+@@ -86,7 +199,7 @@ mod tests {
+ 
+     fn cosv(a: usize, b: usize) -> f64 {
+         static T: OnceLock<[[f64; 8]; 8]> = OnceLock::new();
+-        T.get_or_init(|| std::array::from_fn(|a| std::array::from_fn(|b| (((2 * a + 1) * b) as f64 * std::f64::consts::PI / 16.0).cos())))[a][b]
++        T.call_once(|| std::array::from_fn(|a| std::array::from_fn(|b| (((2 * a + 1) * b) as f64 * std::f64::consts::PI / 16.0).cos())))[a][b]
+     }
+ 
+     /// Separable double-precision 1-D passes (exact up to f64 rounding).
+@@ -176,4 +289,122 @@ mod tests {
+             assert_eq!(a, b, "dc {dc}");
+         }
+     }
++
++    /// The `pmaddwd` row pass needs every basis entry (and every saturated
++    /// input) in `i16` range; the proof is this test, not a comment.
++    #[test]
++    fn basis_fits_i16() {
++        let m = basis();
++        let mut max = 0i16;
++        for row in m.iter() {
++            for &v in row.iter() {
++                max = max.max(v.abs());
++            }
++        }
++        assert!(max <= 32138, "basis max {max}");
++    }
++
++    // VENDOR(uefi-player): dual-path interlock. Runs under every shape with
++    // the `simd` feature, flipping the runtime switch so both row kernels
++    // render the same blocks in one binary and must agree bit for bit (the
++    // column/final tail is shared, so this guards the `asm!` row pass).
++    // Other tests never touch the switch, and the two paths are
++    // interchangeable, so parallel test threads cannot disturb each other.
++    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
++    fn both_paths(mut blk: [i32; 64], dc_only: bool) -> ([i32; 64], [i32; 64]) {
++        let prev = crate::simd_enabled();
++        crate::set_simd_enabled(true);
++        let mut a = blk;
++        idct(&mut a, dc_only);
++        crate::set_simd_enabled(false);
++        idct(&mut blk, dc_only);
++        crate::set_simd_enabled(prev);
++        (a, blk)
++    }
++
++    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
++    #[test]
++    fn simd_row_matches_scalar() {
++        // zero + DC sweep (the full `dc_only` contract range, both shapes)
++        let (a, s) = both_paths([0i32; 64], false);
++        assert_eq!(a, s);
++        for dc in (-2048..=2047).step_by(7) {
++            let mut b = [0i32; 64];
++            b[0] = dc;
++            let (a, s) = both_paths(b, false);
++            assert_eq!(a, s, "dc {dc}");
++            let (a, s) = both_paths(b, true);
++            assert_eq!(a, s, "dc_only {dc}");
++        }
++        // single-AC probes across positions and magnitudes
++        for pos in [1usize, 7, 8, 17, 32, 45, 63] {
++            for mag in [1i32, -1, 7, -256, 2047, -2048, 16376, -16376, 32767, -32768, 100_000, -100_000, i32::MAX, i32::MIN] {
++                let mut b = [0i32; 64];
++                b[pos] = mag;
++                let (a, s) = both_paths(b, false);
++                assert_eq!(a, s, "pos {pos} mag {mag}");
++            }
++        }
++        // dense pseudo-random blocks at several magnitudes, incl. extremes
++        // past the saturation knee (both paths saturate identically).
++        let mut seed = 0x1234_5678u32;
++        let mut next = || {
++            seed ^= seed << 13;
++            seed ^= seed >> 17;
++            seed ^= seed << 5;
++            seed as i32
++        };
++        for scale in [1i64, 100, 16_376, 100_000, 2_000_000_000] {
++            for _ in 0..300 {
++                let mut b = [0i32; 64];
++                for v in b.iter_mut() {
++                    *v = ((next() as i64 * scale / 2_000_000_000).clamp(-2_147_483_648, 2_147_483_647)) as i32;
++                }
++                let (a, s) = both_paths(b, false);
++                assert_eq!(a, s, "random scale {scale}");
++            }
++        }
++    }
++
++    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
++    #[test]
++    fn both_paths_match_reference_on_crafted_inputs() {
++        // Exact expectations: DC-only values the definition pins down, plus
++        // single-AC blocks checked against the in-test `f64` oracle (exact
++        // here — magnitudes keep every f64 rounding light-years from a `.5`
++        // tie; the test itself would fail loudly otherwise).
++        let mut cases: Vec<[i32; 64]> = Vec::new();
++        for dc in [8i32, -8, 0, 1, -1, 7, 2047, -2048] {
++            let mut b = [0i32; 64];
++            b[0] = dc;
++            cases.push(b);
++        }
++        for (pos, mag) in [(1usize, 256i32), (8, -256), (63, 100), (27, -1000), (9, 2047)] {
++            let mut b = [0i32; 64];
++            b[pos] = mag;
++            cases.push(b);
++        }
++        for b in cases {
++            let f: [i64; 64] = std::array::from_fn(|i| b[i] as i64);
++            let r = reference_idct(&f);
++            let (a, s) = both_paths(b, false);
++            for i in 0..64 {
++                // Paths agree bit-exactly; each stays inside the IEEE gate
++                // against the `f64` oracle (a crafted value landing exactly
++                // on a `.5` tie would be oracle noise, not signal — hence
++                // `<= 1` here and exact integers for the DC cases below).
++                assert_eq!(a[i], s[i], "simd/scalar at {i} (blk {b:?})");
++                assert!((a[i] as i64 - r[i]).abs() <= 1, "simd vs reference at {i} (blk {b:?})");
++                assert!((s[i] as i64 - r[i]).abs() <= 1, "scalar vs reference at {i} (blk {b:?})");
++            }
++        }
++        // DC-only hand values (definition-level, no oracle involved).
++        let mut b = [0i32; 64];
++        b[0] = 8;
++        let (a, s) = both_paths(b, false);
++        assert!(a.iter().all(|&v| v == 1) && s.iter().all(|&v| v == 1));
++        b[0] = -8;
++        let (a, s) = both_paths(b, false);
++        assert!(a.iter().all(|&v| v == -1) && s.iter().all(|&v| v == -1));
++    }
+ }
+diff --git a/crates/mpeg2v/src/lib.rs b/crates/mpeg2v/src/lib.rs
+index 261742c..ffe513a 100644
+--- a/crates/mpeg2v/src/lib.rs
++++ b/crates/mpeg2v/src/lib.rs
+@@ -24,6 +24,60 @@
+ //! ```
+ 
+ #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable))]
++// VENDOR(uefi-player): no_std port (scalar). `std` (default on) preserves
++// upstream; without it this crate is `#![no_std]` + `alloc`.
++#![cfg_attr(not(feature = "std"), no_std)]
++// VENDOR(uefi-player): always in scope; `use alloc::…` below resolves in both
++// std and no_std builds (same pattern as upstream h264-common and vendored
++// rusty_h265).
++extern crate alloc;
++// VENDOR(uefi-player): host test builds link std explicitly so the untouched
++// upstream `#[cfg(test)]` modules (which use `std::` paths) compile under
++// every feature combination; production no_std code never sees this.
++#[cfg(test)]
++extern crate std;
++// VENDOR(uefi-player): `threads` needs rayon, which needs std; the firmware
++// shapes are `default-features = false` (scalar twin) and
++// `default-features = false` + `simd` (integer SSE2 fast path), so only the
++// `threads` combination is rejected, not silently degraded.
++#[cfg(all(not(feature = "std"), feature = "threads"))]
++compile_error!("filmcraft-mpeg2v: `threads` requires `std` (rayon); keep default features for threads, or default-features=false (+ simd) for the no_std firmware shapes");
++// VENDOR(uefi-player): firmware gate — the single-bit `[accel]` switch backer
++// (`scalar` => firmware calls `set_simd_enabled(false)`, any other level =>
++// `true` once `ensure_xsave_enabled` has run; see VENDOR.md for the wiring
++// contract — this crate never probes CPUID/XCR0 itself, it only obeys).
++// The SIMD path only ever emits SSE2-baseline integer math (x86-64 psABI
++// guaranteed; no AVX/XSAVE involvement), so the switch is config semantics,
++// not a safety gate: ON under `std` (the fixed-point fast path is the
++// default shape), OFF under no_std (fail-closed until firmware opts in).
++// `Relaxed` suffices — both paths are bit-identical by test, so a torn read
++// can at worst mix paths inside one frame, never corrupt it.
++#[cfg(feature = "simd")]
++use core::sync::atomic::AtomicBool;
++#[cfg(feature = "simd")]
++static SIMD_ENABLED: AtomicBool = AtomicBool::new(cfg!(feature = "std"));
++
++/// Enable (`true`) or disable (`false`) the integer-SSE2 fast path at runtime.
++/// No-op unless the `simd` feature is on, so callers need no `cfg`.
++pub fn set_simd_enabled(en: bool) {
++    #[cfg(feature = "simd")]
++    SIMD_ENABLED.store(en, Ordering::Relaxed);
++    #[cfg(not(feature = "simd"))]
++    let _ = en;
++}
++
++/// Runtime dispatch predicate. Without `simd`, or off x86_64, this is a
++/// constant `false` and the scalar twin below is the only kernel.
++#[cfg(all(feature = "simd", target_arch = "x86_64"))]
++#[inline]
++pub(crate) fn simd_enabled() -> bool {
++    SIMD_ENABLED.load(Ordering::Relaxed)
++}
++#[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
++#[inline]
++pub(crate) fn simd_enabled() -> bool {
++    false
++}
+ 
+ mod bits;
+ pub mod headers;
+@@ -32,8 +86,11 @@ mod mc;
+ mod slice;
+ mod vlc;
+ 
+-use std::sync::Arc;
+-use std::sync::atomic::{AtomicUsize, Ordering};
++// VENDOR(uefi-player): `alloc`/`core` paths resolve identically in std and
++// no_std builds; `std` keeps its own sync types only where threads need them
++// (SliceErrors::first below).
++use alloc::{format, string::String, sync::Arc, vec, vec::Vec};
++use core::sync::atomic::{AtomicUsize, Ordering};
+ 
+ pub use headers::{
+     DisplayExtension, Extension, GopHeader, PictureCodingExtension, PictureHeader, PictureType, QuantMatrixExtension, SequenceExtension, SequenceHeader,
+@@ -52,7 +109,8 @@ pub enum Error {
+     Unsupported(String),
+ }
+ 
+-pub type Result<T> = std::result::Result<T, Error>;
++// VENDOR(uefi-player): core path (identical in std and no_std builds).
++pub type Result<T> = core::result::Result<T, Error>;
+ 
+ #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+ pub enum ChromaFormat {
+@@ -320,7 +378,7 @@ pub fn scan_access_unit(data: &[u8]) -> AccessUnitInfo {
+ /// Split an elementary stream into access units: one coded frame each (a frame picture or a
+ /// pair of field pictures) with the sequence / GOP headers before it. Bytes before the first
+ /// header are skipped.
+-pub fn access_units(es: &[u8]) -> Vec<std::ops::Range<usize>> {
++pub fn access_units(es: &[u8]) -> Vec<core::ops::Range<usize>> {
+     let codes = start_codes(es);
+     let mut out = Vec::new();
+     let mut cur: Option<usize> = None;
+@@ -371,7 +429,7 @@ struct Pending {
+     ph: PictureHeader,
+     pce: Option<PictureCodingExtension>,
+     /// (start code, payload range).
+-    slices: Vec<(u8, std::ops::Range<usize>)>,
++    slices: Vec<(u8, core::ops::Range<usize>)>,
+ }
+ 
+ #[derive(Clone)]
+@@ -544,7 +602,7 @@ impl Decoder {
+         }
+         self.apply_sequence();
+         self.finish_picture(data, pts);
+-        let out = std::mem::take(&mut self.out);
++        let out = core::mem::take(&mut self.out);
+         match err {
+             Some(e) if out.is_empty() && self.seq.is_none() => Err(e),
+             _ => Ok(out),
+@@ -563,7 +621,7 @@ impl Decoder {
+             let p = to_picture(&a.frame, &a.meta);
+             self.out.push(p);
+         }
+-        std::mem::take(&mut self.out)
++        core::mem::take(&mut self.out)
+     }
+ 
+     /// Forget all pictures (before decoding from a new random-access point). The sequence
+@@ -681,7 +739,12 @@ impl Decoder {
+         let errors = SliceErrors::default();
+         decode_picture(&p, data, &pd.slices, &mut frame, structure, self.threads, &errors);
+         self.errors += errors.count.load(Ordering::Relaxed);
+-        if let Some(e) = errors.first.into_inner().unwrap_or(None) {
++        // VENDOR(uefi-player): consume the latch; Cell arm mirrors into_inner().
++        #[cfg(feature = "std")]
++        let first_error = errors.first.into_inner().unwrap_or(None);
++        #[cfg(not(feature = "std"))]
++        let first_error = errors.first.take();
++        if let Some(e) = first_error {
+             self.last_error = Some(e);
+         }
+         if structure != 3 && !is_second {
+@@ -711,19 +774,35 @@ impl Decoder {
+ #[derive(Default)]
+ struct SliceErrors {
+     count: AtomicUsize,
++    // VENDOR(uefi-player): std keeps the threaded Mutex; no_std is always
++    // single-threaded (`threads` is rejected without `std` above), so a Cell
++    // suffices and no new sync dependency is needed.
++    #[cfg(feature = "std")]
+     first: std::sync::Mutex<Option<&'static str>>,
++    #[cfg(not(feature = "std"))]
++    first: core::cell::Cell<Option<&'static str>>,
+ }
+ 
+ impl SliceErrors {
+     fn add(&self, what: &'static str) {
+         self.count.fetch_add(1, Ordering::Relaxed);
+-        let mut f = self.first.lock().unwrap_or_else(|e| e.into_inner());
+-        f.get_or_insert(what);
++        // VENDOR(uefi-player): first-error latch; Cell arm is the single-threaded twin.
++        #[cfg(feature = "std")]
++        {
++            let mut f = self.first.lock().unwrap_or_else(|e| e.into_inner());
++            f.get_or_insert(what);
++        }
++        #[cfg(not(feature = "std"))]
++        {
++            if self.first.get().is_none() {
++                self.first.set(Some(what));
++            }
++        }
+     }
+ }
+ 
+ /// Decode the slices of one picture into `frame`.
+-fn decode_picture(p: &PicParams, data: &[u8], slices: &[(u8, std::ops::Range<usize>)], frame: &mut Frame, structure: u8, threads: bool, errors: &SliceErrors) {
++fn decode_picture(p: &PicParams, data: &[u8], slices: &[(u8, core::ops::Range<usize>)], frame: &mut Frame, structure: u8, threads: bool, errors: &SliceErrors) {
+     let (w, cw) = (frame.w, frame.cw);
+     let field = (structure != 3).then_some(p.parity);
+     let lines = if structure == 3 { 16 } else { 32 };
+@@ -811,7 +890,8 @@ fn to_picture(f: &Frame, meta: &Meta) -> Picture {
+     }
+ }
+ 
+-#[cfg(test)]
+-mod synth_tests;
++// VENDOR(uefi-player): dropped upstream `synth_tests` (synthetic-stream oracle:
++// shells out to ffmpeg and touches the filesystem; needs external fixtures like
++// `tests/`, which is not vendored). Pure unit tests below are kept and run.
+ #[cfg(test)]
+ mod tests;
+diff --git a/crates/mpeg2v/src/mc.rs b/crates/mpeg2v/src/mc.rs
+index 937b4bc..c774ced 100644
+--- a/crates/mpeg2v/src/mc.rs
++++ b/crates/mpeg2v/src/mc.rs
+@@ -1,5 +1,8 @@
+ //! Frame buffers and motion-compensated prediction (H.262 §7.6).
+ 
++// VENDOR(uefi-player): `alloc` paths resolve identically in std and no_std builds.
++use alloc::{vec, vec::Vec};
++
+ /// A decoded frame, padded to whole macroblocks.
+ #[derive(Clone)]
+ pub(crate) struct Frame {
+@@ -49,6 +52,12 @@ pub(crate) fn predict(dst: &mut [u8], doff: usize, dstride: usize, src: RefPlane
+     let inside = x >= 0 && y >= 0 && (x + bw as i32 + ex) as usize <= src.w && (y + bh as i32 + ey) as usize <= src.h;
+     let mut tmp = [0u8; 16];
+     if inside {
++        // VENDOR(uefi-player): one switch check per `predict` call; the row
++        // loop below branches on this loop-invariant bool (perfectly
++        // predicted), so hot rows pay no atomic dispatch. Without `simd`
++        // the true-branches below are compiled out and this folds away.
++        #[cfg(all(feature = "simd", target_arch = "x86_64"))]
++        let simd = crate::simd_enabled();
+         let s = src.stride;
+         let base = src.off + y as usize * s + x as usize;
+         for r in 0..bh {
+@@ -58,24 +67,46 @@ pub(crate) fn predict(dst: &mut [u8], doff: usize, dstride: usize, src: RefPlane
+             match (hx, hy) {
+                 (false, false) => row.copy_from_slice(&a[..bw]),
+                 (true, false) => {
+-                    for i in 0..bw {
+-                        row[i] = ((a[i] as u16 + a[i + 1] as u16 + 1) >> 1) as u8;
++                    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
++                    if simd {
++                        avg2_simd(row, a, &a[1..]);
++                    } else {
++                        avg2_scalar(row, a, &a[1..]);
+                     }
++                    #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
++                    avg2_scalar(row, a, &a[1..]);
+                 }
+                 (false, true) => {
+                     let b = &src.data[p + s..p + s + bw];
+-                    for i in 0..bw {
+-                        row[i] = ((a[i] as u16 + b[i] as u16 + 1) >> 1) as u8;
++                    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
++                    if simd {
++                        avg2_simd(row, a, b);
++                    } else {
++                        avg2_scalar(row, a, b);
+                     }
++                    #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
++                    avg2_scalar(row, a, b);
+                 }
+                 (true, true) => {
+                     let b = &src.data[p + s..p + s + bw + 1];
+-                    for i in 0..bw {
+-                        row[i] = ((a[i] as u16 + a[i + 1] as u16 + b[i] as u16 + b[i + 1] as u16 + 2) >> 2) as u8;
++                    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
++                    if simd {
++                        avg4_simd(row, a, &a[1..], b, &b[1..]);
++                    } else {
++                        avg4_scalar(row, a, &a[1..], b, &b[1..]);
+                     }
++                    #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
++                    avg4_scalar(row, a, &a[1..], b, &b[1..]);
+                 }
+             }
+-            store(dst, doff + r * dstride, row, avg);
++            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
++            if simd {
++                store_simd(dst, doff + r * dstride, row, avg);
++            } else {
++                store_scalar(dst, doff + r * dstride, row, avg);
++            }
++            #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
++            store_scalar(dst, doff + r * dstride, row, avg);
+         }
+         return;
+     }
+@@ -96,16 +127,274 @@ pub(crate) fn predict(dst: &mut [u8], doff: usize, dstride: usize, src: RefPlane
+                 (true, true) => (get(xx, yy) + get(xx + 1, yy) + get(xx, yy + 1) + get(xx + 1, yy + 1) + 2) >> 2,
+             } as u8;
+         }
+-        store(dst, doff + r * dstride, row, avg);
++        // Edge/clamped path: shared scalar (corrupt-stream slow path).
++        store_scalar(dst, doff + r * dstride, row, avg);
++    }
++}
++
++/// Scalar twin: `(a[i] + b[i] + 1) >> 1` (always compiled).
++fn avg2_scalar(row: &mut [u8], a: &[u8], b: &[u8]) {
++    for (o, (&x, &y)) in row.iter_mut().zip(a.iter().zip(b)) {
++        *o = ((x as u16 + y as u16 + 1) >> 1) as u8;
++    }
++}
++
++/// Scalar twin: `(a[i] + b[i] + c[i] + d[i] + 2) >> 2` (always compiled).
++fn avg4_scalar(row: &mut [u8], a: &[u8], b: &[u8], c: &[u8], d: &[u8]) {
++    for (o, (((&w, &x), &y), &z)) in row.iter_mut().zip(a.iter().zip(b).zip(c).zip(d)) {
++        *o = ((w as u16 + x as u16 + y as u16 + z as u16 + 2) >> 2) as u8;
++    }
++}
++
++/// Scalar twin of the averaging half of `store` (always compiled).
++fn store_avg_scalar(d: &mut [u8], row: &[u8]) {
++    for (o, &p) in d.iter_mut().zip(row) {
++        *o = ((*o as u16 + p as u16 + 1) >> 1) as u8;
++    }
++}
++
++/// SIMD half of the two-tap average `row[i] = (a[i] + b[i] + 1) >> 1`.
++/// Width-specialized straight-line kernels: every in-tree caller passes
++/// `bw` 8 or 16 (luma 16, chroma `16 >> shx`), so there is no chunk loop —
++/// the branchiest code here is one width check, which keeps the surrounding
++/// row loop as tight as the scalar twin's.
++#[cfg(all(feature = "simd", target_arch = "x86_64"))]
++#[inline]
++fn avg2_simd(row: &mut [u8], a: &[u8], b: &[u8]) {
++    // VENDOR(uefi-player): `unsafe` required by edition 2024 even
++    // inside the `unsafe fn`.
++    match row.len() {
++        16 => unsafe { avg2_16(row.as_mut_ptr(), a.as_ptr(), b.as_ptr()) },
++        8 => unsafe { avg2_8(row.as_mut_ptr(), a.as_ptr(), b.as_ptr()) },
++        _ => avg2_scalar(row, a, b),
++    }
++}
++
++/// SIMD half of the four-tap average
++/// `row[i] = (a[i] + b[i] + c[i] + d[i] + 2) >> 2`.
++#[cfg(all(feature = "simd", target_arch = "x86_64"))]
++#[inline]
++fn avg4_simd(row: &mut [u8], a: &[u8], b: &[u8], c: &[u8], d: &[u8]) {
++    match row.len() {
++        16 => unsafe { avg4_16(row.as_mut_ptr(), a.as_ptr(), b.as_ptr(), c.as_ptr(), d.as_ptr()) },
++        8 => unsafe { avg4_8(row.as_mut_ptr(), a.as_ptr(), b.as_ptr(), c.as_ptr(), d.as_ptr()) },
++        _ => avg4_scalar(row, a, b, c, d),
++    }
++}
++
++// VENDOR(uefi-player): integer-SSE2 twins of the averaging kernels above.
++// `pavgb(a, b)` is exactly `(a + b + 1) >> 1` per byte; the four-tap form
++// widens to words (`punpcklbw`), adds (`paddw`, `+ 2` included — the sum tops
++// at `4·255 + 2`, exact in 16 bits), shifts (`psrlw`) and narrows
++// (`packuswb`, values `<= 255` so nothing saturates). `movq`/`movdqu`
++// throughout: no alignment requirement, no `nt` stores (small reused row
++// buffers — temporal locality, hence no `sfence` either). SSE2 only: no AVX,
++// no XSAVE involvement; the firmware `[accel]` switch is config semantics.
++// Width-specialized straight-line bodies (8/16, the only in-tree widths):
++// no chunk loops, so the dispatchers above stay branch-lean.
++#[cfg(all(feature = "simd", target_arch = "x86_64"))]
++#[target_feature(enable = "sse2")]
++unsafe fn avg2_16(dst: *mut u8, a: *const u8, b: *const u8) {
++    unsafe {
++        core::arch::asm!(
++            "movdqu {t0}, [{ap}]",
++            "movdqu {t1}, [{bp}]",
++            "pavgb {t0}, {t1}",
++            "movdqu [{dp}], {t0}",
++            ap = in(reg) a,
++            bp = in(reg) b,
++            dp = in(reg) dst,
++            t0 = lateout(xmm_reg) _,
++            t1 = lateout(xmm_reg) _,
++            options(nostack, preserves_flags),
++        );
++    }
++}
++
++#[cfg(all(feature = "simd", target_arch = "x86_64"))]
++#[target_feature(enable = "sse2")]
++unsafe fn avg2_8(dst: *mut u8, a: *const u8, b: *const u8) {
++    unsafe {
++        core::arch::asm!(
++            "movq {t0}, [{ap}]",
++            "movq {t1}, [{bp}]",
++            "pavgb {t0}, {t1}",
++            "movq [{dp}], {t0}",
++            ap = in(reg) a,
++            bp = in(reg) b,
++            dp = in(reg) dst,
++            t0 = lateout(xmm_reg) _,
++            t1 = lateout(xmm_reg) _,
++            options(nostack, preserves_flags),
++        );
++    }
++}
++
++#[cfg(all(feature = "simd", target_arch = "x86_64"))]
++#[target_feature(enable = "sse2")]
++unsafe fn avg4_16(dst: *mut u8, a: *const u8, b: *const u8, c: *const u8, d: *const u8) {
++    unsafe {
++        core::arch::asm!(
++            // `+ 2` rounding splat materialized in-template (`pcmpeqd` →
++            // all-ones, `>> 15` → 1, doubled → 2 per word): a `lateout`
++            // temp may share its register with an `in(xmm_reg)` operand
++            // (the `lateout` contract reads inputs first), so a late-read
++            // vector input gets clobbered by the earlier loads — GPR
++            // pointer inputs are immune (different register class),
++            // vector inputs are not.
++            "pcmpeqd {two}, {two}",
++            "psrlw {two}, 15",
++            "paddw {two}, {two}",
++            "pxor {z}, {z}",
++            "movdqu {t0}, [{a0p}]",
++            "movdqu {t1}, [{a1p}]",
++            "movdqu {t2}, [{b0p}]",
++            "movdqu {t3}, [{b1p}]",
++            "movdqa {l0}, {t0}",
++            "punpcklbw {l0}, {z}",
++            "punpckhbw {t0}, {z}",
++            "movdqa {l1}, {t1}",
++            "punpcklbw {l1}, {z}",
++            "punpckhbw {t1}, {z}",
++            "movdqa {l2}, {t2}",
++            "punpcklbw {l2}, {z}",
++            "punpckhbw {t2}, {z}",
++            "movdqa {l3}, {t3}",
++            "punpcklbw {l3}, {z}",
++            "punpckhbw {t3}, {z}",
++            "paddw {l0}, {l1}",
++            "paddw {l2}, {l3}",
++            "paddw {l0}, {l2}",
++            "paddw {l0}, {two}",
++            "psrlw {l0}, 2",
++            "paddw {t0}, {t1}",
++            "paddw {t2}, {t3}",
++            "paddw {t0}, {t2}",
++            "paddw {t0}, {two}",
++            "psrlw {t0}, 2",
++            "packuswb {l0}, {t0}",
++            "movdqu [{dp}], {l0}",
++            a0p = in(reg) a,
++            a1p = in(reg) b,
++            b0p = in(reg) c,
++            b1p = in(reg) d,
++            dp = in(reg) dst,
++            two = lateout(xmm_reg) _,
++            z = lateout(xmm_reg) _,
++            t0 = lateout(xmm_reg) _,
++            t1 = lateout(xmm_reg) _,
++            t2 = lateout(xmm_reg) _,
++            t3 = lateout(xmm_reg) _,
++            l0 = lateout(xmm_reg) _,
++            l1 = lateout(xmm_reg) _,
++            l2 = lateout(xmm_reg) _,
++            l3 = lateout(xmm_reg) _,
++            options(nostack, preserves_flags),
++        );
++    }
++}
++
++#[cfg(all(feature = "simd", target_arch = "x86_64"))]
++#[target_feature(enable = "sse2")]
++unsafe fn avg4_8(dst: *mut u8, a: *const u8, b: *const u8, c: *const u8, d: *const u8) {
++    unsafe {
++        core::arch::asm!(
++            "pcmpeqd {two}, {two}",
++            "psrlw {two}, 15",
++            "paddw {two}, {two}",
++            "pxor {z}, {z}",
++            "movq {t0}, [{a0p}]",
++            "movq {t1}, [{a1p}]",
++            "movq {t2}, [{b0p}]",
++            "movq {t3}, [{b1p}]",
++            "punpcklbw {t0}, {z}",
++            "punpcklbw {t1}, {z}",
++            "punpcklbw {t2}, {z}",
++            "punpcklbw {t3}, {z}",
++            "paddw {t0}, {t1}",
++            "paddw {t2}, {t3}",
++            "paddw {t0}, {t2}",
++            "paddw {t0}, {two}",
++            "psrlw {t0}, 2",
++            "packuswb {t0}, {t0}",
++            "movq [{dp}], {t0}",
++            a0p = in(reg) a,
++            a1p = in(reg) b,
++            b0p = in(reg) c,
++            b1p = in(reg) d,
++            dp = in(reg) dst,
++            two = lateout(xmm_reg) _,
++            z = lateout(xmm_reg) _,
++            t0 = lateout(xmm_reg) _,
++            t1 = lateout(xmm_reg) _,
++            t2 = lateout(xmm_reg) _,
++            t3 = lateout(xmm_reg) _,
++            options(nostack, preserves_flags),
++        );
++    }
++}
++
++/// In-place two-tap average for `store(..., avg = true)`, same `pavgb`
++/// shape as `avg2` (reads the destination it writes).
++#[cfg(all(feature = "simd", target_arch = "x86_64"))]
++#[target_feature(enable = "sse2")]
++unsafe fn store_avg_16(d: *mut u8, row: *const u8) {
++    unsafe {
++        core::arch::asm!(
++            "movdqu {t0}, [{dp}]",
++            "movdqu {t1}, [{rp}]",
++            "pavgb {t0}, {t1}",
++            "movdqu [{dp}], {t0}",
++            dp = in(reg) d,
++            rp = in(reg) row,
++            t0 = lateout(xmm_reg) _,
++            t1 = lateout(xmm_reg) _,
++            options(nostack, preserves_flags),
++        );
++    }
++}
++
++#[cfg(all(feature = "simd", target_arch = "x86_64"))]
++#[target_feature(enable = "sse2")]
++unsafe fn store_avg_8(d: *mut u8, row: *const u8) {
++    unsafe {
++        core::arch::asm!(
++            "movq {t0}, [{dp}]",
++            "movq {t1}, [{rp}]",
++            "pavgb {t0}, {t1}",
++            "movq [{dp}], {t0}",
++            dp = in(reg) d,
++            rp = in(reg) row,
++            t0 = lateout(xmm_reg) _,
++            t1 = lateout(xmm_reg) _,
++            options(nostack, preserves_flags),
++        );
++    }
++}
++
++/// Scalar half of `store` (always compiled; also serves the shared
++/// edge/clamped path, which never takes the fast path).
++#[inline(always)]
++fn store_scalar(dst: &mut [u8], at: usize, row: &[u8], avg: bool) {
++    let d = &mut dst[at..at + row.len()];
++    if avg {
++        store_avg_scalar(d, row);
++    } else {
++        d.copy_from_slice(row);
+     }
+ }
+ 
++/// SIMD half of `store`: in-place two-tap average, same `pavgb` shape as
++/// `avg2` (reads the destination it writes).
++#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+ #[inline(always)]
+-fn store(dst: &mut [u8], at: usize, row: &[u8], avg: bool) {
++fn store_simd(dst: &mut [u8], at: usize, row: &[u8], avg: bool) {
+     let d = &mut dst[at..at + row.len()];
+     if avg {
+-        for (o, &p) in d.iter_mut().zip(row) {
+-            *o = ((*o as u16 + p as u16 + 1) >> 1) as u8;
++        match d.len() {
++            16 => unsafe { store_avg_16(d.as_mut_ptr(), row.as_ptr()) },
++            8 => unsafe { store_avg_8(d.as_mut_ptr(), row.as_ptr()) },
++            _ => store_avg_scalar(d, row),
+         }
+     } else {
+         d.copy_from_slice(row);
+@@ -136,6 +425,77 @@ mod tests {
+         assert_eq!(d[3] as u16, (s(2, 2) + s(3, 2) + 1) >> 1);
+     }
+ 
++    // VENDOR(uefi-player): dual-path interlock. Runs under every shape with
++    // the `simd` feature, flipping the runtime switch so both averaging
++    // kernels render the same predictions in one binary and must agree bit
++    // for bit (the edge/clamped path is shared, so this guards the `pavgb`
++    // fast path). Other tests never touch the switch, and the two paths are
++    // interchangeable, so parallel test threads cannot disturb each other.
++    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
++    fn both_predict(dst: &mut [u8], doff: usize, dstride: usize, src: RefPlane, x: i32, y: i32, hx: bool, hy: bool, bw: usize, bh: usize, avg: bool) -> Vec<u8> {
++        let prev = crate::simd_enabled();
++        let mut a = dst.to_vec();
++        crate::set_simd_enabled(true);
++        predict(&mut a, doff, dstride, src, x, y, hx, hy, bw, bh, avg);
++        let mut s = dst.to_vec();
++        crate::set_simd_enabled(false);
++        predict(&mut s, doff, dstride, src, x, y, hx, hy, bw, bh, avg);
++        crate::set_simd_enabled(prev);
++        assert_eq!(a, s, "simd/scalar at x={x} y={y} hx={hx} hy={hy} bw={bw} bh={bh} avg={avg}");
++        a
++    }
++
++    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
++    #[test]
++    fn simd_predict_matches_scalar() {
++        let f = frame();
++        let p = f.plane(0, None);
++        // Widths sweep every chunking class (8-wide main loop, scalar tail),
++        // heights sweep 1..16, positions cover inside + all four clamped edges.
++        for &(hx, hy) in &[(false, false), (true, false), (false, true), (true, true)] {
++            for avg in [false, true] {
++                for bw in 1..=16usize {
++                    for bh in [1usize, 2, 3, 7, 8, 15, 16] {
++                        for &(x, y) in &[(-3, -2), (-1, 0), (0, 0), (5, 7), (17, 19), (31, 31), (24, 33), (40, 40)] {
++                            let mut d = [0xABu8; 512];
++                            both_predict(&mut d, 3, 32, p, x, y, hx, hy, bw, bh, avg);
++                        }
++                    }
++                }
++            }
++        }
++        // Field views + chroma planes take the same kernels.
++        let mut d = [0u8; 64];
++        both_predict(&mut d, 0, 8, f.plane(0, Some(1)), 3, 2, true, true, 8, 4, true);
++        both_predict(&mut d, 0, 8, f.plane(1, None), 3, 2, true, false, 8, 4, true);
++    }
++
++    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
++    #[test]
++    fn both_paths_match_exact_hand_values() {
++        // 8-row luma pattern 10/20/…/80 (hand-rolled frame below): every
++        // expectation below is literal integer arithmetic, no oracle.
++        let mut f = Frame::new(8, 8, 4, 4);
++        for (i, v) in f.planes[0].iter_mut().enumerate() {
++            *v = [10u8, 20, 30, 40, 50, 60, 70, 80][i % 8];
++        }
++        let p = f.plane(0, None);
++        // (10+20+1)>>1 = 15, (20+30+1)>>1 = 25.
++        let mut d = [0u8; 4];
++        let got = both_predict(&mut d, 0, 2, p, 0, 0, true, false, 2, 2, false);
++        assert_eq!(&got[..], &[15, 25, 15, 25]);
++        // vertical: rows are identical, so (10+10+1)>>1 = 10, (20+20+1)>>1 = 20.
++        let got = both_predict(&mut d, 0, 2, p, 0, 0, false, true, 2, 2, false);
++        assert_eq!(&got[..], &[10, 20, 10, 20]);
++        // four-tap: (10+20+10+20+2)>>2 = 62>>2 = 15; next (20+30+20+30+2)>>2 = 102>>2 = 25.
++        let got = both_predict(&mut d, 0, 2, p, 0, 0, true, true, 2, 2, false);
++        assert_eq!(&got[..], &[15, 25, 15, 25]);
++        // store-average on zeros: (0+15+1)>>1 = 8, (0+25+1)>>1 = 13.
++        let mut d = [0u8; 4];
++        let got = both_predict(&mut d, 0, 2, p, 0, 0, true, false, 2, 2, true);
++        assert_eq!(&got[..], &[8, 13, 8, 13]);
++    }
++
+     #[test]
+     fn fields_and_clamped_edges() {
+         let f = frame();
+diff --git a/crates/mpeg2v/src/slice.rs b/crates/mpeg2v/src/slice.rs
+index 5f3eb24..1779a48 100644
+--- a/crates/mpeg2v/src/slice.rs
++++ b/crates/mpeg2v/src/slice.rs
+@@ -116,7 +116,8 @@ fn dc_reset(p: &PicParams) -> i32 {
+ #[derive(Debug)]
+ pub(crate) struct SliceError(pub &'static str);
+ 
+-type R<T> = std::result::Result<T, SliceError>;
++// VENDOR(uefi-player): core path (identical in std and no_std builds).
++type R<T> = core::result::Result<T, SliceError>;
+ 
+ /// Decode one slice (`data`: the bytes after its start code) into `t`. `row`: the slice's
+ /// macroblock row; `single_row`: MPEG-2 slices may not leave their row.
+diff --git a/crates/mpeg2v/src/synth_tests.rs b/crates/mpeg2v/src/synth_tests.rs
+deleted file mode 100644
+index 0d4dd54..0000000
+--- a/crates/mpeg2v/src/synth_tests.rs
++++ /dev/null
+@@ -1,826 +0,0 @@
+-//! Synthetic MPEG-2 streams for coding tools ffmpeg's encoder never writes: field pictures (the
+-//! second field predicted from the first), 16x8 motion compensation, dual-prime prediction in
+-//! field and frame pictures, concealment motion vectors in every picture type, skipped
+-//! macroblocks of field pictures, 4:2:2 field DCT... A random but valid stream is written here
+-//! (random macroblock types, vectors, field selects and coefficients) and decoded by both our
+-//! decoder and ffmpeg (the oracle); the frames must agree up to IDCT rounding.
+-
+-use std::collections::HashMap;
+-
+-use crate::tests::W;
+-use crate::vlc::*;
+-use crate::*;
+-
+-struct Rng(u64);
+-
+-impl Rng {
+-    fn next(&mut self) -> u64 {
+-        self.0 ^= self.0 << 13;
+-        self.0 ^= self.0 >> 7;
+-        self.0 ^= self.0 << 17;
+-        self.0
+-    }
+-    fn below(&mut self, n: u32) -> u32 {
+-        (self.next() % n.max(1) as u64) as u32
+-    }
+-    fn range(&mut self, lo: i32, hi: i32) -> i32 {
+-        lo + self.below((hi - lo + 1) as u32) as i32
+-    }
+-    fn chance(&mut self, pct: u32) -> bool {
+-        self.below(100) < pct
+-    }
+-}
+-
+-fn code_of(table: &[(&'static str, i16)], v: i16) -> &'static str {
+-    table.iter().find(|e| e.1 == v).map(|e| e.0).unwrap_or_else(|| panic!("no code for {v}"))
+-}
+-
+-#[derive(Clone, Copy)]
+-struct Cfg {
+-    name: &'static str,
+-    seed: u64,
+-    chroma: u8,
+-    w: usize,
+-    h: usize,
+-    /// Field pictures (else interlaced frame pictures with frame_pred_frame_dct = 0).
+-    field_pics: bool,
+-    /// The first field / top_field_first.
+-    tff: bool,
+-    b_frames: bool,
+-    dual: bool,
+-    alt_scan: bool,
+-    intra_vlc: bool,
+-    q_scale_type: bool,
+-    dc_prec: u8,
+-    concealment: bool,
+-    frames: usize,
+-}
+-
+-#[derive(Clone, Copy, Default)]
+-struct M {
+-    flags: i16,
+-    mtype: u8,
+-    mv: [[[i32; 2]; 2]; 2],
+-    select: [[usize; 2]; 2],
+-    dmv: [i32; 2],
+-}
+-
+-/// A prediction block: plane (0 luma, 1 chroma), field, position, half flags, size.
+-struct Req {
+-    chroma: bool,
+-    field: bool,
+-    x: i32,
+-    y: i32,
+-    hx: i32,
+-    hy: i32,
+-    w: i32,
+-    h: i32,
+-}
+-
+-struct Enc {
+-    w: W,
+-    rng: Rng,
+-    cfg: Cfg,
+-    mbw: usize,
+-    mbh: usize,
+-    shy: u32,
+-    dct_codes: [HashMap<(u32, u32), &'static str>; 2],
+-    /// The active quantiser_scale.
+-    qs: i32,
+-}
+-
+-/// Picture-level coding state.
+-struct Pic {
+-    ptype: PictureType,
+-    structure: u8,
+-    parity: usize,
+-    fpfd: bool,
+-    /// The P second field of the first frame: only the first field (opposite parity) exists.
+-    lone: bool,
+-}
+-
+-struct St {
+-    pmv: [[[i32; 2]; 2]; 2],
+-    dc: [i32; 3],
+-    last: M,
+-}
+-
+-const F_CODE: i32 = 2;
+-
+-impl Enc {
+-    fn new(cfg: Cfg) -> Enc {
+-        let mut dct_codes = [HashMap::new(), HashMap::new()];
+-        for (k, t) in [dct_table(DCT_ZERO, DCT_ZERO_LONG), dct_table(DCT_ONE, &[])].into_iter().enumerate() {
+-            for (c, v) in t {
+-                if v >= 0 {
+-                    dct_codes[k].insert(((v & 63) as u32, (v >> 6) as u32), c);
+-                }
+-            }
+-        }
+-        Enc { w: W::new(), rng: Rng(cfg.seed), cfg, mbw: cfg.w.div_ceil(16), mbh: 2 * cfg.h.div_ceil(32), shy: (cfg.chroma == 1) as u32, dct_codes, qs: 2 }
+-    }
+-
+-    fn sequence(&mut self) {
+-        let c = self.cfg;
+-        let w = &mut self.w;
+-        w.start(0xB3);
+-        w.put(c.w as u32, 12);
+-        w.put(c.h as u32, 12);
+-        w.put(1, 4);
+-        w.put(3, 4);
+-        w.put(20000, 18);
+-        w.put(1, 1);
+-        w.put(112, 10);
+-        w.put(0, 1);
+-        w.put(0, 1);
+-        w.put(0, 1);
+-        w.start(0xB5);
+-        w.put(1, 4);
+-        w.put(if c.chroma == 2 { 0x85 } else { 0x48 }, 8);
+-        w.put(0, 1); // interlaced sequence
+-        w.put(c.chroma as u32, 2);
+-        w.put(0, 2);
+-        w.put(0, 2);
+-        w.put(0, 12);
+-        w.put(1, 1);
+-        w.put(0, 8);
+-        w.put(0, 1);
+-        w.put(0, 2);
+-        w.put(0, 5);
+-        w.start(0xB8);
+-        w.put(0, 12);
+-        w.put(1, 1); // marker_bit
+-        w.put(0, 12);
+-        w.put(1, 1); // closed GOP
+-        w.put(0, 1);
+-    }
+-
+-    fn picture(&mut self, tref: u16, ptype: PictureType, structure: u8) {
+-        let c = self.cfg;
+-        let w = &mut self.w;
+-        w.start(0x00);
+-        w.put(tref as u32, 10);
+-        w.put(
+-            match ptype {
+-                PictureType::I => 1,
+-                PictureType::P => 2,
+-                _ => 3,
+-            },
+-            3,
+-        );
+-        w.put(0xFFFF, 16);
+-        if ptype != PictureType::I {
+-            w.put(0, 1);
+-            w.put(7, 3);
+-        }
+-        if ptype == PictureType::B {
+-            w.put(0, 1);
+-            w.put(7, 3);
+-        }
+-        w.put(0, 1);
+-        w.start(0xB5);
+-        w.put(8, 4);
+-        let fwd = if ptype == PictureType::I && !c.concealment { 15 } else { F_CODE as u32 };
+-        let bwd = if ptype == PictureType::B { F_CODE as u32 } else { 15 };
+-        for v in [fwd, fwd, bwd, bwd] {
+-            w.put(v, 4);
+-        }
+-        w.put(c.dc_prec as u32, 2);
+-        w.put(structure as u32, 2);
+-        w.put((structure == 3 && c.tff) as u32, 1);
+-        w.put(0, 1); // frame_pred_frame_dct
+-        w.put(c.concealment as u32, 1);
+-        w.put(c.q_scale_type as u32, 1);
+-        w.put(c.intra_vlc as u32, 1);
+-        w.put(c.alt_scan as u32, 1);
+-        w.put(0, 1); // repeat_first_field
+-        w.put(0, 1); // chroma_420_type
+-        w.put(0, 1); // progressive_frame
+-        w.put(0, 1);
+-        let lone = tref == 0 && ptype == PictureType::P;
+-        let pic = Pic { ptype, structure, parity: (structure == 2) as usize, fpfd: false, lone };
+-        let rows = if structure == 3 { self.mbh } else { self.mbh / 2 };
+-        for r in 0..rows {
+-            self.slice(&pic, r);
+-        }
+-    }
+-
+-    fn set_q(&mut self, code: i32) {
+-        self.qs = if self.cfg.q_scale_type { crate::slice::NON_LINEAR_Q[code as usize] as i32 } else { 2 * code };
+-    }
+-
+-    fn dc_reset(&self) -> i32 {
+-        1 << (7 + self.cfg.dc_prec)
+-    }
+-
+-    fn slice(&mut self, p: &Pic, row: usize) {
+-        self.w.start(1 + row as u8);
+-        let q = self.rng.range(1, 31);
+-        self.set_q(q);
+-        self.w.put(q as u32, 5);
+-        self.w.put(0, 1);
+-        let mut st = St { pmv: [[[0; 2]; 2]; 2], dc: [self.dc_reset(); 3], last: M::default() };
+-        let mut skipped = 0;
+-        for mbx in 0..self.mbw {
+-            let can_skip = p.ptype != PictureType::I && !p.lone && mbx > 0 && mbx + 1 < self.mbw && self.rng.chance(15);
+-            if can_skip && self.try_skip(p, &mut st, mbx, row) {
+-                skipped += 1;
+-                continue;
+-            }
+-            self.address_increment(skipped + 1);
+-            skipped = 0;
+-            self.macroblock(p, &mut st, mbx, row);
+-        }
+-    }
+-
+-    fn address_increment(&mut self, mut n: usize) {
+-        while n > 33 {
+-            self.w.code(code_of(MBA, MBA_ESCAPE));
+-            n -= 33;
+-        }
+-        self.w.code(code_of(MBA, n as i16));
+-    }
+-
+-    /// Skip the macroblock when its implied prediction stays inside the picture.
+-    fn try_skip(&mut self, p: &Pic, st: &mut St, mbx: usize, mby: usize) -> bool {
+-        let mut m = M { mtype: if p.structure == 3 { 2 } else { 1 }, ..Default::default() };
+-        match p.ptype {
+-            PictureType::P => {
+-                m.flags = MB_FWD;
+-                m.select[0][0] = p.parity;
+-            }
+-            _ => {
+-                if st.last.flags & MB_INTRA != 0 || st.last.flags & (MB_FWD | MB_BWD) == 0 {
+-                    return false;
+-                }
+-                m.flags = st.last.flags & (MB_FWD | MB_BWD);
+-                for s in 0..2 {
+-                    m.mv[0][s] = st.pmv[0][s];
+-                    m.select[0][s] = p.parity;
+-                }
+-            }
+-        }
+-        if !self.fits(p, &m, mbx, mby) {
+-            return false;
+-        }
+-        st.dc = [self.dc_reset(); 3];
+-        if p.ptype == PictureType::P {
+-            st.pmv = [[[0; 2]; 2]; 2];
+-        }
+-        true
+-    }
+-
+-    /// Every prediction block of `m` lies inside its reference plane.
+-    fn fits(&self, p: &Pic, m: &M, mbx: usize, mby: usize) -> bool {
+-        let (lw, lh) = (self.mbw as i32 * 16, self.mbh as i32 * 16);
+-        let (cw, ch) = (lw / 2, lh >> self.shy);
+-        self.requests(p, m, mbx, mby).iter().all(|r| {
+-            let (pw, ph) = if r.chroma { (cw, ch) } else { (lw, lh) };
+-            let ph = if r.field { ph / 2 } else { ph };
+-            r.x >= 0 && r.y >= 0 && r.x + r.w + r.hx <= pw && r.y + r.h + r.hy <= ph
+-        })
+-    }
+-
+-    /// The prediction blocks of `m` (mirrors the decoder's geometry).
+-    fn requests(&self, p: &Pic, m: &M, mbx: usize, mby: usize) -> Vec<Req> {
+-        let mut out = Vec::new();
+-        let cbh = 16 >> self.shy;
+-        let mut add = |field: bool, mv: [i32; 2], lx: i32, ly: i32, lh: i32, cy: i32, ch: i32| {
+-            out.push(Req { chroma: false, field, x: lx + (mv[0] >> 1), y: ly + (mv[1] >> 1), hx: mv[0] & 1, hy: mv[1] & 1, w: 16, h: lh });
+-            let cmv = [mv[0] / 2, if self.shy == 1 { mv[1] / 2 } else { mv[1] }];
+-            out.push(Req { chroma: true, field, x: lx / 2 + (cmv[0] >> 1), y: cy + (cmv[1] >> 1), hx: cmv[0] & 1, hy: cmv[1] & 1, w: 8, h: ch });
+-        };
+-        let x = (mbx * 16) as i32;
+-        for s in 0..2 {
+-            let dir = if s == 0 { MB_FWD } else { MB_BWD };
+-            if m.flags & dir == 0 {
+-                continue;
+-            }
+-            let mby = mby as i32;
+-            if p.structure == 3 {
+-                match m.mtype {
+-                    1 => {
+-                        for r in 0..2 {
+-                            add(true, m.mv[r][s], x, mby * 8, 8, mby * cbh / 2, cbh / 2);
+-                        }
+-                    }
+-                    3 => {
+-                        for par in 0..2 {
+-                            let (mm, e) = if par == 0 { (if self.cfg.tff { 1 } else { 3 }, -1) } else { (if self.cfg.tff { 3 } else { 1 }, 1) };
+-                            add(true, m.mv[0][s], x, mby * 8, 8, mby * cbh / 2, cbh / 2);
+-                            add(true, dual(m.mv[0][s], m.dmv, mm, e), x, mby * 8, 8, mby * cbh / 2, cbh / 2);
+-                        }
+-                    }
+-                    _ => add(false, m.mv[0][s], x, mby * 16, 16, mby * cbh, cbh),
+-                }
+-            } else {
+-                match m.mtype {
+-                    2 => {
+-                        for r in 0..2 {
+-                            add(true, m.mv[r][s], x, mby * 16 + 8 * r as i32, 8, mby * cbh + r as i32 * cbh / 2, cbh / 2);
+-                        }
+-                    }
+-                    3 => {
+-                        let e = if p.parity == 1 { 1 } else { -1 };
+-                        add(true, m.mv[0][s], x, mby * 16, 16, mby * cbh, cbh);
+-                        add(true, dual(m.mv[0][s], m.dmv, 1, e), x, mby * 16, 16, mby * cbh, cbh);
+-                    }
+-                    _ => add(true, m.mv[0][s], x, mby * 16, 16, mby * cbh, cbh),
+-                }
+-            }
+-        }
+-        out
+-    }
+-
+-    fn macroblock(&mut self, p: &Pic, st: &mut St, mbx: usize, mby: usize) {
+-        let frame_pic = p.structure == 3;
+-        // macroblock_type
+-        let quant = self.rng.chance(25);
+-        let (table, mut flags): (&[(&str, i16)], i16) = match p.ptype {
+-            PictureType::I => (MBTYPE_I, MB_INTRA),
+-            PictureType::P => (
+-                MBTYPE_P,
+-                match self.rng.below(100) {
+-                    0..10 => MB_INTRA,
+-                    10..55 => MB_FWD | MB_PATTERN,
+-                    55..70 if !p.lone => MB_PATTERN,
+-                    55..70 => MB_FWD | MB_PATTERN,
+-                    _ => MB_FWD,
+-                },
+-            ),
+-            _ => (
+-                MBTYPE_B,
+-                match self.rng.below(100) {
+-                    0..6 => MB_INTRA,
+-                    6..30 => MB_FWD | MB_BWD | MB_PATTERN,
+-                    30..45 => MB_FWD | MB_BWD,
+-                    45..60 => MB_FWD | MB_PATTERN,
+-                    60..70 => MB_FWD,
+-                    70..85 => MB_BWD | MB_PATTERN,
+-                    _ => MB_BWD,
+-                },
+-            ),
+-        };
+-        if quant && (flags & (MB_INTRA | MB_PATTERN) != 0) {
+-            flags |= MB_QUANT;
+-        }
+-        let intra = flags & MB_INTRA != 0;
+-        let concealment = intra && self.cfg.concealment;
+-        // motion description: pick vectors until the prediction fits
+-        let mut m = M { flags, ..Default::default() };
+-        let moving = flags & (MB_FWD | MB_BWD) != 0;
+-        let mut pmv = st.pmv;
+-        if moving || concealment {
+-            let mut ok = false;
+-            for _ in 0..40 {
+-                let mut cand = M { flags, ..Default::default() };
+-                cand.mtype = if concealment {
+-                    if frame_pic { 2 } else { 1 }
+-                } else {
+-                    let dual_ok = self.cfg.dual && p.ptype == PictureType::P && !p.lone;
+-                    match self.rng.below(if dual_ok { 3 } else { 2 }) {
+-                        0 => 1,
+-                        1 => 2,
+-                        _ => 3,
+-                    }
+-                };
+-                let spread = if self.rng.chance(20) { 0 } else { 31 };
+-
+-                for r in 0..2 {
+-                    for s in 0..2 {
+-                        cand.select[r][s] = self.rng.below(2) as usize;
+-                        cand.mv[r][s] = [self.rng.range(-spread - 1, spread), self.rng.range(-spread - 1, spread)];
+-                    }
+-                }
+-                cand.dmv = [self.rng.range(-1, 1), self.rng.range(-1, 1)];
+-                if cand.mtype == 3 {
+-                    cand.select = [[p.parity; 2]; 2];
+-                }
+-                if p.lone {
+-                    cand.select = [[1 - p.parity; 2]; 2];
+-                }
+-                if (concealment || self.fits(p, &cand, mbx, mby)) && representable(p, &cand, concealment, pmv) {
+-                    m = cand;
+-                    ok = true;
+-                    break;
+-                }
+-            }
+-            if !ok && concealment {
+-                // a vector the (possibly out-of-range) predictor reaches unambiguously
+-                let mut c = M { flags, mtype: if frame_pic { 2 } else { 1 }, ..Default::default() };
+-                for t in 0..2 {
+-                    let pred = pmv[0][0][t];
+-                    c.mv[0][0][t] = if pred < -32 {
+-                        pred + 32
+-                    } else if pred > 31 {
+-                        pred - 32
+-                    } else {
+-                        0
+-                    };
+-                }
+-                m = c;
+-            } else if !ok {
+-                // zero vectors from the same parity always fit; field vectors (halved
+-                // predictors) are always representable
+-                let sel = if p.lone { 1 - p.parity } else { p.parity };
+-                m = if frame_pic {
+-                    M { flags, mtype: 1, select: [[0, 0], [1, 1]], ..Default::default() }
+-                } else {
+-                    M { flags, mtype: 1, select: [[sel; 2]; 2], ..Default::default() }
+-                };
+-                assert!(representable(p, &m, concealment, pmv));
+-            }
+-        }
+-        self.w.code(code_of(table, flags));
+-        if moving {
+-            self.w.put(m.mtype as u32, 2);
+-        }
+-        let dct_type = frame_pic && !p.fpfd && (intra || flags & MB_PATTERN != 0);
+-        if dct_type {
+-            self.w.put(self.rng.below(2), 1);
+-        }
+-        if flags & MB_QUANT != 0 {
+-            let q = self.rng.range(1, 31);
+-            self.set_q(q);
+-            self.w.put(q as u32, 5);
+-        }
+-        // vectors (differentially against the predictors, as the decoder forms them)
+-        let (count, field_fmt, dualp) = match (frame_pic, m.mtype) {
+-            (true, 1) => (2, true, false),
+-            (_, 3) => (1, true, true),
+-            (true, _) => (1, false, false),
+-            (false, 2) => (2, true, false),
+-            (false, _) => (1, true, false),
+-        };
+-        for s in 0..2 {
+-            let present = if s == 0 { flags & MB_FWD != 0 || concealment } else { flags & MB_BWD != 0 };
+-            if !present {
+-                continue;
+-            }
+-            for r in 0..count {
+-                if count == 2 || (field_fmt && !dualp) {
+-                    self.w.put(m.select[r][s] as u32, 1);
+-                }
+-                for c in 0..2 {
+-                    let halve = field_fmt && c == 1 && frame_pic;
+-                    let pred = if halve { pmv[r][s][c] >> 1 } else { pmv[r][s][c] };
+-                    let v = m.mv[r][s][c];
+-                    self.motion_code(v - pred);
+-                    if dualp {
+-                        self.w.code(code_of(DMV, m.dmv[c] as i16));
+-                    }
+-                    pmv[r][s][c] = if halve { v * 2 } else { v };
+-                }
+-            }
+-            if count == 1 {
+-                pmv[1][s] = pmv[0][s];
+-            }
+-        }
+-        if concealment {
+-            self.w.put(1, 1);
+-        }
+-        // predictor resets
+-        if intra {
+-            if !concealment {
+-                pmv = [[[0; 2]; 2]; 2];
+-            }
+-        } else {
+-            st.dc = [self.dc_reset(); 3];
+-            if p.ptype == PictureType::P && flags & MB_FWD == 0 {
+-                pmv = [[[0; 2]; 2]; 2];
+-                m.select[0][0] = p.parity;
+-            }
+-        }
+-        st.pmv = pmv;
+-        // coded_block_pattern and blocks
+-        let nblocks = if self.cfg.chroma == 2 { 8 } else { 6 };
+-        let cbp: u32 = if flags & MB_PATTERN != 0 {
+-            // the coded_block_pattern code for 0 is only for 4:2:2 and 4:4:4 (Table B.9)
+-            let v = self.rng.range(1, (1 << nblocks) - 1) as u32;
+-            self.w.code(code_of(CBP, (v >> (nblocks - 6)) as i16));
+-            if nblocks == 8 {
+-                self.w.put(v & 3, 2);
+-            }
+-            v
+-        } else if intra {
+-            (1 << nblocks) - 1
+-        } else {
+-            0
+-        };
+-        for i in 0..nblocks {
+-            if cbp & (1 << (nblocks - 1 - i)) != 0 {
+-                let cc = if i < 4 { 0 } else { 1 + (i & 1) };
+-                self.block(st, cc, intra);
+-            }
+-        }
+-        st.last = m;
+-    }
+-
+-    fn motion_code(&mut self, delta: i32) {
+-        let f = 1 << (F_CODE - 1);
+-        let range = 32 * f;
+-        let mut d = delta;
+-        if d < -16 * f {
+-            d += range;
+-        } else if d > 16 * f - 1 {
+-            d -= range;
+-        }
+-        if d == 0 {
+-            self.w.code(code_of(MOTION, 0));
+-            return;
+-        }
+-        let a = d.abs() - 1;
+-        let code = (a >> (F_CODE - 1)) + 1;
+-        self.w.code(code_of(MOTION, (code * d.signum()) as i16));
+-        self.w.put((a & (f - 1)) as u32, (F_CODE - 1) as u32);
+-    }
+-
+-    fn block(&mut self, st: &mut St, cc: usize, intra: bool) {
+-        let tab = (intra && self.cfg.intra_vlc) as usize;
+-        let mut first = !intra;
+-        if intra {
+-            let max = (1 << (8 + self.cfg.dc_prec)) - 1;
+-            let target = (st.dc[cc] + self.rng.range(-40, 40)).clamp(0, max);
+-            let diff = target - st.dc[cc];
+-            st.dc[cc] = target;
+-            let size = 32 - diff.unsigned_abs().leading_zeros();
+-            self.w.code(code_of(if cc == 0 { DC_LUMA } else { DC_CHROMA }, size as i16));
+-            if size > 0 {
+-                let v = if diff > 0 { diff } else { diff + (1 << size) - 1 };
+-                self.w.put(v as u32, size);
+-            }
+-        }
+-        let n = if intra { self.rng.below(6) } else { 1 + self.rng.below(6) };
+-        let mut idx: i32 = if intra { 0 } else { -1 };
+-        for _ in 0..n {
+-            let run = self.rng.range(0, 6);
+-            if idx + run + 1 > 63 {
+-                break;
+-            }
+-            idx += run + 1;
+-            // keep dequantised values within ±300 (W ≤ 83 for the default intra matrix): realistic
+-            // residuals (extreme ones overflow ffmpeg's integer IDCT, which then differs)
+-            let cap = if intra { 300 * 16 / (self.qs * 83) } else { (300 * 32 / (self.qs * 16) - 1) / 2 }.clamp(1, 2047);
+-            let mag = if self.rng.chance(8) { self.rng.range(cap.min(20), cap.min(400)) } else { self.rng.range(1, cap.min(4)) };
+-            let neg = self.rng.chance(50);
+-            if first && run == 0 && mag == 1 {
+-                self.w.code("1");
+-                self.w.put(neg as u32, 1);
+-            } else if let Some(c) = self.dct_codes[tab].get(&(run as u32, mag as u32)).filter(|_| !self.rng.chance(5)) {
+-                self.w.code(c);
+-                self.w.put(neg as u32, 1);
+-            } else {
+-                self.w.code("0000 01");
+-                self.w.put(run as u32, 6);
+-                let l = if neg { -mag } else { mag };
+-                self.w.put((l & 0xFFF) as u32, 12);
+-            }
+-            first = false;
+-        }
+-        if first {
+-            // a coded non-intra block needs a coefficient
+-            self.w.code("1");
+-            self.w.put(0, 1);
+-        }
+-        self.w.code(if tab == 1 { "0110" } else { "10" });
+-    }
+-}
+-
+-/// Whether every vector of `m` decodes to itself under both the literal §7.6.3.1 wrap and the
+-/// reference decoder's (they differ only for out-of-range predictors).
+-fn representable(p: &Pic, m: &M, concealment: bool, mut pmv: [[[i32; 2]; 2]; 2]) -> bool {
+-    let frame_pic = p.structure == 3;
+-    let f = 1 << (F_CODE - 1);
+-    let (count, field_fmt, _) = match (frame_pic, m.mtype) {
+-        (true, 1) => (2, true, false),
+-        (_, 3) => (1, true, true),
+-        (true, _) => (1, false, false),
+-        (false, 2) => (2, true, false),
+-        (false, _) => (1, true, false),
+-    };
+-    for s in 0..2 {
+-        let present = if s == 0 { m.flags & MB_FWD != 0 || concealment } else { m.flags & MB_BWD != 0 };
+-        if !present {
+-            continue;
+-        }
+-        for r in 0..count {
+-            for c in 0..2 {
+-                let halve = field_fmt && c == 1 && frame_pic;
+-                let pred = if halve { pmv[r][s][c] >> 1 } else { pmv[r][s][c] };
+-                let v = m.mv[r][s][c];
+-                let mut d = v - pred;
+-                if d < -16 * f {
+-                    d += 32 * f;
+-                } else if d > 16 * f - 1 {
+-                    d -= 32 * f;
+-                }
+-                let literal = {
+-                    let x = pred + d;
+-                    if x < -16 * f {
+-                        x + 32 * f
+-                    } else if x > 16 * f - 1 {
+-                        x - 32 * f
+-                    } else {
+-                        x
+-                    }
+-                };
+-                if crate::slice::wrap_vector(pred, d, f) != v || literal != v {
+-                    return false;
+-                }
+-                pmv[r][s][c] = if halve { v * 2 } else { v };
+-            }
+-        }
+-        if count == 1 {
+-            pmv[1][s] = pmv[0][s];
+-        }
+-    }
+-    true
+-}
+-
+-fn dual(v: [i32; 2], dmv: [i32; 2], m: i32, e: i32) -> [i32; 2] {
+-    let s = |x: i32| (x * m + (x > 0) as i32) >> 1;
+-    [s(v[0]) + dmv[0], s(v[1]) + e + dmv[1]]
+-}
+-
+-/// Write a stream: closed GOP, I/P/B frame order I0 P3 B1 B2 P6 B4 B5 … (or I0 P1 P2 … without
+-/// B pictures); field-coded frames are a pair of field pictures (I + P for the first frame).
+-fn stream(cfg: Cfg) -> Vec<u8> {
+-    let mut e = Enc::new(cfg);
+-    e.sequence();
+-    let mut order: Vec<(u16, PictureType)> = vec![(0, PictureType::I)];
+-    if cfg.b_frames {
+-        let mut a = 0u16;
+-        while (a as usize) + 3 < cfg.frames {
+-            order.push((a + 3, PictureType::P));
+-            order.push((a + 1, PictureType::B));
+-            order.push((a + 2, PictureType::B));
+-            a += 3;
+-        }
+-    } else {
+-        for k in 1..cfg.frames as u16 {
+-            order.push((k, PictureType::P));
+-        }
+-    }
+-    let (first, second) = if cfg.tff { (1, 2) } else { (2, 1) };
+-    for (tref, t) in order {
+-        if cfg.field_pics {
+-            e.picture(tref, t, first);
+-            e.picture(tref, if t == PictureType::I { PictureType::P } else { t }, second);
+-        } else {
+-            e.picture(tref, t, 3);
+-        }
+-    }
+-    e.w.start(0xB7);
+-    e.w.out
+-}
+-
+-fn check(cfg: Cfg) {
+-    let es = stream(cfg);
+-    let (pics, errors) = {
+-        let mut d = Decoder::new();
+-        let mut out = Vec::new();
+-        for (i, r) in access_units(&es).into_iter().enumerate() {
+-            out.extend(d.decode(&es[r], i as i64).unwrap());
+-        }
+-        out.extend(d.flush());
+-        (out, d.errors())
+-    };
+-    assert_eq!(errors, 0, "{}: our decoder reports slice errors", cfg.name);
+-    let Some(ff) = filmcraft_testkit::ffmpeg_or_skip(cfg.name) else { return };
+-    let path = filmcraft_testkit::fixtures_dir("mpeg2v").join(format!("{}_{:x}.m2v", cfg.name, cfg.seed));
+-    std::fs::write(&path, &es).unwrap();
+-    let fmt = if cfg.chroma == 2 { "yuv422p" } else { "yuv420p" };
+-    let o = std::process::Command::new(ff)
+-        .args(["-hide_banner", "-loglevel", "error", "-xerror", "-i"])
+-        .arg(&path)
+-        .args(["-fps_mode", "passthrough", "-f", "rawvideo", "-pix_fmt", fmt, "-"])
+-        .output()
+-        .unwrap();
+-    assert!(o.status.success(), "{}: ffmpeg rejects the stream: {}", cfg.name, String::from_utf8_lossy(&o.stderr));
+-    let raw = o.stdout;
+-    let (w, h) = (cfg.w, cfg.h);
+-    let (cw, ch) = (w / 2, if cfg.chroma == 2 { h } else { h / 2 });
+-    let fs = w * h + 2 * cw * ch;
+-    assert_eq!(raw.len() / fs, pics.len(), "{}: frame count", cfg.name);
+-    let mut worst = 0u8;
+-    let (mut sse, mut n, mut differ) = (0f64, 0u64, 0u64);
+-    // (frame, type, macroblock x, y, line) of the first luma difference above 4
+-    let mut first_bad = None;
+-    for (i, p) in pics.iter().enumerate() {
+-        assert_eq!(p.temporal_reference as usize, i, "{}: display order", cfg.name);
+-        assert_eq!(p.top_field_first, cfg.tff);
+-        let f = &raw[i * fs..(i + 1) * fs];
+-        if first_bad.is_none()
+-            && let Some(k) = (0..w * h).find(|&k| p.y[k].abs_diff(f[k]) > 4)
+-        {
+-            first_bad = Some((i, p.picture_type, k % w / 16, k / w / 16, k / w % 16));
+-        }
+-        for (a, b) in p.y.iter().chain(&p.cb).chain(&p.cr).zip(f) {
+-            let d = a.abs_diff(*b);
+-            worst = worst.max(d);
+-            sse += (d as f64).powi(2);
+-            differ += (d != 0) as u64;
+-            n += 1;
+-        }
+-    }
+-    let psnr = 10.0 * (255f64 * 255.0 * n as f64 / sse.max(1e-9)).log10();
+-    println!("{}: {} frames, max diff {worst}, {:.3}% differ, PSNR {psnr:.2} dB", cfg.name, pics.len(), 100.0 * differ as f64 / n as f64);
+-    // the same criteria as the ffmpeg-encoded fixtures (tests/oracle.rs)
+-    assert!(worst <= 4 && psnr >= 58.0, "{} (seed {:#x}): max diff {worst}, PSNR {psnr:.2}, first at {first_bad:?}", cfg.name, cfg.seed);
+-}
+-
+-const BASE: Cfg = Cfg {
+-    name: "",
+-    seed: 1,
+-    chroma: 1,
+-    w: 96,
+-    h: 64,
+-    field_pics: true,
+-    tff: true,
+-    b_frames: true,
+-    dual: false,
+-    alt_scan: false,
+-    intra_vlc: true,
+-    q_scale_type: false,
+-    dc_prec: 0,
+-    concealment: true,
+-    frames: 7,
+-};
+-
+-/// Every configuration with more random streams.
+-#[test]
+-fn seed_sweep() {
+-    let cfgs = [
+-        Cfg { name: "sweep_field_ibp", ..BASE },
+-        Cfg { name: "sweep_field_dual_422", b_frames: false, dual: true, chroma: 2, tff: false, frames: 4, ..BASE },
+-        Cfg { name: "sweep_frame_dual", field_pics: false, b_frames: false, dual: true, frames: 4, dc_prec: 3, ..BASE },
+-        Cfg { name: "sweep_frame_ib_422", field_pics: false, chroma: 2, tff: false, q_scale_type: true, ..BASE },
+-    ];
+-    for seed in 1..=8u64 {
+-        for c in cfgs {
+-            check(Cfg { seed: seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ c.w as u64, ..c });
+-        }
+-    }
+-}
+-
+-#[test]
+-fn field_pictures_with_b_and_16x8() {
+-    check(Cfg { name: "synth_field_ibp_tff", seed: 0x1234_5678_9abc, ..BASE });
+-    check(Cfg {
+-        name: "synth_field_ibp_bff_422",
+-        seed: 0xfeed_beef_1234,
+-        tff: false,
+-        chroma: 2,
+-        alt_scan: true,
+-        q_scale_type: true,
+-        dc_prec: 2,
+-        w: 112,
+-        h: 96,
+-        ..BASE
+-    });
+-}
+-
+-#[test]
+-fn dual_prime_in_field_pictures() {
+-    check(Cfg { name: "synth_field_dual_tff", seed: 0x0bad_cafe_0042, b_frames: false, dual: true, frames: 5, ..BASE });
+-    check(Cfg {
+-        name: "synth_field_dual_bff_422",
+-        seed: 0x1357_9bdf_2468,
+-        b_frames: false,
+-        dual: true,
+-        tff: false,
+-        chroma: 2,
+-        concealment: false,
+-        frames: 5,
+-        ..BASE
+-    });
+-}
+-
+-#[test]
+-fn frame_pictures_field_mc_and_dual_prime() {
+-    check(Cfg { name: "synth_frame_dual_tff", seed: 0x5555_aaaa_1111, field_pics: false, b_frames: false, dual: true, frames: 6, ..BASE });
+-    check(Cfg {
+-        name: "synth_frame_dual_bff_422",
+-        seed: 0x7777_3333_9999,
+-        field_pics: false,
+-        b_frames: false,
+-        dual: true,
+-        tff: false,
+-        chroma: 2,
+-        dc_prec: 1,
+-        frames: 6,
+-        ..BASE
+-    });
+-    check(Cfg {
+-        name: "synth_frame_ib_422",
+-        seed: 0x2468_ace0_1357,
+-        field_pics: false,
+-        chroma: 2,
+-        alt_scan: true,
+-        intra_vlc: false,
+-        q_scale_type: true,
+-        w: 128,
+-        h: 96,
+-        ..BASE
+-    });
+-}
+diff --git a/crates/mpeg2v/src/vlc.rs b/crates/mpeg2v/src/vlc.rs
+index 3ee5cd7..7b678c6 100644
+--- a/crates/mpeg2v/src/vlc.rs
++++ b/crates/mpeg2v/src/vlc.rs
+@@ -2,7 +2,12 @@
+ //! of ISO/IEC 11172-2 Annex B. Codes are written as in the standard (spaces ignored) and turned
+ //! into two-level lookup tables once.
+ 
+-use std::sync::OnceLock;
++// VENDOR(uefi-player): one-time lookup tables in both builds; see idct.rs
++// (same `spin::Once` rationale: `core` has no `Sync` cell).
++use spin::Once as OnceLock;
++
++// VENDOR(uefi-player): `alloc` paths resolve identically in std and no_std builds.
++use alloc::{vec, vec::Vec};
+ 
+ use crate::bits::Bits;
+ 
+@@ -60,7 +65,7 @@ impl Vlc {
+         for (p, &b) in sub_bits.iter().enumerate() {
+             if b > 0 {
+                 let off = table.len();
+-                table.extend(std::iter::repeat_n(Entry::default(), 1 << b));
++                table.extend(core::iter::repeat_n(Entry::default(), 1 << b));
+                 table[p] = Entry { val: off as i16, len: 0, sub: b as u8 };
+             }
+         }
+@@ -530,7 +535,7 @@ pub(crate) fn dct_table(short: &'static [(&'static str, i16)], extra: &'static [
+ 
+ pub(crate) fn tables() -> &'static Tables {
+     static T: OnceLock<Tables> = OnceLock::new();
+-    T.get_or_init(|| Tables {
++    T.call_once(|| Tables {
+         mba: Vlc::new(8, MBA),
+         mbtype: [Vlc::new(2, MBTYPE_I), Vlc::new(6, MBTYPE_P), Vlc::new(6, MBTYPE_B), Vlc::new(1, MBTYPE_D)],
+         cbp: Vlc::new(9, CBP),

@@ -87,6 +87,32 @@
 老路无 OSD、无多核、无影子、无执行器后端；只读 qois（raw 回落 clip 并警告）。
 矩阵覆盖：`video-pipe-*` 7 case（path 标记 + soak 保活）。
 
+## 供片模式（`[play] feed`，只切拿帧方式，不管上传路）
+
+| `feed` | 拿帧方式 | 适用 |
+|---|---|---|
+| `clip`（默认） | 开机全量预解码（现行行为，零行为变化） | 全部 |
+| `staged` | qois 显式三段逐帧解码；其余七格式软解码 planar→BGRA 固有分段，结构等价 clip | qois（其余结构等价） |
+| `stream` | `tune.window`（1-32，默认 4）窗口边播边解，游标之后淘汰（`rewind` 重建解码器状态重播） | qois + hevc 代表格式 |
+| `zero_copy` | 单复用帧缓冲逐显示帧即时解码（调用方须立即上传） | qois |
+
+- 只切 `Clip` 内部拿帧方式：`blt`/`direct`/`mp_draw`/`nano_pump`/`dynamic_draw`
+  上传路零改，只消费 `next_frame`/`rewind`/`len`/`frame`。
+- 多核（`mp_draw`）/动态调度/壁纸恒 `clip`（壁纸随机访问循环，按 tag 裁决，
+  见固件 `lazy::feed_for`）；旧文件缺键按 `clip` 照读。
+- 矩阵覆盖：`video-feed-*` 5 case（`video: feed=` + path 行 + soak 保活；
+  clip/stream/zero_copy/staged × qois + stream × hevc 代表格式，
+  全组合不铺，避 4×8 膨胀）。
+- GUI：播放页管线区旁供片滑杆（0-3 拨档 + 一句话说明）；
+  `[render.tune] window` 缺键按 4、钳 1..=32（GUI 只保 roundtrip，不摆旋钮）。
+- 跳帧同样经懒解码（`pace_or_drop` 调 `next_frame` 跳过）：正确但把被跳帧也解了，
+  上传路零改的代价，feed 非 clip 时高掉帧场景多耗解码。
+- `measure_max_fps` 照常（边测边解：懒 Clip 下首启实测不一次全解，按播出帧计数，
+  全量下与旧值一致）。
+- 已知退化（待 Agent-B `split_annexb_aus` 真 AU 组联调结论）：stub 期整流单 AU，
+  avc/hevc 懒模式首 `next_frame` 即推整流（hevc 经输出队列仍逐帧出，avc 只留末帧），
+  多 slice/B 帧重排语义以联调结论为准；冒烟只用 qois 断言帧数一致。
+
 ## 真机错位问题（曾 TODO，现状态）
 
 - 现象：真机概率性 QOI 解码失败/数据错位，QEMU 不现。

@@ -1,0 +1,12 @@
+[package]
+name = "patch-sync"
+version = "0.1.0"
+edition = "2021"
+description = "third_party submodule 补丁重打工具（host 工具，与 UEFI 固件包独立）"
+
+# 轮子选择（见根 AGENTS.md「轮子优先」+「测试 100% Rust」）：
+# - 只调 git 子进程 + 读写文件，std 足够（process/fs），零新依赖；
+#   不引 clap（4 个开关手写解析），不引 walkdir/glob（git status 给全量表）。
+# - 不写测试逻辑（本工具自身无矩阵；正确性由产出 patch 的
+#   `git apply --check` + 双矩阵门禁保证）。
+[dependencies]

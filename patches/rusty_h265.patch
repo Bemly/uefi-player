@@ -1,0 +1,651 @@
+diff --git a/crates/rusty_h265/Cargo.toml b/crates/rusty_h265/Cargo.toml
+index a4b58c4..2d5769d 100644
+--- a/crates/rusty_h265/Cargo.toml
++++ b/crates/rusty_h265/Cargo.toml
+@@ -1,48 +1,42 @@
+ [package]
+ name = "rusty_h265"
+-version.workspace = true
+-edition.workspace = true
+-license.workspace = true
+-repository.workspace = true
+-authors.workspace = true
+-homepage.workspace = true
++version = "0.6.2"
++edition = "2021"
++rust-version = "1.85"
++license = "Apache-2.0"
++repository = "https://github.com/Remade-With-Rust/rusty_h265"
+ description = "Pure-Rust HEVC / H.265 video decoder, no C/FFI, written from the ITU-T H.265 spec and gated on the JCT-VC conformance suite."
+-readme = "README.md"
+-keywords = ["hevc", "h265", "video", "codec", "decoder"]
+-categories = ["multimedia::video", "multimedia::encoding"]
+-rust-version.workspace = true
++
++# NOTE(uefi-player vendor): vendored from crates.io 0.6.2 + no_std port (scalar).
++# See VENDOR.md. `std` (default on) preserves upstream behavior exactly;
++# `default-features = false` is the firmware shape: no_std + scalar.
+ 
+ [features]
+-# The SIMD kernels (plan §2.6: primary path, scalar twin as oracle).
+-default = ["simd"]
+-# Runs the bundled `rusty_h265` binary under our own allocator, which is what
+-# `rff-cli` ships (CLAUDE.md: "an arm measured under the system allocator is not
+-# comparable"). Off by default and behind an OPTIONAL dependency so the
+-# published library stays dependency-free — a library must never hijack a
+-# downstream binary's allocator choice. Every benchmark passes it.
+-bench-alloc = ["dep:rusty_alloc-api"]
++default = ["std", "simd"]
++# Standard library. Off => `#![no_std]` + `alloc`; env knobs read as unset and
++# diagnostic prints become no-ops (shipped defaults — the doctrine upstream
++# documents for its own no_std consumers).
++std = ["rusty_h265-accel/std"]
++# Portable SIMD kernels in rusty_h265-accel (SSE2/AVX2/NEON). no_std-safe since
++# the accel port (see ../rusty_h265-accel + VENDOR.md §3): `simd` no longer
++# implies accel `std`. The runtime ISA is firmware-gated (`force_isa` /
++# `force_scalar` pushed by `resolve_accel` before first decode).
+ simd = ["rusty_h265-accel/simd"]
+ census = ["rusty_h265-accel/census"]
+-# The per-bin CABAC trace (`RH265_CABAC_TRACE=1`). A debugging facility, so it
+-# is a `cfg` and not a runtime flag: as a runtime flag it cost a load, a test
+-# and a branch on every one of ~4 M context bins per 720p frame-set.
+ cabac-trace = []
+-# The stage profiler (`RH265_PROF=1`). A feature, not a runtime flag, for the
+-# same reason as `cabac-trace`: a scope guard is a clock read, and the stages it
+-# wraps run millions of times a clip. Compiled out, every scope is nothing.
+ prof = []
++# Upstream pins this exactly (allocator identity for measurement arms); optional
++# dep, never enabled in firmware builds.
++bench-alloc = ["dep:rusty_alloc-api"]
+ 
+ [dependencies]
+-# `default-features = false`: the ONLY route to the kernels is this crate's own
+-# `simd` feature, so `--no-default-features` really is the scalar arm. Without
+-# this, the accel crate's own default silently re-enabled them and the A/B
+-# measured SIMD against SIMD.
+-rusty_h265-accel = { workspace = true, default-features = false }
+-rusty_alloc-api = { workspace = true, optional = true }
++rusty_h265-accel = { path = "../rusty_h265-accel", default-features = false }
++rusty_alloc-api = { version = "=2.2.6", optional = true }
+ 
+ [[bin]]
+ name = "rusty_h265"
+ path = "src/bin/rusty_h265.rs"
+ 
+-[lints]
+-workspace = true
++[lib]
++name = "rusty_h265"
++path = "src/lib.rs"
+diff --git a/crates/rusty_h265/src/bits.rs b/crates/rusty_h265/src/bits.rs
+index 3e8626e..59b11c4 100644
+--- a/crates/rusty_h265/src/bits.rs
++++ b/crates/rusty_h265/src/bits.rs
+@@ -13,7 +13,7 @@ impl core::fmt::Display for OutOfData {
+     }
+ }
+ 
+-impl std::error::Error for OutOfData {}
++impl core::error::Error for OutOfData {}
+ 
+ /// A big-endian, MSB-first bit reader.
+ #[derive(Debug, Clone)]
+diff --git a/crates/rusty_h265/src/cabac.rs b/crates/rusty_h265/src/cabac.rs
+index 02aaa8d..b4ffd11 100644
+--- a/crates/rusty_h265/src/cabac.rs
++++ b/crates/rusty_h265/src/cabac.rs
+@@ -283,7 +283,7 @@ impl<'a> Cabac<'a> {
+             range: 510,
+             ctx,
+             #[cfg(feature = "cabac-trace")]
+-            trace: std::env::var_os("RH265_CABAC_TRACE").is_some(),
++            trace: crate::knob("RH265_CABAC_TRACE"),
+             #[cfg(feature = "cabac-trace")]
+             sym: 0,
+         };
+diff --git a/crates/rusty_h265/src/ctu.rs b/crates/rusty_h265/src/ctu.rs
+index b300067..b430291 100644
+--- a/crates/rusty_h265/src/ctu.rs
++++ b/crates/rusty_h265/src/ctu.rs
+@@ -19,6 +19,8 @@ use crate::pic::{CtbFilterParams, PicState, SaoParams, PRED_INTER, PRED_INTRA, P
+ use crate::ps::{Pps, ScalingList, Sps, TileLayout};
+ use crate::slice::{SliceHeader, SliceType};
+ use crate::tables::{DIAG_4X4, DIAG_8X8};
++// VENDOR(uefi-player): alloc prelude for the no_std build.
++use alloc::{boxed::Box, vec, vec::Vec};
+ 
+ /// `part_mode` (Table 7-10).
+ #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+@@ -183,9 +185,9 @@ pub struct Ablate {
+ impl Ablate {
+     pub fn from_env() -> Ablate {
+         Ablate {
+-            mc: std::env::var_os("RH265_ABLATE_MC").is_some(),
+-            intra: std::env::var_os("RH265_ABLATE_INTRA").is_some(),
+-            residual: std::env::var_os("RH265_ABLATE_RESIDUAL").is_some(),
++            mc: crate::knob("RH265_ABLATE_MC"),
++            intra: crate::knob("RH265_ABLATE_INTRA"),
++            residual: crate::knob("RH265_ABLATE_RESIDUAL"),
+         }
+     }
+ 
+@@ -367,8 +369,8 @@ impl<'a> SliceDecoder<'a> {
+             intra_chroma_mode: 0,
+             coeffs: vec![0; 32 * 32],
+             itx_tmp: vec![0; 32 * 32],
+-            dbg_cu: std::env::var_os("RH265_DBG_CU").is_some(),
+-            dbg_sub: std::env::var_os("RH265_DBG_SUB").is_some(),
++            dbg_cu: crate::knob("RH265_DBG_CU"),
++            dbg_sub: crate::knob("RH265_DBG_SUB"),
+             ablate: inp.ablate,
+             scratch: crate::mcscratch::McScratch::new(),
+             iref: crate::intra::RefSamples::new(),
+diff --git a/crates/rusty_h265/src/ctu/inter.rs b/crates/rusty_h265/src/ctu/inter.rs
+index 771a8b6..f55cae9 100644
+--- a/crates/rusty_h265/src/ctu/inter.rs
++++ b/crates/rusty_h265/src/ctu/inter.rs
+@@ -155,10 +155,17 @@ fn scale_mv(mv: [i32; 2], td: i32, tb: i32) -> [i32; 2] {
+ /// Read once per prediction unit by the caller, not once per COMPONENT inside
+ /// `neutral_weights` -- a `OnceLock` read is an atomic load and a branch, and
+ /// on a weighted slice this ran three times for every unit.
++// VENDOR(uefi-player): std keeps the cached knob; no_std reads as unset (off).
++#[cfg(feature = "std")]
+ fn neutral_wp_off() -> bool {
+     static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+     *OFF.get_or_init(|| std::env::var_os("RH265_NO_NEUTRAL_WP").is_some())
+ }
++// VENDOR(uefi-player): no_std => knob reads as unset (shipped default: off).
++#[cfg(not(feature = "std"))]
++fn neutral_wp_off() -> bool {
++    false
++}
+ 
+ fn neutral_weights(t: &PredWeightTable, pu: &PuMv, used: [bool; 2], c: usize, off: bool) -> bool {
+     if off {
+diff --git a/crates/rusty_h265/src/ctu/residual.rs b/crates/rusty_h265/src/ctu/residual.rs
+index 27d7e02..0e99f0f 100644
+--- a/crates/rusty_h265/src/ctu/residual.rs
++++ b/crates/rusty_h265/src/ctu/residual.rs
+@@ -295,7 +295,7 @@ impl<'a> SliceDecoder<'a> {
+             0
+         };
+         if scan_idx == 2 {
+-            std::mem::swap(&mut last_x, &mut last_y);
++            core::mem::swap(&mut last_x, &mut last_y);
+         }
+         let log2sb = log2 - 2;
+         let nsb = 1usize << log2sb;
+diff --git a/crates/rusty_h265/src/decoder.rs b/crates/rusty_h265/src/decoder.rs
+index dec588b..6a89098 100644
+--- a/crates/rusty_h265/src/decoder.rs
++++ b/crates/rusty_h265/src/decoder.rs
+@@ -3,8 +3,9 @@
+ //! reference generation (§8.3.3), reference list construction (§8.3.4) and
+ //! the DPB output/bumping process (§C.5.2).
+ 
+-use std::collections::VecDeque;
+-use std::sync::Arc;
++// VENDOR(uefi-player): core/alloc paths work in both std and no_std builds.
++use alloc::collections::VecDeque;
++use alloc::sync::Arc;
+ 
+ use crate::bits::BitReader;
+ use crate::ctu::{Ablate, CtxStore, ScalingFactors, SliceDecoder, SliceInputs};
+@@ -15,6 +16,8 @@ use crate::pic::PicState;
+ use crate::ps::{parse_pps, parse_sps, parse_vps, Pps, Sps, TileLayout, Vps, PROFILE_MAIN, PROFILE_MAIN10, PROFILE_MAIN_STILL};
+ use crate::sei::{self, PictureHash};
+ use crate::slice::{parse_slice_header, SliceHeader};
++// VENDOR(uefi-player): alloc prelude for the no_std build.
++use alloc::{format, vec, vec::Vec};
+ 
+ /// Reference marking of a DPB picture.
+ #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+@@ -103,13 +106,13 @@ pub struct Stats {
+ /// A pure-Rust HEVC decoder. Push NAL units (or Annex-B chunks) in, pull
+ /// [`Frame`]s out in output order.
+ /// Diagnostic: how often the picture pool actually supplies a buffer.
+-pub static POOL_HIT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+-pub static POOL_MISS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
++pub static POOL_HIT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
++pub static POOL_MISS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+ /// Why a buffer did or did not come back: reclaimed, still shared with the
+ /// output queue, or dropped because the pool was already full.
+-pub static RECL_OK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+-pub static RECL_SHARED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+-pub static RECL_FULL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
++pub static RECL_OK: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
++pub static RECL_SHARED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
++pub static RECL_FULL: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+ 
+ /// Scratch the in-loop filters reuse across every picture.
+ #[derive(Default)]
+@@ -216,7 +219,7 @@ impl Decoder {
+             sei_results: Vec::new(),
+             stats: Stats::default(),
+             headers_only: false,
+-            trace: std::env::var_os("RH265_TRACE").is_some(),
++            trace: crate::knob("RH265_TRACE"),
+         }
+     }
+ 
+@@ -582,8 +585,8 @@ impl Decoder {
+                     None
+                 }
+             });
+-            if std::env::var_os("RH265_POOL").is_some() {
+-                use std::sync::atomic::Ordering;
++            if crate::knob("RH265_POOL") {
++                use core::sync::atomic::Ordering;
+                 if recycled.is_some() { POOL_HIT.fetch_add(1, Ordering::Relaxed) } else { POOL_MISS.fetch_add(1, Ordering::Relaxed) };
+             }
+             match recycled {
+@@ -602,7 +605,7 @@ impl Decoder {
+         // Sequence-invariant tables: reuse unless the SPS or tiles changed.
+         if !self.seq_tables.as_ref().is_some_and(|t| t.matches(&sps, &tiles)) {
+             self.seq_tables = Some(crate::pic::SeqTables::build(&sps, &tiles));
+-        } else if std::env::var_os("RH265_SEQCHECK").is_some() {
++        } else if crate::knob("RH265_SEQCHECK") {
+             // Diagnostic: rebuild anyway and report any field the key missed.
+             let fresh = crate::pic::SeqTables::build(&sps, &tiles);
+             let t = self.seq_tables.as_ref().unwrap();
+@@ -706,12 +709,12 @@ impl Decoder {
+     /// Take back every parked buffer nobody else is holding any more.
+     fn sweep_parked(&mut self) {
+         const KEEP: usize = 6;
+-        let diag = std::env::var_os("RH265_POOL").is_some();
++        let diag = crate::knob("RH265_POOL");
+         let mut i = 0;
+         while i < self.pic_parked.len() {
+             if self.pic_pool.len() >= KEEP {
+                 if diag {
+-                    RECL_FULL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
++                    RECL_FULL.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                 }
+                 break;
+             }
+@@ -719,16 +722,16 @@ impl Decoder {
+             // `try_unwrap` hands it back in the `Err` arm, which is what lets a
+             // still-shared picture stay parked for the next sweep.
+             let a = self.pic_parked.swap_remove(i);
+-            match std::sync::Arc::try_unwrap(a) {
++            match alloc::sync::Arc::try_unwrap(a) {
+                 Ok(p) => {
+                     if diag {
+-                        RECL_OK.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
++                        RECL_OK.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                     }
+                     self.pic_pool.push(p);
+                 }
+                 Err(a) => {
+                     if diag {
+-                        RECL_SHARED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
++                        RECL_SHARED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                     }
+                     self.pic_parked.push(a);
+                     i += 1;
+diff --git a/crates/rusty_h265/src/error.rs b/crates/rusty_h265/src/error.rs
+index cf197db..f8b2e11 100644
+--- a/crates/rusty_h265/src/error.rs
++++ b/crates/rusty_h265/src/error.rs
+@@ -4,8 +4,13 @@
+ //! convention (the same contract as `rusty_vp9`): they drive the push/pull
+ //! loop and are not failures.
+ 
++// VENDOR(uefi-player): core::{result,fmt,error} + alloc::string work in both
++// std and no_std builds (`String` is the same type either way; `write!`
++// needs no extra import).
++use alloc::string::String;
++
+ /// Crate-wide result alias.
+-pub type Result<T> = std::result::Result<T, Error>;
++pub type Result<T> = core::result::Result<T, Error>;
+ 
+ /// Errors (and control-flow signals) produced by the decoder.
+ #[non_exhaustive]
+@@ -44,8 +49,8 @@ impl Error {
+     }
+ }
+ 
+-impl std::fmt::Display for Error {
+-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++impl core::fmt::Display for Error {
++    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+         match self {
+             Error::Unimplemented(what) => write!(f, "not yet implemented: {what}"),
+             Error::Eof => write!(f, "end of stream"),
+@@ -56,7 +61,7 @@ impl std::fmt::Display for Error {
+     }
+ }
+ 
+-impl std::error::Error for Error {}
++impl core::error::Error for Error {}
+ 
+ impl From<crate::bits::OutOfData> for Error {
+     fn from(_: crate::bits::OutOfData) -> Self {
+diff --git a/crates/rusty_h265/src/filters.rs b/crates/rusty_h265/src/filters.rs
+index b2f787c..c417aba 100644
+--- a/crates/rusty_h265/src/filters.rs
++++ b/crates/rusty_h265/src/filters.rs
+@@ -12,12 +12,14 @@ use crate::frame::Plane;
+ use crate::pic::{PicState, PRED_INTRA};
+ use crate::ps::{Pps, Sps};
+ use crate::tables::{BETA_TABLE, CHROMA_QP_420, TC_TABLE};
++// VENDOR(uefi-player): alloc prelude for the no_std build.
++use alloc::vec::Vec;
+ 
+ /// Runs deblocking then SAO on the finished picture.
+ pub fn apply_in_loop_filters(cur: &mut CurrentPicture, scratch: &mut crate::decoder::FilterScratch) {
+     // Bring-up switch: `RH265_NO_LF=1` skips both filters (compare against
+     // `ffmpeg -skip_loop_filter all`).
+-    if std::env::var_os("RH265_NO_LF").is_some() {
++    if crate::knob("RH265_NO_LF") {
+         return;
+     }
+     let sps = cur.sps.clone();
+@@ -40,7 +42,7 @@ pub fn apply_in_loop_filters(cur: &mut CurrentPicture, scratch: &mut crate::deco
+         deblock(&mut cur.pic.planes, &cur.state, &sps, &pps, bs_v, bs_h);
+     }
+     let any_sao = sps.sao_enabled && cur.state.ctb_filter.iter().any(|f| f.sao_luma || f.sao_chroma);
+-    if any_sao && std::env::var_os("RH265_NO_SAO").is_none() {
++    if any_sao && !crate::knob("RH265_NO_SAO") {
+         // Whether any coding unit in this picture forbids loop filtering
+         // (PCM with `pcm_loop_filter_disabled_flag`, or transquant bypass).
+         // Almost never true, and knowing it removes a lookup per sample.
+@@ -352,10 +354,17 @@ fn filter_chroma_edge(pl: &mut Plane, x: usize, y: usize, dir: usize, tc: i32, n
+ /// Bring-up switch: `RH265_SCALAR_SAO=1` keeps SAO on the scalar reference
+ /// loops. Both arms of the kernel A/B are then the SAME binary, which removes
+ /// the build-difference and stale-binary questions from the measurement.
++// VENDOR(uefi-player): std keeps the cached knob; no_std reads as unset (off).
++#[cfg(feature = "std")]
+ fn scalar_sao() -> bool {
+     static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+     *F.get_or_init(|| std::env::var_os("RH265_SCALAR_SAO").is_some())
+ }
++// VENDOR(uefi-player): no_std => knob reads as unset (shipped default: off).
++#[cfg(not(feature = "std"))]
++fn scalar_sao() -> bool {
++    false
++}
+ 
+ /// §8.7.3 sample adaptive offset over the deblocked picture.
+ ///
+@@ -373,9 +382,9 @@ fn scalar_sao() -> bool {
+ ///   edge of a coding tree block can have an unusable neighbour. The interior
+ ///   — which is all but `4·cs` of `cs²` samples — needs no check whatsoever.
+ /// Diagnostic: how much of each plane the narrowed SAO copy actually touches.
+-pub static SAO_COPIED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+-pub static SAO_PLANE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+-pub static SAO_SPANS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
++pub static SAO_COPIED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
++pub static SAO_PLANE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
++pub static SAO_SPANS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+ 
+ fn sao(planes: &mut [Plane; 3], st: &PicState, sps: &Sps, pps: &Pps, scratch: &mut Vec<u16>, has_bypass: bool) {
+     crate::prof_scope!(crate::prof::Stage::Sao);
+@@ -434,8 +443,8 @@ fn sao(planes: &mut [Plane; 3], st: &PicState, sps: &Sps, pps: &Pps, scratch: &m
+         {
+             crate::prof_scope!(crate::prof::Stage::SaoCopy);
+             let need = planes[c].data.len();
+-            if std::env::var_os("RH265_SAOBYTES").is_some() {
+-                SAO_PLANE.fetch_add(need as u64, std::sync::atomic::Ordering::Relaxed);
++            if crate::knob("RH265_SAOBYTES") {
++                SAO_PLANE.fetch_add(need as u64, core::sync::atomic::Ordering::Relaxed);
+             }
+             if scratch.len() < need {
+                 scratch.resize(need, 0);
+@@ -482,9 +491,9 @@ fn sao(planes: &mut [Plane; 3], st: &PicState, sps: &Sps, pps: &Pps, scratch: &m
+                         scratch[a..a + w].copy_from_slice(&planes[c].data[a..a + w]);
+                     }
+                 }
+-                if std::env::var_os("RH265_SAOBYTES").is_some() {
+-                    SAO_COPIED.fetch_add(((y1 - y0) * (hi - lo)) as u64, std::sync::atomic::Ordering::Relaxed);
+-                    SAO_SPANS.fetch_add(if lo == 0 && hi == pw && pstride == pw { 1 } else { (y1 - y0) as u64 }, std::sync::atomic::Ordering::Relaxed);
++                if crate::knob("RH265_SAOBYTES") {
++                    SAO_COPIED.fetch_add(((y1 - y0) * (hi - lo)) as u64, core::sync::atomic::Ordering::Relaxed);
++                    SAO_SPANS.fetch_add(if lo == 0 && hi == pw && pstride == pw { 1 } else { (y1 - y0) as u64 }, core::sync::atomic::Ordering::Relaxed);
+                 }
+             }
+         }
+diff --git a/crates/rusty_h265/src/frame.rs b/crates/rusty_h265/src/frame.rs
+index e699a9d..33ee944 100644
+--- a/crates/rusty_h265/src/frame.rs
++++ b/crates/rusty_h265/src/frame.rs
+@@ -2,9 +2,12 @@
+ //! samples for now (the 8-bit `u8` plane domain is a Phase 6 speed brick);
+ //! the output side hands out either width.
+ 
+-use std::sync::Arc;
++// VENDOR(uefi-player): alloc::sync::Arc is the same type in both builds.
++use alloc::sync::Arc;
+ 
+ use crate::pic::Motion;
++// VENDOR(uefi-player): alloc prelude for the no_std build.
++use alloc::{vec, vec::Vec};
+ 
+ /// One sample plane.
+ #[derive(Debug, Clone)]
+diff --git a/crates/rusty_h265/src/intra.rs b/crates/rusty_h265/src/intra.rs
+index 429f205..ce7e249 100644
+--- a/crates/rusty_h265/src/intra.rs
++++ b/crates/rusty_h265/src/intra.rs
+@@ -11,10 +11,18 @@ use crate::tables::{INTRA_PRED_ANGLE, INV_ANGLE};
+ /// Bring-up switch: `RH265_SCALAR_INTRA=1` keeps prediction on the scalar
+ /// reference loops, so the kernels can be A/B'd inside one binary. Cached, so
+ /// the per-block cost is a relaxed load.
++// VENDOR(uefi-player): std keeps the cached knob; no_std reads as unset
++// (shipped default: kernels on).
++#[cfg(feature = "std")]
+ fn use_kernels() -> bool {
+     static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+     !*F.get_or_init(|| std::env::var_os("RH265_SCALAR_INTRA").is_some())
+ }
++// VENDOR(uefi-player): no_std => knob reads as unset (shipped default: on).
++#[cfg(not(feature = "std"))]
++fn use_kernels() -> bool {
++    true
++}
+ 
+ pub const MODE_PLANAR: u8 = 0;
+ pub const MODE_DC: u8 = 1;
+diff --git a/crates/rusty_h265/src/itx.rs b/crates/rusty_h265/src/itx.rs
+index d5b64fe..e0be0a3 100644
+--- a/crates/rusty_h265/src/itx.rs
++++ b/crates/rusty_h265/src/itx.rs
+@@ -62,10 +62,17 @@ pub fn dequant(coeffs: &mut [i32], n: usize, nz_w: usize, nz_h: usize, qp: i32,
+ /// Bring-up switch: `RH265_NO_DC_FAST=1` sends DC-only blocks down the general
+ /// transform, so the collapse can be A/B'd inside one binary. Default OFF —
+ /// the fast path ships.
++// VENDOR(uefi-player): std keeps the cached knob; no_std reads as unset (off).
++#[cfg(feature = "std")]
+ fn no_dc_fast() -> bool {
+     static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+     *F.get_or_init(|| std::env::var_os("RH265_NO_DC_FAST").is_some())
+ }
++// VENDOR(uefi-player): no_std => knob reads as unset (shipped default: off).
++#[cfg(not(feature = "std"))]
++fn no_dc_fast() -> bool {
++    false
++}
+ 
+ /// Partial-sum core of the inverse DCT, by **partial butterfly**.
+ ///
+diff --git a/crates/rusty_h265/src/lib.rs b/crates/rusty_h265/src/lib.rs
+index 8b7654c..97710b5 100644
+--- a/crates/rusty_h265/src/lib.rs
++++ b/crates/rusty_h265/src/lib.rs
+@@ -24,6 +24,35 @@
+ //! ```
+ 
+ #![forbid(unsafe_code)]
++// VENDOR(uefi-player): no_std port (scalar). `std` (default on) preserves
++// upstream; without it this crate is `#![no_std]` + `alloc`.
++#![cfg_attr(not(feature = "std"), no_std)]
++// VENDOR(uefi-player): always in scope; `use alloc::…` below resolves in both
++// std and no_std builds (same pattern as upstream h264-common).
++extern crate alloc;
++
++/// Read an environment knob. Without `std` there is no environment, so this
++/// is always `false` — the shipped default, which is what a chip runs.
++#[cfg(feature = "std")]
++pub(crate) fn knob(name: &str) -> bool {
++    std::env::var_os(name).is_some()
++}
++/// Read an environment knob. Without `std` there is no environment, so this
++/// is always `false` — the shipped default, which is what a chip runs.
++#[cfg(not(feature = "std"))]
++pub(crate) fn knob(_name: &str) -> bool {
++    false
++}
++
++/// Diagnostic print. No-op without `std` (no stderr on the target); every
++/// call site is already gated on a knob/trace flag, so nothing production
++/// goes quiet that wasn't opt-in chatter.
++#[cfg(not(feature = "std"))]
++macro_rules! eprintln {
++    ($($t:tt)*) => {{
++        let _ = ::core::format_args!($($t)*);
++    }};
++}
+ 
+ mod error;
+ pub use error::{Error, Result};
+diff --git a/crates/rusty_h265/src/mcscratch.rs b/crates/rusty_h265/src/mcscratch.rs
+index 6a2d7de..b610d41 100644
+--- a/crates/rusty_h265/src/mcscratch.rs
++++ b/crates/rusty_h265/src/mcscratch.rs
+@@ -8,6 +8,8 @@
+ 
+ use crate::frame::Plane;
+ use crate::slice::WeightEntry;
++// VENDOR(uefi-player): alloc prelude for the no_std build.
++use alloc::{vec, vec::Vec};
+ 
+ /// Largest luma prediction block, and the filter margin around it.
+ const MAX_PB: usize = 64;
+diff --git a/crates/rusty_h265/src/nal.rs b/crates/rusty_h265/src/nal.rs
+index 3a81f33..3b29614 100644
+--- a/crates/rusty_h265/src/nal.rs
++++ b/crates/rusty_h265/src/nal.rs
+@@ -6,6 +6,9 @@
+ //! each emulation-prevention byte sat, because slice `entry_point_offset`s
+ //! count them (§7.4.7.1: the offsets address the NAL unit bytes, not the RBSP).
+ 
++// VENDOR(uefi-player): alloc prelude for the no_std build.
++use alloc::vec::Vec;
++
+ /// `nal_unit_type` (Table 7-1). Values 0..=63.
+ #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+ #[repr(u8)]
+diff --git a/crates/rusty_h265/src/pic.rs b/crates/rusty_h265/src/pic.rs
+index 1ef2dcf..409b4ac 100644
+--- a/crates/rusty_h265/src/pic.rs
++++ b/crates/rusty_h265/src/pic.rs
+@@ -2,7 +2,11 @@
+ //! the z-scan order table (§6.5.2), neighbour availability (§6.4.1), and the
+ //! per-block maps the syntax, intra prediction and loop filters read.
+ 
++// VENDOR(uefi-player): alloc::sync::Arc is the same type in both builds.
++use alloc::sync::Arc;
+ use crate::ps::{Sps, TileLayout};
++// VENDOR(uefi-player): alloc prelude for the no_std build.
++use alloc::{vec, vec::Vec};
+ 
+ /// `CuPredMode` per 4×4.
+ pub const PRED_NONE: u8 = 0;
+@@ -62,7 +66,7 @@ pub struct PicState {
+     /// so it is identical for every picture in a coded video sequence. Built
+     /// per picture it cost a nested loop over every 4x4 in the frame -- 57,600
+     /// of them at 720p, 600 times over for a 600-picture clip.
+-    pub zs: std::sync::Arc<[u32]>,
++    pub zs: Arc<[u32]>,
+ 
+     /// Per CTB (raster): `SliceAddrRs` of the slice containing it, or -1.
+     ///
+@@ -84,7 +88,7 @@ pub struct PicState {
+     /// previous picture -- see `Decoder::clear_uncovered`.
+     pub ctb_done: Vec<bool>,
+     /// Per CTB (raster): tile id. Shared for the same reason as [`zs`](Self::zs).
+-    pub tile_id: std::sync::Arc<[u32]>,
++    pub tile_id: Arc<[u32]>,
+     /// Per 4×4: `CuPredMode` (PRED_*).
+     pub pred_mode: Vec<u8>,
+     /// Per 4×4: luma intra prediction mode.
+@@ -133,8 +137,8 @@ pub struct AvailAt {
+ /// in the frame on the per-picture path: measured at 13.7% of decode for the
+ /// whole per-picture setup, of which this was the compute half.
+ pub struct SeqTables {
+-    pub zs: std::sync::Arc<[u32]>,
+-    pub tile_id: std::sync::Arc<[u32]>,
++    pub zs: Arc<[u32]>,
++    pub tile_id: Arc<[u32]>,
+     /// What these were built from, so a cache can tell when they are stale.
+     ///
+     /// BOTH tile vectors, not just `rs_to_ts`. Keying on `rs_to_ts` alone looks
+@@ -225,8 +229,8 @@ impl PicState {
+         self.width = sps.width as usize;
+         self.height = sps.height as usize;
+         self.log2_ctb = sps.log2_ctb_size as usize;
+-        self.zs = std::sync::Arc::clone(&t.zs);
+-        self.tile_id = std::sync::Arc::clone(&t.tile_id);
++        self.zs = Arc::clone(&t.zs);
++        self.tile_id = Arc::clone(&t.tile_id);
+         self.slice_addr.fill(-1);
+         self.ctb_slice.fill(0);
+         self.ctb_done.fill(false);
+@@ -272,7 +276,7 @@ impl PicState {
+         let ctb_h = sps.pic_height_in_ctbs as usize;
+         let n4 = w4 * h4;
+         let nctb = ctb_w * ctb_h;
+-        let (zs, tile_id) = (std::sync::Arc::clone(&t.zs), std::sync::Arc::clone(&t.tile_id));
++        let (zs, tile_id) = (Arc::clone(&t.zs), Arc::clone(&t.tile_id));
+         PicState {
+             width,
+             height,
+diff --git a/crates/rusty_h265/src/ps.rs b/crates/rusty_h265/src/ps.rs
+index 290ccb3..522cd0b 100644
+--- a/crates/rusty_h265/src/ps.rs
++++ b/crates/rusty_h265/src/ps.rs
+@@ -8,6 +8,8 @@
+ 
+ use crate::bits::BitReader;
+ use crate::error::{Error, Result};
++// VENDOR(uefi-player): alloc prelude for the no_std build.
++use alloc::{vec, vec::Vec};
+ 
+ /// `general_profile_idc` values we know by name (Annex A).
+ pub const PROFILE_MAIN: u8 = 1;
+@@ -996,7 +998,7 @@ mod tests {
+         let bits = "1".to_string() + "1" + "1" + "1111";
+         let bytes = bits_to_bytes(&bits);
+         let mut r = BitReader::new(&bytes);
+-        let s1 = parse_st_ref_pic_set(&mut r, 1, std::slice::from_ref(&s0), false).unwrap();
++        let s1 = parse_st_ref_pic_set(&mut r, 1, core::slice::from_ref(&s0), false).unwrap();
+         // pos j=0: 1-1=0 -> dropped; deltaRps<0 -> -1; neg: -2, -4
+         assert_eq!(s1.neg, vec![(-1, true), (-2, true), (-4, true)]);
+         assert_eq!(s1.pos, Vec::<(i32, bool)>::new());
+diff --git a/crates/rusty_h265/src/sei.rs b/crates/rusty_h265/src/sei.rs
+index efd4fc7..4b47686 100644
+--- a/crates/rusty_h265/src/sei.rs
++++ b/crates/rusty_h265/src/sei.rs
+@@ -3,6 +3,8 @@
+ 
+ use crate::frame::Picture;
+ use crate::md5::Md5;
++// VENDOR(uefi-player): alloc prelude for the no_std build.
++use alloc::vec::Vec;
+ 
+ /// A decoded picture hash from a suffix SEI, one entry per colour plane.
+ #[derive(Debug, Clone, PartialEq, Eq)]
+diff --git a/crates/rusty_h265/src/slice.rs b/crates/rusty_h265/src/slice.rs
+index 18ded55..5052d1d 100644
+--- a/crates/rusty_h265/src/slice.rs
++++ b/crates/rusty_h265/src/slice.rs
+@@ -5,6 +5,8 @@ use crate::bits::BitReader;
+ use crate::error::{Error, Result};
+ use crate::nal::NalHeader;
+ use crate::ps::{parse_st_ref_pic_set, Pps, ShortTermRps, Sps};
++// VENDOR(uefi-player): alloc prelude for the no_std build.
++use alloc::{format, vec, vec::Vec};
+ 
+ #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+ pub enum SliceType {

@@ -402,6 +402,10 @@ pub(crate) const fn default_buffers() -> u32 {
     0
 }
 
+pub(crate) const fn default_window() -> u32 {
+    4
+}
+
 pub(crate) const fn default_vsync_fps() -> u32 {
     60
 }
@@ -425,6 +429,12 @@ pub struct RenderTune {
     /// 分配失败自动退回直写（只记 warning，不断播）。
     #[serde(default = "default_buffers")]
     pub buffers: u32,
+    /// 流式供片窗口（`[play] feed = "stream"` 的解码帧缓存数，1-32，默认 4）：
+    /// 边播边解，游标之后淘汰。其余 feed 档不用它（clip 全预解码 /
+    /// staged 单步三段 / zero_copy 单复用缓冲）。显式旋钮（`buffers` 同口径，
+    /// 不进矩阵 bench）；缺键老文件按 4 照读。
+    #[serde(default = "default_window")]
+    pub window: u32,
 }
 
 impl Default for RenderTune {
@@ -434,6 +444,7 @@ impl Default for RenderTune {
             tile_rows: default_tile_rows(),
             vsync_fps: default_vsync_fps(),
             buffers: default_buffers(),
+            window: default_window(),
         }
     }
 }
@@ -755,11 +766,59 @@ pub fn parse_fps(s: &str) -> FpsPolicy {
     }
 }
 
+/// 供片模式（`[play] feed`，只管 `Clip` 拿帧的方式，不管上传路）：
+/// - `Clip`（默认）：全量预解码（现行行为，老文件缺键照读，零行为变化）；
+/// - `Staged`：qois 走显式三段（QOI→Raw→Blt，`buffer.rs` 三缓冲复用）逐帧解码，
+///   其余七格式在结构上等价于 `clip`（软解码 planar→BGRA 固有分段，见 `docs/player.md`）；
+/// - `Stream`：`tune.window` 窗口边播边解，游标之后淘汰（`rewind` 重建解码器状态重播）；
+/// - `ZeroCopy`：单复用帧缓冲逐显示帧即时解码（调用方须立即上传，
+///   `blt/direct_loop` 与 `nano_pump` 满足此借用契约）。
+/// 上传路（blt/direct/mp/nano/dynamic）零改：只消费 `next_frame`/`rewind`/`len`/`frame`。
+/// 非法值整个文件回默认 + 警告（与其它枚举档位同规则，不单独兜底）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum FeedMode {
+    #[default]
+    Clip,
+    Staged,
+    Stream,
+    ZeroCopy,
+}
+
+impl FeedMode {
+    pub(crate) const fn as_u8(self) -> u8 {
+        match self {
+            Self::Clip => 0,
+            Self::Staged => 1,
+            Self::Stream => 2,
+            Self::ZeroCopy => 3,
+        }
+    }
+
+    pub(crate) fn from_u8(v: u8) -> Self {
+        match v {
+            1 => Self::Staged,
+            2 => Self::Stream,
+            3 => Self::ZeroCopy,
+            _ => Self::Clip,
+        }
+    }
+
+    /// 配置文件拼写（serde snake_case 同形，供串口 `video: feed=` 行，
+    /// 矩阵断言小写不断言画质）。
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Clip => "clip",
+            Self::Staged => "staged",
+            Self::Stream => "stream",
+            Self::ZeroCopy => "zero_copy",
+        }
+    }
+}
+
 /// `[play]`：`fps` 是字符串（三态没法用纯数字表达），`measured_max_fps`
-/// 只由固件实测回写（0 = 未测），GUI 只读展示。`format` 切片源：
-/// `qois`（默认，`1080p/video.qois`）/ `raw`（`1080p/frameNNNN.raw` 序列）
-/// / `hevc`（`1080p/video.hevc`，Annex-B 软解）/ `vp9`（`1080p/video.ivf` 软解）
-/// / `h263`/`mpeg2v`/`theora`（格式可选、解码后继，选中即明确报错）。
+/// 只由固件实测回写（0 = 未测），GUI 只读展示。`format` 切片源（八格式全通，
+/// 容器优先裸流回退，见 `video::load_video_clip`）。
 /// `pipeline` 切播放实现（默认 `clip`，老文件缺键照读；非 `clip` 只读 qois）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -774,6 +833,9 @@ pub struct PlayConfig {
     /// 播放管线（默认 clip，老文件照读）。
     #[serde(default)]
     pub pipeline: PlayPipeline,
+    /// 供片模式（默认 clip，老文件缺键照读；只切 `Clip` 内部拿帧方式）。
+    #[serde(default)]
+    pub feed: FeedMode,
 }
 
 impl Default for PlayConfig {
@@ -783,6 +845,7 @@ impl Default for PlayConfig {
             measured_max_fps: 0,
             format: MediaFormat::Qois,
             pipeline: PlayPipeline::Clip,
+            feed: FeedMode::Clip,
         }
     }
 }

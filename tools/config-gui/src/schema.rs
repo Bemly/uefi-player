@@ -282,6 +282,10 @@ pub(crate) fn default_vsync_fps() -> u32 {
     60
 }
 
+pub(crate) fn default_window() -> u32 {
+    4
+}
+
 pub(crate) fn default_buffers() -> u32 {
     0
 }
@@ -322,6 +326,9 @@ impl Default for AccelConfig {
 /// `[render.tune]`：矩阵全部数字旋钮（无 auto 维度，改完存盘即生效）。
 /// `buffers` 是显式后缓冲开关（0 = 直写，1-16 = 影子环 + 整推），不进矩阵 bench，
 /// 但改它照样清记忆重测（出屏路径变了，旧结论作废）。
+/// `window` 是流式供片窗口（1-32，默认 4；只对 `stream` 生效，
+/// `clip` 全预解码、`staged` 单步三段与 `zero_copy` 单缓冲都恒窗口 1，
+/// 忽略本项；与固件 `FeedMode` 同构，见 `docs/player.md` 供片节）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub(crate) struct RenderTune {
@@ -333,6 +340,8 @@ pub(crate) struct RenderTune {
     pub(crate) vsync_fps: u32,
     #[serde(default = "default_buffers")]
     pub(crate) buffers: u32,
+    #[serde(default = "default_window")]
+    pub(crate) window: u32,
 }
 
 impl Default for RenderTune {
@@ -342,6 +351,7 @@ impl Default for RenderTune {
             tile_rows: default_tile_rows(),
             vsync_fps: default_vsync_fps(),
             buffers: default_buffers(),
+            window: default_window(),
         }
     }
 }
@@ -462,12 +472,45 @@ impl PlayPipeline {
     }
 }
 
+/// `[play] feed`：解码供片模式（与固件 `FeedMode` 同构；`file_str` 即落盘串）。
+/// `Clip` = 开机全预解码现路（默认）；`Staged` = 显式三段（解码/搬运/上屏分开）；
+/// `Stream` = 窗口边播边解（窗口大小见 `[render.tune] window`）；
+/// `ZeroCopy` = 单缓冲即时解码（无二级缓存）。
+/// 多核（`mp_draw`）/动态调度/壁纸恒为 `clip`（供不上时警告回落，见 hint 文案）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum FeedMode {
+    #[default]
+    Clip,
+    Staged,
+    Stream,
+    ZeroCopy,
+}
+
+impl FeedMode {
+    pub(crate) const ALL: [Self; 4] = [Self::Clip, Self::Staged, Self::Stream, Self::ZeroCopy];
+    pub(crate) fn file_str(self) -> &'static str {
+        match self {
+            Self::Clip => "clip",
+            Self::Staged => "staged",
+            Self::Stream => "stream",
+            Self::ZeroCopy => "zero_copy",
+        }
+    }
+    /// 滑杆档位 0-3（`ALL` 的下标，`Clip=0`）。
+    pub(crate) fn index(self) -> usize {
+        Self::ALL.iter().position(|&v| v == self).unwrap_or(0)
+    }
+}
+
 /// `[play]`：`fps` 是字符串（三态没法用纯数字表达），`measured_max_fps`
 /// 只由固件实测回写（0 = 未测），这里只读展示 + 重测清零。
 /// `format` 切片源：qois 读 `1080p/video.qois`，raw 读 `1080p/frameNNNN.raw`，
 /// hevc 读 `1080p/video.hevc`（Annex-B 软解），vp9 读 `1080p/video.ivf`（软解），
 /// h263/mpeg2v/theora 格式可选、解码后继（固件明确报错，不断解析）。
 /// `pipeline` 切播放实现：clip 是预解码现路（默认），其余 7 档是老实现循环。
+/// `feed` 切解码供片：clip 全预解码（默认，老文件缺键照读）；
+/// staged/stream/zero_copy 只供 qois（mp/dynamic/壁纸恒 clip）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub(crate) struct PlayConfig {
@@ -479,6 +522,8 @@ pub(crate) struct PlayConfig {
     pub(crate) format: MediaFormat,
     #[serde(default)]
     pub(crate) pipeline: PlayPipeline,
+    #[serde(default)]
+    pub(crate) feed: FeedMode,
 }
 
 /// `[boot]`：多卷自动发现开关（与固件 `BootConfig` 同构；全 `true` = 默认全开）。
@@ -601,7 +646,10 @@ where
 #[serde(default)]
 pub(crate) struct WallpaperConfig {
     pub(crate) enable: bool,
-    #[serde(default = "default_wallpaper_fps", deserialize_with = "de_wallpaper_fps")]
+    #[serde(
+        default = "default_wallpaper_fps",
+        deserialize_with = "de_wallpaper_fps"
+    )]
     pub(crate) fps: String,
     #[serde(default)]
     pub(crate) frames: u32,
@@ -637,6 +685,7 @@ impl Default for PlayConfig {
             measured_max_fps: 0,
             format: MediaFormat::Qois,
             pipeline: PlayPipeline::Clip,
+            feed: FeedMode::Clip,
         }
     }
 }
@@ -692,12 +741,14 @@ mod schema_tests {
         cfg.render.tune.tile_rows = 32;
         cfg.render.tune.vsync_fps = 90;
         cfg.render.tune.buffers = 5;
+        cfg.render.tune.window = 7;
         let text = toml::to_string(&cfg).unwrap();
         let back: FileConfig = toml::from_str(&text).unwrap();
         assert_eq!(back.render.tune.frames, 45);
         assert_eq!(back.render.tune.tile_rows, 32);
         assert_eq!(back.render.tune.vsync_fps, 90);
         assert_eq!(back.render.tune.buffers, 5);
+        assert_eq!(back.render.tune.window, 7);
     }
 
     #[test]
@@ -709,6 +760,7 @@ mod schema_tests {
         assert_eq!(cfg.render.tune.tile_rows, default_tile_rows());
         assert_eq!(cfg.render.tune.vsync_fps, default_vsync_fps());
         assert_eq!(cfg.render.tune.buffers, default_buffers());
+        assert_eq!(cfg.render.tune.window, default_window());
     }
 
     #[test]

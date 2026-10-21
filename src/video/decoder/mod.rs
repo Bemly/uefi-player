@@ -6,10 +6,11 @@ use uefi::proto::media::file::{File, FileInfo, RegularFile};
 
 use super::demux::Mp4VideoKind;
 
-pub(super) mod eager;
-pub(super) mod lazy;
+mod eager;
+mod lazy;
+mod source;
 
-pub(super) use lazy::LazyState;
+use lazy::LazyState;
 
 /// 整文件进内存的流式帧源（旧 `staged`/`zero_copy` 管线用：`Clip` 预解码之前的形态，
 /// 内存换时间——文件全驻留，逐帧只解码不重复读盘）。
@@ -140,7 +141,7 @@ impl Clip {
 
     /// 整文件读入后解码（`video.qois` / `wall.qois`）。
     pub fn from_qois_file(file: RegularFile, tag: &str) -> crate::error::Result<Self> {
-        let buf = read_whole_file(file, tag)?;
+        let buf = Self::read_whole_file(file, tag)?;
         Self::from_qois_bytes(&buf, tag)
     }
 
@@ -154,7 +155,7 @@ impl Clip {
 
     /// 整文件读入后解码（`video.hevc`，Annex-B 带内 VPS/SPS/PPS）。
     pub fn from_hevc_file(file: RegularFile, tag: &str) -> crate::error::Result<Self> {
-        let buf = read_whole_file(file, tag)?;
+        let buf = Self::read_whole_file(file, tag)?;
         Self::from_hevc_bytes(&buf, tag)
     }
 
@@ -168,7 +169,7 @@ impl Clip {
 
     /// 整文件读入后解码（`video.ivf`，32 字节头 + 12 字节帧头 + 负载）。
     pub fn from_vp9_file(file: RegularFile, tag: &str) -> crate::error::Result<Self> {
-        let buf = read_whole_file(file, tag)?;
+        let buf = Self::read_whole_file(file, tag)?;
         Self::from_vp9_bytes(&buf, tag)
     }
 
@@ -180,13 +181,15 @@ impl Clip {
         want: Mp4VideoKind,
         tag: &str,
     ) -> crate::error::Result<Self> {
-        let buf = read_whole_file(file, tag)?;
+        let buf = Self::read_whole_file(file, tag)?;
         let track = super::demux::demux_mp4_track(&buf, want, tag)?;
         let _ = buf;
-        if let Some(mode) = lazy::feed_for(tag, false) {
-            return lazy::mp4_track(track, want, tag, mode);
+        // 拆包共用，分派走各字节流包装（供片裁决在内，见 `feed_for`）。
+        match want {
+            Mp4VideoKind::Avc => Self::from_avc_bytes(&track.annexb, tag),
+            Mp4VideoKind::Hevc => Self::from_hevc_bytes(&track.annexb, tag),
+            Mp4VideoKind::Vp9 => Self::from_vp9_raw_frames(&track.raw_frames, tag),
         }
-        eager::from_mp4_track(track, want, tag)
     }
 
     /// vp9 裸帧序列解码（MP4 `Vp09` 轨用）。
@@ -215,7 +218,7 @@ impl Clip {
 
     /// 整文件读入后解码（`video.h263`，裸流）。
     pub fn from_h263_file(file: RegularFile, tag: &str) -> crate::error::Result<Self> {
-        let buf = read_whole_file(file, tag)?;
+        let buf = Self::read_whole_file(file, tag)?;
         Self::from_h263_bytes(&buf, tag)
     }
 
@@ -229,7 +232,7 @@ impl Clip {
 
     /// 整文件读入后解码（`video.m2v`，裸基本流）。
     pub fn from_mpeg2v_file(file: RegularFile, tag: &str) -> crate::error::Result<Self> {
-        let buf = read_whole_file(file, tag)?;
+        let buf = Self::read_whole_file(file, tag)?;
         Self::from_mpeg2v_bytes(&buf, tag)
     }
 
@@ -243,7 +246,7 @@ impl Clip {
 
     /// 整文件读入后解码（`video.ogv`，OggS 封装的 theora 磁盘原格式）。
     pub fn from_theora_file(file: RegularFile, tag: &str) -> crate::error::Result<Self> {
-        let buf = read_whole_file(file, tag)?;
+        let buf = Self::read_whole_file(file, tag)?;
         let packets = super::demux::demux_ogg_packets(&buf, tag)?;
         let _ = buf;
         Self::from_theora_packets(&packets, tag)
@@ -342,8 +345,13 @@ impl Clip {
     /// r = y + (359*v >> 8)；g = y - ((88*u + 183*v) >> 8)；
     /// b = y + (454*u >> 8)，u/v 以 128 为中心。
     /// 奇数几何按 `(w+1)/2` 取色度步进并钳位索引（半帧不上屏由调用方保证）。
-    pub(crate) fn yuv420_to_bgra(y: &[u8], u: &[u8], v: &[u8], w: usize, h: usize) -> Vec<BltPixel> {
-        let uv_stride = w.div_ceil(2).max(1);
+    pub(crate) fn yuv420_to_bgra(
+        y: &[u8],
+        u: &[u8],
+        v: &[u8],
+        w: usize,
+        h: usize,
+    ) -> Vec<BltPixel> {
         let mut out = Vec::new();
         if out.try_reserve_exact(w.saturating_mul(h)).is_err() {
             return out;
@@ -366,7 +374,6 @@ impl Clip {
         w: usize,
         h: usize,
     ) -> Vec<BltPixel> {
-        let uv_stride = w.div_ceil(2).max(1);
         let mut out = Vec::new();
         if out.try_reserve_exact(w.saturating_mul(h)).is_err() {
             return out;
@@ -406,7 +413,7 @@ impl Clip {
 
 /// YUV420 → BGRA 复用写（`out` 长度须为 `w*h`，调用方保证；`vflip` 为 theora 行序）。
 /// 与 `Clip::yuv420_to_bgra` 同式，供懒 zero_copy 原地复用（零分配稳态）。
-fn yuv420_to_bgra_into(
+pub(crate) fn yuv420_to_bgra_into(
     y: &[u8],
     u: &[u8],
     v: &[u8],

@@ -12,3 +12,6 @@ tools/**/target/
 third_party/**/target/
 # QEMU 黑盒矩阵运行产物（串口日志/镜像，按 case 即用即建，不入库）
 tools/qemu-matrix/runs/
+# usb_reports 只收真机 TXT 报告（FWINFO*/HWBENCH*），二进制片源与 EFI 不入库
+usb_reports/*
+!usb_reports/*.TXT

@@ -36,6 +36,9 @@ pub(crate) struct App {
     /// 播放帧率滑杆镜像：0 = auto，1-240 = 限速，241 = max。
     /// `GlassSlider` 只要 `f32`，每帧写回 `cfg.play.fps`。
     pub(crate) play_f: f32,
+    /// 供片模式滑杆镜像：0-3 对应 `FeedMode::ALL` 下标（`sync_widgets` 随读盘同步，
+    /// 否则开档文件载入后滑杆仍停在旧位，下一帧会把已载入的档位盖掉）。
+    pub(crate) feed_f: f32,
     /// 加速档位滑杆镜像：0-30 对应 `AccelLevel::ALL` 下标（`sync_widgets` 随读盘同步，
     /// 否则开档文件载入后滑杆仍停在旧位，下一帧会把已载入的档位盖掉）。
     pub(crate) accel_f: f32,
@@ -110,6 +113,7 @@ impl App {
             status: t!("status.ready").into_owned(),
             page: Page::File,
             play_f: 0.0,
+            feed_f: FeedMode::Clip.index() as f32,
             accel_f: AccelLevel::Auto.index() as f32,
             wp_fps_f: 15.0,
             wp_frames_f: 0.0,
@@ -135,6 +139,7 @@ impl App {
 
     pub(crate) fn sync_widgets(&mut self) {
         self.accel_f = self.cfg.accel.level.index() as f32;
+        self.feed_f = self.cfg.play.feed.index() as f32;
         self.play_f = match parse_fps(&self.cfg.play.fps) {
             FpsPolicy::Auto => 0.0,
             FpsPolicy::Max => 241.0,

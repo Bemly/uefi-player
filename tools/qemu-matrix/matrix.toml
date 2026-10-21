@@ -805,6 +805,162 @@ keys = [
 expect = ["play: path=legacy_u64_loop"]
 soak_sec = 15
 
+# 供片模式（`[play] feed` 四档，只切 `Clip` 内部拿帧方式，上传路零改）：
+# clip 全预解码现路 / staged qois 显式三段 / stream 窗口边播边解 /
+# zero_copy 单缓冲即时解码。断言串口 `video: feed=` + 上传路 path 行 + soak 保活。
+# qois 四档 × stream hevc 代表格式（hevc 其余供片在结构上等价 clip，
+# 见固件 `FeedMode` 注释；全组合不铺，避 4×8 膨胀）。
+# 上传路沿用 direct 单核整轮（供片不管上传，path 行与 video-raw 同形）。
+[[case]]
+name = "video-feed-clip"
+covers = ["src/video/decoder.rs", "src/video.rs", "usb_reports/1080p/video.qois"]
+timeout_sec = 180
+needs_video = true
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+workers = "bsp_only"
+dist = "static"
+vsync = "off"
+[play]
+fps = "max"
+feed = "clip"
+[wallpaper]
+enable = false
+"""
+boot_expect = ["cfg: version=1", "play.feed=Clip", "idle: ready"]
+keys = [
+  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
+  { send = "p", wait_after = 3 },
+  { send = "0", wait_for = ["menu: ready"], wait_after = 5 },
+]
+expect = ["video: feed=clip", "play: path=direct_loop"]
+soak_sec = 15
+
+[[case]]
+name = "video-feed-staged"
+covers = ["src/video/decoder.rs", "src/video.rs", "usb_reports/1080p/video.qois"]
+timeout_sec = 180
+needs_video = true
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+workers = "bsp_only"
+dist = "static"
+vsync = "off"
+[play]
+fps = "max"
+feed = "staged"
+[wallpaper]
+enable = false
+"""
+boot_expect = ["cfg: version=1", "play.feed=Staged", "idle: ready"]
+keys = [
+  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
+  { send = "p", wait_after = 3 },
+  { send = "0", wait_for = ["menu: ready"], wait_after = 5 },
+]
+expect = ["video: feed=staged", "play: path=direct_loop"]
+soak_sec = 15
+
+[[case]]
+name = "video-feed-stream"
+covers = ["src/video/decoder.rs", "src/video.rs", "usb_reports/1080p/video.qois"]
+timeout_sec = 180
+needs_video = true
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+workers = "bsp_only"
+dist = "static"
+vsync = "off"
+tune = { window = 4 }
+[play]
+fps = "max"
+feed = "stream"
+[wallpaper]
+enable = false
+"""
+boot_expect = ["cfg: version=1", "play.feed=Stream", "idle: ready"]
+keys = [
+  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
+  { send = "p", wait_after = 3 },
+  { send = "0", wait_for = ["menu: ready"], wait_after = 5 },
+]
+expect = ["video: feed=stream", "play: path=direct_loop"]
+soak_sec = 15
+
+[[case]]
+name = "video-feed-zero-copy"
+covers = ["src/video/decoder.rs", "src/video.rs", "usb_reports/1080p/video.qois"]
+timeout_sec = 180
+needs_video = true
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+workers = "bsp_only"
+dist = "static"
+vsync = "off"
+[play]
+fps = "max"
+feed = "zero_copy"
+[wallpaper]
+enable = false
+"""
+boot_expect = ["cfg: version=1", "play.feed=ZeroCopy", "idle: ready"]
+keys = [
+  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
+  { send = "p", wait_after = 3 },
+  { send = "0", wait_for = ["menu: ready"], wait_after = 5 },
+]
+expect = ["video: feed=zero_copy", "play: path=direct_loop"]
+soak_sec = 15
+
+# stream × hevc 代表格式：Annex-B 样片窗口边播边解进 Clip
+#（`video: fmt=Hevc` 分发不断 + `video: feed=stream` 供片不断）。
+[[case]]
+name = "video-feed-stream-hevc"
+covers = ["src/video/decoder.rs", "src/video.rs", "src/diag/data/hevc_probe_main.265"]
+timeout_sec = 180
+needs_hevcvideo = true
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+workers = "bsp_only"
+dist = "static"
+vsync = "off"
+tune = { window = 4 }
+[play]
+fps = "max"
+format = "hevc"
+feed = "stream"
+[wallpaper]
+enable = false
+"""
+boot_expect = ["cfg: version=1", "play.fmt=Hevc", "play.feed=Stream", "idle: ready"]
+keys = [
+  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
+  { send = "p", wait_after = 3 },
+  { send = "0", wait_for = ["menu: ready"], wait_after = 5 },
+]
+expect = ["video: feed=stream", "play: path=direct_loop", "video: fmt=Hevc"]
+soak_sec = 10
+
 # 诊断键：弹窗 → p 进纯播放器 → 1/4/7 各出数，q 回壁纸（pause_return 吞键）。
 [[case]]
 name = "diag-keys"

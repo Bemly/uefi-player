@@ -41,6 +41,8 @@ frames    = 30          # 每次矩阵/微基准的帧数（>=1，GUI 1-120）
 tile_rows = 64          # tile 高（行），MP 自调度切块粒度（8-512）
 vsync_fps = 60          # vsync 预算帧率：static 的封顶 + auto 探测达标线（15-240）
 buffers   = 0           # 后缓冲帧数（0-16；0 = 直写前台，>0 = 影子环 + 整推；Blt 单发路不用）
+window    = 4           # 流式供片窗口（`[play] feed = "stream"` 的解码帧缓存数，1-32；
+                        # 只对 stream 生效，其余供片忽略；缺键老文件按 4 照读）
 
 [play]
 fps = "auto"            # auto | max | 1..240
@@ -56,6 +58,11 @@ pipeline = "clip"       # 播放管线：clip（预解码现路，默认）| sta
                         # | zero_copy（流式零拷贝）| stream（真文件流式）| single（单帧反复）
                         # | legacy_blt / legacy_direct / legacy_u64（Clip + 老上传循环）
                         # 非 clip 只读 qois（raw 时 warn 回落 clip）；老路无 OSD/多核/影子。
+feed = "clip"           # 供片模式：clip（开机全量预解码，默认）| staged（qois 显式三段，
+                        # 其余七格式结构等价 clip）| stream（window 窗口边播边解，
+                        # 游标之后淘汰）| zero_copy（单复用缓冲即时解码）；
+                        # 只切 Clip 内部拿帧方式，不管上传路（blt/direct/mp/nano/dynamic 零改）；
+                        # 多核（mp_draw）/动态调度/壁纸恒 clip；旧文件缺键按 clip 照读
 measured_max_fps = 0    # 固件实测回写（0 = 未测）；GUI 只读展示
 
 [schedule]
@@ -136,6 +143,15 @@ executor = "all"        # 诊断项 a 跑哪条执行器线：all（默认，都
   `stream`（真文件流式边读边解 + 限速不限丢）/
   `single`（每帧重读文件 + 单帧解码，仅对照）/
   `legacy_blt`/`legacy_direct`/`legacy_u64`（Clip 预解码 + 老上传循环）。
+  缺键老文件按 `clip` 照读，现路行为不变。
+- `[play] feed=clip`（默认）：开机全量预解码现路（零行为变化）。
+  `staged`：qois 显式三段逐帧解码（其余七格式软解码 planar→BGRA 固有分段，
+  结构等价 clip）；`stream`：`tune.window`（1-32，默认 4）窗口边播边解，
+  游标之后淘汰（`rewind` 重建解码器状态重播）；`zero_copy`：单复用帧缓冲
+  逐显示帧即时解码（调用方须立即上传，`blt`/`direct_loop` 与 `nano_pump`
+  满足借用契约）。只切 `Clip` 内部拿帧方式，不管上传路
+  （blt/direct/mp/nano/dynamic 零改，只消费 `next_frame`/`rewind`/`len`/`frame`）。
+  多核（`mp_draw`）/动态调度/壁纸恒 `clip`（壁纸随机访问循环，按 tag 裁决）。
   缺键老文件按 `clip` 照读，现路行为不变。
 - `async.executor`：只决定诊断项 `a` 跑 `nano`/`dynamic` 哪条线（`all` 都跑）；
   缺表缺键按 `all` 照读；生产调度不受影响。

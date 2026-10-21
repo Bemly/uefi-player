@@ -24,8 +24,9 @@ x86 引导加载器（基于 sprout 扩展）+ SIMD 加速矩阵 + UEFI 播放�
   本仓交互层保持自己的（`player.toml` + config-gui + 我们的菜单），
   sprout 只当"上游实现参考"读（读它学思路，同 chainload 惯例），
   需要上游能力先看 5 个 lib 有没有，没有才在 `src/` 自研。
-- 其余 6 家 vendor（`filmcraft-mpeg2v/h263-rs/oxideav-theora/rusty_h264-accel/rusty_h265(+accel)/vp9dec`）
-  2026-10-21 起冻结，不跟上游新版（用户拍板）：pin = 冻结树 + 各 `VENDOR.md` 版本记录，不转 submodule+patch。
+- 其余 6 家（`filmcraft/h263-rs/oxideav-theora/rusty_h264(+accel)/rusty_h265(+accel)/vp9dec`）
+  2026-10-21 起同样 submodule + patch pin（用户拍板），冻结不跟上游新版：
+  pin = submodule gitlink + `patches/*.patch`（功能 delta）+ `patches/*.VENDOR.md`（移植说明）。
 - macOS 原生引导不做（要 bless/APFS，超出 UEFI 范围；sprout 也没有），
   只做 OpenCore 链式接力（`\EFI\OC\OpenCore.efi` 存在即链，`[boot] macos` 开关；
   不扫通用 `BOOTX64.EFI`，那可能是我们自己）。
@@ -37,11 +38,13 @@ x86 引导加载器（基于 sprout 扩展）+ SIMD 加速矩阵 + UEFI 播放�
 - `src/`：UEFI 固件侧，`no_std`，`main/menu/graphics/video/fs/config/error` + `diag/*`。
   已有 `src/boot/`（sprout 扩展的引导项，薄适配直调）；不要动 `third_party/`
  （除 `patches/` 叠加后 apply）。
-- `third_party/sprout`：pin 在当前 commit，只依赖
-  `edera-sprout-config/eficore/bls/parsing/boot`（`boot` 上游是纯 bin，
-  无 lib target，path 依赖会被 cargo 静默忽略；本仓用 `patches/` 叠 `[lib]`
-  后直调，新 clone 跑一次 `git -C third_party/sprout apply ../../patches/sprout-boot-lib.patch`）。
-  需要上游能力先看这 5 个 crate 有没有，没有才在 `src/` 自研。
+- `third_party/` 下 7 个 submodule 全部 pin 死不 fork，只叠 `patches/` 用：
+  `sprout`（`edera-sprout-config/eficore/bls/parsing/boot`；`boot` 上游是纯 bin，
+  无 lib target，path 依赖会被 cargo 静默忽略；用 `patches/` 叠 `[lib]` 后直调）+
+  `oxideav-theora/vp9dec/rusty_h265/rusty_h264/filmcraft/h263-rs`
+ （各家 no_std 移植，`patches/*.patch` 即功能 delta）。
+  新 clone 跑一次 `git submodule update --init` + `patches/README.md` 里的 apply 全套。
+  需要上游能力先看 sprout 5 个 lib 有没有，没有才在 `src/` 自研。
 - `tools/config-gui`：host 侧独立 crate（`std`），跨平台 `player.toml` 编辑器。
   与 UEFI 主包零依赖关系，见下文“双构建”。
 - `docs/`：给人看的设计文档；`usb_reports/`：真机报告样本。

@@ -1,0 +1,968 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index 8ece8e6..14c47c6 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -2,6 +2,9 @@
+ name = "vp9dec"
+ version = "0.1.1"
+ edition = "2021"
++# NOTE(uefi-player vendor): 上游未声明 MSRV；本仓按仓线 1.92 声明
++#（实际用到的最高语言/库特性约 OnceLock 1.70，见 VENDOR.md）。
++rust-version = "1.92"
+ description = "A from-scratch, clean-room VP9 video decoder (Rust, zero dependency crates)"
+ license = "MIT"
+ repository = "https://github.com/ChanyaVRC/vp9dec"
+@@ -9,85 +12,31 @@ documentation = "https://docs.rs/vp9dec"
+ readme = "README.md"
+ keywords = ["vp9", "video", "codec", "decoder", "webm"]
+ categories = ["multimedia::video", "multimedia::encoding"]
+-exclude = [".claude", "CLAUDE.md"]
+-
+-[dependencies]
+-
+-[dev-dependencies]
+-vp9dec = { path = ".", features = ["test-support"] }
+-
+-# Cargo removes versionless path dev-dependencies from a published package. Requiring the
+-# feature on each integration target keeps repository `cargo test` unchanged (the self
+-# dev-dependency enables it), while a packaged crate can skip them by default or run them
+-# explicitly with `--features test-support`.
+-[[test]]
+-name = "api_test"
+-required-features = ["test-support"]
+-
+-[[test]]
+-name = "bbb_cross_check"
+-required-features = ["test-support"]
+-
+-[[test]]
+-name = "conformance_test"
+-required-features = ["test-support"]
+-
+-[[test]]
+-name = "invalid_vector_test"
+-required-features = ["test-support"]
+-
+-[[test]]
+-name = "loop_filter_parallel_test"
+-required-features = ["test-support"]
+-
+-[[test]]
+-name = "robustness_test"
+-required-features = ["test-support"]
+-
+-[[test]]
+-name = "simd_scalar_differential_test"
+-required-features = ["test-support"]
+-
+-[[test]]
+-name = "structured_fuzz_test"
+-required-features = ["test-support"]
+-
+-[[test]]
+-name = "sweep_test"
+-required-features = ["test-support"]
+-
+-[[test]]
+-name = "synthetic_hbd_tile_test"
+-required-features = ["test-support"]
+-
+-[[test]]
+-name = "synthetic_scaled_ref_test"
+-required-features = ["test-support"]
+-
+-[[test]]
+-name = "synthetic_seg_test"
+-required-features = ["test-support"]
+-
+-[[test]]
+-name = "synthetic_superframe_test"
+-required-features = ["test-support"]
+-
+-[[test]]
+-name = "tile_parallel_test"
+-required-features = ["test-support"]
+ 
++# NOTE(uefi-player vendor): vendored from upstream 0.1.1 + no_std port (scalar).
++# See VENDOR.md. `std` (default on) preserves upstream behavior exactly;
++# `default-features = false` is the firmware shape: no_std + alloc, scalar-only.
+ [features]
+-test-support = []
+-# Per-stage wall-clock accounting (src/bench_timing.rs), read by examples/bench.rs's
+-# `--stages` report. Zero-cost when off: see src/bench_timing.rs for how.
++default = ["std"]
++# Standard library. Off => `#![no_std]` + `alloc`. Thread-pool Tile/LoopFilter
++# drivers and AVX2 runtime detection need `std`; without it the sequential /
++# scalar paths (bit-identical, officially gated) always run.
++std = []
++# Per-stage wall-clock accounting (src/bench_timing.rs). Zero-cost when off.
+ bench-timing = []
++# Encoder-side mirrors of the bit/bool coders for synthetic round-trip tests.
++# The unit tests under tests/unit need it; enabled implicitly for `cargo test`
++# via the self dev-dependency below (upstream original scope).
++test-support = []
+ 
+-[[example]]
+-name = "decode_to_png"
+-test = true
++[dependencies]
+ 
+-[[example]]
+-name = "webm_to_ivf"
++# Upstream original scope: self-referential dev-dep so plain `cargo test`
++# enables `test-support` (the unit tests need it). Versionless path dev-deps
++# never leak into downstream builds; the firmware shape is unaffected.
++[dev-dependencies]
++vp9dec = { path = ".", features = ["test-support"] }
+ 
+-[[example]]
+-name = "bench"
++# NOTE(uefi-player vendor): upstream `[[test]]` (conformance/sweep/cross-check,
++# 需要包外向量文件或 ffmpeg) 在此去掉；`tests/unit/` 随树保留，箱内单测用。
++# `[[example]]` 随 examples/ 一起去掉（host 调试看屏另行处理，不进 vendor）。
+diff --git a/src/bench_timing.rs b/src/bench_timing.rs
+index 73b5275..03cf507 100644
+--- a/src/bench_timing.rs
++++ b/src/bench_timing.rs
+@@ -80,6 +80,9 @@ mod imp {
+     }
+ 
+     /// Adds a worker thread's snapshot to the current thread's counters.
++    // VENDOR(uefi-player): tile workers are std-only; without `std` there is
++    // no caller, so this is compiled out.
++    #[cfg(feature = "std")]
+     pub(crate) fn merge_snapshot(snapshot: &[u64; super::STAGE_COUNT]) {
+         COUNTERS.with(|c| {
+             for (cell, &nanos) in c.iter().zip(snapshot) {
+@@ -124,6 +127,8 @@ mod imp {
+     }
+ 
+     #[inline(always)]
++    // VENDOR(uefi-player): tile workers are std-only (see above).
++    #[cfg(feature = "std")]
+     pub(crate) fn merge_snapshot(_snapshot: &[u64; super::STAGE_COUNT]) {}
+ 
+     /// Field-less stand-in: `start` is a no-op and there is no `Drop` impl, so this
+@@ -138,6 +143,8 @@ mod imp {
+     }
+ }
+ 
++// VENDOR(uefi-player): tile workers are std-only (see above).
++#[cfg(feature = "std")]
+ pub(crate) use imp::merge_snapshot;
+ pub use imp::{reset, snapshot, StageTimer};
+ 
+diff --git a/src/compressed_header.rs b/src/compressed_header.rs
+index d7587e8..357d6d5 100644
+--- a/src/compressed_header.rs
++++ b/src/compressed_header.rs
+@@ -28,7 +28,8 @@
+ //! The inter-related reads called only when `FrameIsIntra == 0`
+ //! (`read_inter_mode_probs` onward, spec §6.3.9-6.3.18) were implemented in M3.
+ 
+-use std::sync::Arc;
++// VENDOR(uefi-player): core/alloc paths work in both std and no_std builds.
++use alloc::sync::Arc;
+ 
+ use crate::bool_coder::{BoolCoderError, BoolDecoder};
+ use crate::header::NewFrameHeader;
+@@ -170,7 +171,8 @@ impl FrameContextStore {
+     /// `save_probs(i)` for i in 0..4 right after `setup_past_independence()`).
+     pub fn new() -> Self {
+         Self {
+-            contexts: std::array::from_fn(|_| FrameContext::default()),
++            // VENDOR(uefi-player): core path works in both std and no_std builds.
++            contexts: core::array::from_fn(|_| FrameContext::default()),
+         }
+     }
+ 
+@@ -185,7 +187,8 @@ impl FrameContextStore {
+     /// The all-slots reset performed by `setup_past_independence()` (occurs
+     /// for key frames, error-resilient frames, etc.).
+     pub fn reset_all(&mut self) {
+-        self.contexts = std::array::from_fn(|_| FrameContext::default());
++        // VENDOR(uefi-player): core path works in both std and no_std builds.
++        self.contexts = core::array::from_fn(|_| FrameContext::default());
+     }
+ }
+ 
+diff --git a/src/dpb.rs b/src/dpb.rs
+index f9634ca..faa2718 100644
+--- a/src/dpb.rs
++++ b/src/dpb.rs
+@@ -9,7 +9,8 @@
+ //! compensation (spec §8.5.2.4's `lastX`/`lastY`) line up directly with the plane's
+ //! `width - 1`/`height - 1`.
+ 
+-use std::sync::Arc;
++// VENDOR(uefi-player): core/alloc paths work in both std and no_std builds.
++use alloc::sync::Arc;
+ 
+ use crate::framebuffer::Plane;
+ use crate::prob_tables::NUM_REF_FRAMES;
+@@ -48,7 +49,8 @@ impl Default for Dpb {
+ impl Dpb {
+     pub fn new() -> Self {
+         Self {
+-            slots: std::array::from_fn(|_| None),
++            // VENDOR(uefi-player): core path works in both std and no_std builds.
++            slots: core::array::from_fn(|_| None),
+         }
+     }
+ 
+diff --git a/src/framebuffer.rs b/src/framebuffer.rs
+index d9a3396..db200a4 100644
+--- a/src/framebuffer.rs
++++ b/src/framebuffer.rs
+@@ -22,6 +22,9 @@
+ /// *column strip* ([`Plane::new_strip`]): a buffer covering only the absolute pixel columns
+ /// `[x0, x0 + width)`. All accessors keep taking **absolute** frame x coordinates -- the strip
+ /// origin is subtracted internally -- so the decode path is identical either way.
++// VENDOR(uefi-player): alloc prelude for the no_std build.
++use alloc::{vec, vec::Vec};
++
+ #[derive(Debug, Clone)]
+ pub struct Plane {
+     pub width: usize,
+diff --git a/src/ivf.rs b/src/ivf.rs
+index 3ffacea..6d2227f 100644
+--- a/src/ivf.rs
++++ b/src/ivf.rs
+@@ -28,6 +28,9 @@
+ //! | 0 | 4 | Size of the frame data (excluding this header) |
+ //! | 4 | 8 | 64-bit presentation timestamp |
+ 
++// VENDOR(uefi-player): alloc prelude for the no_std build.
++use alloc::vec::Vec;
++
+ /// Size of the IVF file header (bytes).
+ const IVF_FILE_HEADER_SIZE: usize = 32;
+ /// Size of the IVF frame header (bytes).
+diff --git a/src/lib.rs b/src/lib.rs
+index abba7cd..8238462 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -8,6 +8,13 @@
+ //! tile-parallel decoding accelerate the scalar reference path without altering its output.
+ //! See README.md "Current architecture" for the module map.
+ 
++// VENDOR(uefi-player): no_std port (scalar). `std` (default on) preserves
++// upstream; without it this crate is `#![no_std]` + `alloc`.
++#![cfg_attr(not(feature = "std"), no_std)]
++// VENDOR(uefi-player): always in scope; `use alloc::…` below resolves in both
++// std and no_std builds.
++extern crate alloc;
++
+ pub mod ivf;
+ 
+ // Every module below is internal; public only so the pure-std integration tests in
+@@ -61,7 +68,9 @@ pub mod transform;
+ #[path = "../tests/unit/support.rs"]
+ mod unit_test_support;
+ 
+-use std::sync::Arc;
++// VENDOR(uefi-player): core/alloc paths work in both std and no_std builds.
++use alloc::sync::Arc;
++use alloc::{vec, vec::Vec};
+ 
+ use compressed_header::{
+     parse_compressed_header, CompressedHeaderError, FrameContext, FrameContextStore,
+@@ -569,7 +578,8 @@ impl Decoder {
+         let resolved_refs: [Option<Arc<RefFrameData>>; 3] = if header.frame_is_intra {
+             [None, None, None]
+         } else {
+-            std::array::from_fn(|i| self.dpb.get_arc(header.ref_frame_idx[i]))
++            // VENDOR(uefi-player): core path works in both std and no_std builds.
++            core::array::from_fn(|i| self.dpb.get_arc(header.ref_frame_idx[i]))
+         };
+ 
+         // Spec §8.5.1 / libvpx `valid_ref_frame_img_fmt`: an inter frame's references must share
+@@ -659,7 +669,7 @@ impl Decoder {
+             frame_is_intra: header.frame_is_intra,
+             reset_frame_context: header.reset_frame_context,
+             segmentation_enabled: header.segmentation.enabled,
+-            seg_features_active: std::array::from_fn(|level| {
++            seg_features_active: core::array::from_fn(|level| {
+                 header.segmentation.enabled
+                     && header
+                         .segmentation
+diff --git a/src/loop_filter.rs b/src/loop_filter.rs
+index 6be359c..132fc99 100644
+--- a/src/loop_filter.rs
++++ b/src/loop_filter.rs
+@@ -37,7 +37,12 @@
+ //!   them (or from the default values `[1, 0, -1, -1]`/`[0, 0]` when
+ //!   `FrameIsIntra || error_resilient_mode`, i.e. `setup_past_independence`).
+ 
+-use std::sync::atomic::{AtomicU32, Ordering};
++// VENDOR(uefi-player): core path works in both std and no_std builds.
++// (`AtomicU32` is only used inside the std-only wavefront below, spelled fully
++// qualified there, so it stays out of this import.)
++// Only needed where threads or test knobs exist; without both it is unused.
++#[cfg(any(feature = "std", feature = "test-support"))]
++use core::sync::atomic::Ordering;
+ 
+ use crate::common::{clip3, get_uv_tx_size, round2, INTRA_FRAME, MAX_SEGMENTS};
+ use crate::framebuffer::Plane;
+@@ -63,20 +68,23 @@ const LF_PARALLEL_MIN_MI: u64 = 4096;
+ /// sequential loop filter of a real decode are byte-identical. Compiled only for test builds (the
+ /// self-referential `test-support` dev-dependency), mirroring `tile::FORCE_SEQUENTIAL_TILES`.
+ #[cfg(feature = "test-support")]
+-pub static FORCE_SEQUENTIAL_LOOP_FILTER: std::sync::atomic::AtomicBool =
+-    std::sync::atomic::AtomicBool::new(false);
++// VENDOR(uefi-player): core path works in both std and no_std builds.
++pub static FORCE_SEQUENTIAL_LOOP_FILTER: core::sync::atomic::AtomicBool =
++    core::sync::atomic::AtomicBool::new(false);
+ 
+ /// Test-only knob: forces eligible frames to use at least two wavefront workers even on a
+ /// single-logical-CPU test host. See [`FORCE_SEQUENTIAL_LOOP_FILTER`].
+ #[cfg(feature = "test-support")]
+-pub static FORCE_PARALLEL_LOOP_FILTER: std::sync::atomic::AtomicBool =
+-    std::sync::atomic::AtomicBool::new(false);
++// VENDOR(uefi-player): core path works in both std and no_std builds.
++pub static FORCE_PARALLEL_LOOP_FILTER: core::sync::atomic::AtomicBool =
++    core::sync::atomic::AtomicBool::new(false);
+ 
+ /// Test-only count of calls to [`wavefront_filter_planes`], used to reject a vacuous
+ /// parallel-vs-sequential equality test.
+ #[cfg(feature = "test-support")]
+-pub static WAVEFRONT_INVOCATIONS: std::sync::atomic::AtomicU64 =
+-    std::sync::atomic::AtomicU64::new(0);
++// VENDOR(uefi-player): core path works in both std and no_std builds.
++pub static WAVEFRONT_INVOCATIONS: core::sync::atomic::AtomicU64 =
++    core::sync::atomic::AtomicU64::new(0);
+ 
+ /// `LvlLookup[ segmentId ][ ref ][ mode ]` (spec §8.8.1).
+ type LvlLookup = [[[i32; MAX_MODE_LF_DELTAS]; MAX_REF_FRAMES]; MAX_SEGMENTS];
+@@ -90,7 +98,12 @@ trait PlaneAccess {
+     fn lf_set(&mut self, x: usize, y: usize, v: u16);
+     /// Base pointer of the row-major buffer, for the AVX2 kernels (which index it raw rather than
+     /// going through `lf_get`/`lf_set`); `lf_stride` is its row stride (`= width`).
++    // VENDOR(uefi-player): AVX2-only accessors, x86_64-only (kernels are
++    // compiled out off-arch).
++    #[cfg(target_arch = "x86_64")]
+     fn lf_base_ptr(&mut self) -> *mut u16;
++    // VENDOR(uefi-player): AVX2-only accessors, x86_64-only (see above).
++    #[cfg(target_arch = "x86_64")]
+     fn lf_stride(&self) -> usize;
+ }
+ 
+@@ -103,10 +116,14 @@ impl PlaneAccess for Plane {
+     fn lf_set(&mut self, x: usize, y: usize, v: u16) {
+         self.set(x, y, v);
+     }
++    // VENDOR(uefi-player): AVX2-only accessors, x86_64-only (see the trait).
++    #[cfg(target_arch = "x86_64")]
+     #[inline]
+     fn lf_base_ptr(&mut self) -> *mut u16 {
+         self.as_mut_slice().as_mut_ptr()
+     }
++    // VENDOR(uefi-player): AVX2-only accessors, x86_64-only (see the trait).
++    #[cfg(target_arch = "x86_64")]
+     #[inline]
+     fn lf_stride(&self) -> usize {
+         self.width
+@@ -120,6 +137,9 @@ impl PlaneAccess for Plane {
+ /// wavefront's per-row progress gate (a >=2 superblock-column lag with `Release`/`Acquire`) is what
+ /// actually keeps the accesses disjoint-or-ordered in time. The sequential path uses [`Plane`]
+ /// directly (fully safe) through the same [`PlaneAccess`] trait.
++// VENDOR(uefi-player): wavefront-only view, std-only (workers share one buffer;
++// the sequential path uses `Plane` directly).
++#[cfg(feature = "std")]
+ #[derive(Clone, Copy)]
+ struct PlaneView {
+     ptr: *mut u16,
+@@ -134,9 +154,15 @@ struct PlaneView {
+ // wavefront ordering in `wavefront_filter_planes` -- never write the same pixel concurrently and
+ // always establish happens-before (the `Release`/`Acquire` progress counter) before reading a
+ // pixel another worker wrote. Hence there is no data race despite the shared buffer.
++// VENDOR(uefi-player): wavefront-only, std-only (see `PlaneView` above).
++#[cfg(feature = "std")]
+ unsafe impl Send for PlaneView {}
++// VENDOR(uefi-player): wavefront-only, std-only (see `PlaneView` above).
++#[cfg(feature = "std")]
+ unsafe impl Sync for PlaneView {}
+ 
++// VENDOR(uefi-player): wavefront-only, std-only (see `PlaneView` above).
++#[cfg(feature = "std")]
+ impl PlaneView {
+     fn new(plane: &mut Plane) -> Self {
+         let stride = plane.width;
+@@ -160,6 +186,8 @@ impl PlaneView {
+     }
+ }
+ 
++// VENDOR(uefi-player): wavefront-only, std-only (see `PlaneView` above).
++#[cfg(feature = "std")]
+ impl PlaneAccess for PlaneView {
+     #[inline]
+     fn lf_get(&self, x: usize, y: usize) -> u16 {
+@@ -176,10 +204,13 @@ impl PlaneAccess for PlaneView {
+             *self.ptr.add(self.offset(x, y)) = v;
+         }
+     }
++    // VENDOR(uefi-player): the trait declares these x86_64-only (see above).
++    #[cfg(target_arch = "x86_64")]
+     #[inline]
+     fn lf_base_ptr(&mut self) -> *mut u16 {
+         self.ptr
+     }
++    #[cfg(target_arch = "x86_64")]
+     #[inline]
+     fn lf_stride(&self) -> usize {
+         self.stride
+@@ -619,6 +650,9 @@ fn superblock_loop_filter<P: PlaneAccess>(
+         // `superblock_loop_filter_edge_avx2` / `simd::loop_filter_vert8_avx2`). Both decide
+         // WHICH positions filter and how strongly via the same `edge_position_params` the scalar
+         // loop uses -- only the pixel arithmetic is vectorized.
++        // VENDOR(uefi-player): AVX2 dispatch needs x86_64 (see simd.rs
++        // `avx2_enabled`); off-arch this block is compiled out and the scalar
++        // loop below always runs.
+         #[cfg(target_arch = "x86_64")]
+         if crate::simd::avx2_enabled() {
+             superblock_loop_filter_edge_avx2(
+@@ -693,6 +727,7 @@ fn superblock_loop_filter<P: PlaneAccess>(
+ /// kernel's per-lane `is_tx8`/`is_tx16` masks pick each lane's filter, mirroring
+ /// `sample_filtering`'s three-way branch (see the current SIMD summary in
+ /// `docs/implementation-notes.md`).
++// VENDOR(uefi-player): AVX2 dispatcher, x86_64-only (see the call site above).
+ #[cfg(target_arch = "x86_64")]
+ #[allow(clippy::too_many_arguments)]
+ fn superblock_loop_filter_edge_avx2<P: PlaneAccess>(
+@@ -899,6 +934,9 @@ fn loop_filter_plane(
+ /// are independent, so fusing them into one scope (rather than three) changes only timing -- a
+ /// worker that runs out of work in one plane flows straight into the next instead of idling at a
+ /// per-plane barrier, and the per-frame thread spawns are paid once, not once per plane.
++// VENDOR(uefi-player): `thread::scope` wavefront, std-only; without it the
++// sequential per-plane loop in `loop_filter_frame` always runs (bit-identical).
++#[cfg(feature = "std")]
+ #[allow(clippy::too_many_arguments)]
+ fn wavefront_filter_planes(
+     planes: &mut [Plane; 3],
+@@ -919,8 +957,9 @@ fn wavefront_filter_planes(
+     let n_sb_cols = mi_cols.div_ceil(8) as usize;
+     // One `progress` array per plane: `progress[p][r]` = superblock columns fully filtered (both
+     // passes) in row `r` of plane `p`. Published with `Release`, awaited with `Acquire`.
+-    let progress: [Vec<AtomicU32>; 3] =
+-        std::array::from_fn(|_| (0..n_sb_rows).map(|_| AtomicU32::new(0)).collect());
++    // VENDOR(uefi-player): core path works in both std and no_std builds.
++    let progress: [Vec<core::sync::atomic::AtomicU32>; 3] =
++        core::array::from_fn(|_| (0..n_sb_rows).map(|_| core::sync::atomic::AtomicU32::new(0)).collect());
+     let progress = &progress;
+     let [p0, p1, p2] = planes;
+     let views = [PlaneView::new(p0), PlaneView::new(p1), PlaneView::new(p2)];
+@@ -944,7 +983,8 @@ fn wavefront_filter_planes(
+                             if sb_row > 0 {
+                                 let need = (sb_col as u32 + 2).min(n_sb_cols as u32);
+                                 while prog[sb_row - 1].load(Ordering::Acquire) < need {
+-                                    std::hint::spin_loop();
++                                    // VENDOR(uefi-player): core path, both builds.
++                                    core::hint::spin_loop();
+                                 }
+                             }
+                             let col = (sb_col * 8) as u32;
+@@ -1024,15 +1064,25 @@ pub fn loop_filter_frame(
+         // One worker per superblock row is the most the wavefront can use (more would idle); cap at
+         // the machine's parallelism. The test-only override raises the floor to two workers so
+         // the equality test cannot silently exercise the sequential path on a one-CPU host.
+-        let available = std::thread::available_parallelism()
+-            .map(|n| n.get())
+-            .unwrap_or(1);
+-        let available = if force_parallel {
+-            available.max(2)
+-        } else {
+-            available
+-        };
+-        available.min(n_sb_rows.max(1))
++        // VENDOR(uefi-player): without `std` there is no thread pool to query;
++        // 1 funnels into the sequential path above.
++        #[cfg(feature = "std")]
++        {
++            let available = std::thread::available_parallelism()
++                .map(|n| n.get())
++                .unwrap_or(1);
++            let available = if force_parallel {
++                available.max(2)
++            } else {
++                available
++            };
++            available.min(n_sb_rows.max(1))
++        }
++        #[cfg(not(feature = "std"))]
++        {
++            let _ = (n_sb_rows, force_parallel);
++            1
++        }
+     };
+ 
+     if n_threads <= 1 {
+@@ -1056,6 +1106,9 @@ pub fn loop_filter_frame(
+     // All three planes are filtered in one fused wavefront pass (see `wavefront_filter_planes`): a
+     // single thread::scope whose workers flow across the independent planes, so no worker idles at a
+     // per-plane barrier and the per-frame thread spawns are paid once, not once per plane.
++    // VENDOR(uefi-player): std-only (see `wavefront_filter_planes`); without it
++    // `n_threads` is 1 and the sequential path above has already returned.
++    #[cfg(feature = "std")]
+     wavefront_filter_planes(
+         planes,
+         mi_grid,
+diff --git a/src/predict.rs b/src/predict.rs
+index f5e36f1..bcfff1f 100644
+--- a/src/predict.rs
++++ b/src/predict.rs
+@@ -478,6 +478,10 @@ fn block_inter_predict(
+     // `max_val = (1<<bit_depth)-1`. Width 4 (the `4x4`/`4x8` partitions) dispatches to the
+     // 128-bit-wide `block_inter_predict_avx2_w4`; widths 8/16/32/64 to the 256-bit
+     // `block_inter_predict_avx2`.
++    // VENDOR(uefi-player): AVX2 dispatch needs x86_64 (see simd.rs
++    // `avx2_enabled`: `[accel]` switch + firmware CPUID/XCR0 gate under
++    // no_std); off-arch this block is compiled out and
++    // `block_inter_predict_scalar` below always runs.
+     #[cfg(target_arch = "x86_64")]
+     {
+         let last_x = ref_plane.width as i64 - 1;
+diff --git a/src/simd.rs b/src/simd.rs
+index e9ca001..c33e760 100644
+--- a/src/simd.rs
++++ b/src/simd.rs
+@@ -17,37 +17,200 @@
+ //! A NEON mirror for aarch64 would be sibling `#[cfg(target_arch = "aarch64")]` modules
+ //! behind the same dispatch points -- not implemented.
+ 
++// VENDOR(uefi-player): the kernels are pure `core::arch::x86_64` integer
++// intrinsics (no float vectors, no nt stores -- verified by inspection), so
++// they compile under `no_std` too; the runtime gate below
++// (`avx2_enabled`) is what keeps them off hardware that cannot run them.
++// x86_64-only (scalar owns every other target; a NEON mirror would be
++// sibling `#[cfg(target_arch = "aarch64")]` modules -- not implemented).
++#[cfg(target_arch = "x86_64")]
+ mod inter;
++#[cfg(target_arch = "x86_64")]
+ mod loop_filter;
++#[cfg(target_arch = "x86_64")]
+ mod transform;
+ 
+-#[cfg(all(test, target_arch = "x86_64"))]
++#[cfg(all(test, feature = "std", target_arch = "x86_64"))]
+ #[path = "../tests/unit/simd.rs"]
+ mod tests;
+ 
++// VENDOR(uefi-player): re-exports follow the kernel modules (x86_64, std or
++// no_std); the dispatch points (`predict.rs`, `tile/residual.rs`,
++// `loop_filter.rs`) gate on the same `target_arch` condition.
++#[cfg(target_arch = "x86_64")]
+ pub use inter::{
+     block_inter_predict_avx2, block_inter_predict_avx2_w4, block_inter_predict_scaled_avx2,
+ };
++#[cfg(target_arch = "x86_64")]
+ pub use loop_filter::{loop_filter_horiz8_avx2, loop_filter_vert8_avx2};
++#[cfg(target_arch = "x86_64")]
+ pub use transform::{
+     inverse_transform_adst_reconstruct_avx2, inverse_transform_adst_reconstruct_hbd_avx2,
+     inverse_transform_dct_dct_reconstruct_avx2, inverse_transform_dct_dct_reconstruct_hbd_avx2,
+ };
+ 
++#[cfg(feature = "std")]
+ use std::sync::OnceLock;
++use core::sync::atomic::{AtomicBool, Ordering};
++#[cfg(not(feature = "std"))]
++use core::sync::atomic::AtomicU8;
+ 
+-/// Whether the AVX2 fast path should be used: the CPU supports AVX2 and it hasn't been
+-/// force-disabled. Cached (the feature/env probe cost isn't worth paying per block --
+-/// `predict::block_inter_predict` calls this once per inter-predicted plane block).
++// VENDOR(uefi-player): the `[accel]` single-bit switch, receiving end. The
++// firmware drives this from `config::copy_width()` before its first decode
++// (`scalar` -> `false`, anything else -> `true`; `resolve_accel` has already
++// clamped an explicit over-hardware level, so this knob carries the config
++// half of the `min(config, hardware)` semantic and `avx2_enabled` adds the
++// hardware half). Never reads `player.toml` here -- one resolved value in,
++// no second parse. Defaults to `true` (upstream behavior: SIMD when the CPU
++// can run it); the scalar path stays bit-exact either way.
++static SIMD_ALLOWED: AtomicBool = AtomicBool::new(true);
++
++/// Set the `[accel]` switch: `false` pins the scalar path (firmware
++/// `accel.level = scalar`), `true` lets each decode take the wheel's max
++/// (whatever `avx2_enabled` proves runnable). Idempotent; takes effect on
++/// the next `avx2_enabled()` call (the hardware probe stays cached, this
++/// bit is read fresh every call so a late switch cannot go stale).
++pub fn set_simd_allowed(allowed: bool) {
++    SIMD_ALLOWED.store(allowed, Ordering::Relaxed);
++}
++
++/// Read back the `[accel]` switch (mainly for host harnesses asserting both
++/// arms of a scalar/SIMD differential run).
++pub fn simd_allowed() -> bool {
++    SIMD_ALLOWED.load(Ordering::Relaxed)
++}
++
++/// Whether the AVX2 fast path should be used: the `[accel]` switch allows it
++/// and the CPU proves AVX2-runnable. The switch bit is read fresh per call
++/// (cheap atomic); the hardware probe underneath is cached -- the probe cost
++/// isn't worth paying per block (`predict::block_inter_predict` calls this
++/// once per inter-predicted plane block).
+ ///
+-/// `VP9DEC_NO_SIMD` (any value, checked once) forces the scalar path even on an
+-/// AVX2-capable machine. The full official sweep runs once with this unset and once with
+-/// it set; `tests/simd_scalar_differential_test.rs` also uses isolated processes to compare
+-/// the two modes on generated conformant streams. The independent ffmpeg cross-decode is a
+-/// separate acceptance check.
++/// `VP9DEC_NO_SIMD` (any value, checked once) forces the scalar path even on
++/// an AVX2-capable machine. The full official sweep runs once with this unset
++/// and once with it set; `tests/simd_scalar_differential_test.rs` also uses
++/// isolated processes to compare the two modes on generated conformant
++/// streams. The independent ffmpeg cross-decode is a separate acceptance
++/// check.
++#[cfg(feature = "std")]
+ pub fn avx2_enabled() -> bool {
+     static ENABLED: OnceLock<bool> = OnceLock::new();
+-    *ENABLED.get_or_init(|| {
++    let base = *ENABLED.get_or_init(|| {
+         std::env::var_os("VP9DEC_NO_SIMD").is_none() && is_x86_feature_detected!("avx2")
+-    })
++    });
++    base && SIMD_ALLOWED.load(Ordering::Relaxed)
++}
++
++// VENDOR(uefi-player): without `std` there is no `is_x86_feature_detected!`
++// (nor env knob -- `VP9DEC_NO_SIMD` reads as unset, shipped-defaults per the
++// h264-common knob doctrine), so the gate is a firmware CPUID/XCR0 probe
++// with the same semantics as uefi-player `src/diag/common.rs`
++// (`ensure_xsave_enabled`) + `src/diag/avx_checker.rs`
++// (`check_avx_support`): CR4.OSXSAVE + XCR0 AVX state + the AVX2 hardware
++// bit. No second CPUID design is invented here; if the firmware gates move,
++// mirror them here (and vice versa).
++#[cfg(not(feature = "std"))]
++pub fn avx2_enabled() -> bool {
++    if !SIMD_ALLOWED.load(Ordering::Relaxed) {
++        return false;
++    }
++    static HW_CACHE: AtomicU8 = AtomicU8::new(0); // 0 = unknown, 1 = no, 2 = yes
++    match HW_CACHE.load(Ordering::Relaxed) {
++        2 => true,
++        1 => false,
++        _ => {
++            let ok = hw_avx2_probe();
++            HW_CACHE.store(if ok { 2 } else { 1 }, Ordering::Relaxed);
++            ok
++        }
++    }
++}
++
++// VENDOR(uefi-player): the no_std hardware half of `avx2_enabled` (see the
++// gate comment above). UEFI discipline (root AGENTS.md + docs/simd.md):
++// AVX/AVX2 runs only after the `check_avx_support` gate (CR4.OSXSAVE + XCR0);
++// the kernels this guards are integer-only (no float vectors) with plain
++// loads/stores (no nt, so no sfence/alignment gate needed).
++#[cfg(not(feature = "std"))]
++fn hw_avx2_probe() -> bool {
++    // On UEFI we run at CPL0, so idempotently enable XSAVE first (semantic
++    // mirror of the firmware helper -- a cross-crate call is impossible).
++    // Without this, `XGETBV` below would `#UD` under OVMF's default
++    // CR4.OSXSAVE=0; the firmware also ensures at boot (`resolve_accel`)
++    // and before its first decode, this just makes the wheel self-safe.
++    // Host userspace must NEVER touch CR4/XCR0 (would `#GP`) -- the OS owns
++    // them and always enables XSAVE there, so read-only is correct.
++    #[cfg(target_os = "uefi")]
++    ensure_xsave_enabled();
++    unsafe {
++        let c1 = core::arch::x86_64::__cpuid(1);
++        // AVX hardware (bit 28) + OSXSAVE present (bit 27).
++        if c1.ecx & (1 << 28) == 0 || c1.ecx & (1 << 27) == 0 {
++            return false;
++        }
++        // XCR0 AVX (ymm) state enabled -- the `check_avx_support` gate.
++        if core::arch::x86_64::_xgetbv(0) & (1 << 2) == 0 {
++            return false;
++        }
++        // AVX2 hardware (leaf 7 EBX bit 5; leaf 7 itself gated on the max
++        // basic leaf, same as the firmware `probe_max_width`).
++        if core::arch::x86_64::__cpuid(0).eax < 7 {
++            return false;
++        }
++        core::arch::x86_64::__cpuid_count(7, 0).ebx & (1 << 5) != 0
++    }
++}
++
++// VENDOR(uefi-player): semantic mirror of uefi-player
++// `src/diag/common.rs::ensure_xsave_enabled` (same leaves, same bits, same
++// order: XSAVE presence -> CR4.OSXSAVE -> XCR0 SSE/AVX[/AVX512]). UEFI-only
++// (CPL0 writes); host no_std builds never call this (see `hw_avx2_probe`).
++// If the firmware helper changes its gates, change this identically.
++#[cfg(all(not(feature = "std"), target_os = "uefi", target_arch = "x86_64"))]
++fn ensure_xsave_enabled() {
++    use core::arch::{
++        asm,
++        x86_64::{__cpuid, __cpuid_count},
++    };
++
++    let c1 = __cpuid(1);
++    if c1.ecx & (1 << 26) == 0 {
++        return; // hardware has no XSAVE; enabling is meaningless
++    }
++    let has_avx = c1.ecx & (1 << 28) != 0;
++    let has_avx512 = __cpuid(0).eax >= 7 && (__cpuid_count(7, 0).ebx & (1 << 16)) != 0;
++
++    let cr4: u64;
++    unsafe {
++        asm!("mov {0}, cr4", out(reg) cr4, options(nostack, preserves_flags));
++    }
++    if cr4 & (1 << 18) == 0 {
++        unsafe {
++            asm!("mov cr4, {0}", in(reg) cr4 | (1u64 << 18), options(nostack));
++        }
++    }
++
++    let mut lo: u32;
++    let mut hi: u32;
++    unsafe {
++        asm!("xgetbv", in("ecx") 0u32, out("eax") lo, out("edx") hi,
++            options(nostack, preserves_flags));
++    }
++    let mut xcr0 = ((hi as u64) << 32) | lo as u64;
++    // bit1=SSE(xmm), bit2=AVX(ymm), bit5/6/7=AVX512(opmask/zmm).
++    let want = (1u64 << 1)
++        | if has_avx { 1u64 << 2 } else { 0 }
++        | if has_avx512 {
++            (1 << 5) | (1 << 6) | (1 << 7)
++        } else {
++            0
++        };
++    if xcr0 & want != want {
++        xcr0 |= want;
++        lo = xcr0 as u32;
++        hi = (xcr0 >> 32) as u32;
++        unsafe {
++            asm!("xsetbv", in("ecx") 0u32, in("eax") lo, in("edx") hi, options(nostack));
++        }
++    }
+ }
+diff --git a/src/simd/inter.rs b/src/simd/inter.rs
+index 558b8e8..921ad19 100644
+--- a/src/simd/inter.rs
++++ b/src/simd/inter.rs
+@@ -8,7 +8,8 @@
+ 
+ use crate::predict::{MAX_BLOCK_DIM, MAX_INTERMEDIATE_HEIGHT};
+ use crate::subpel::SUBPEL_FILTERS;
+-use std::arch::x86_64::*;
++// VENDOR(uefi-player): core path works in both std and no_std builds.
++use core::arch::x86_64::*;
+ 
+ /// AVX2 mirror of `predict::block_inter_predict`'s scalar two-pass 8-tap FIR.
+ ///
+diff --git a/src/simd/loop_filter.rs b/src/simd/loop_filter.rs
+index 9d95562..be07401 100644
+--- a/src/simd/loop_filter.rs
++++ b/src/simd/loop_filter.rs
+@@ -5,7 +5,8 @@
+ //! arithmetic. `loop_filter.rs` owns the dispatch, the per-lane mask building, and the
+ //! scalar fallback; this module owns only the vector kernels.
+ 
+-use std::arch::x86_64::*;
++// VENDOR(uefi-player): core path works in both std and no_std builds.
++use core::arch::x86_64::*;
+ 
+ /// AVX2 mirror of `loop_filter.rs`'s narrow (spec §8.8.5.2, `filter4`), wide 8-tap
+ /// (§8.8.5.3, `log2_size == 3`) and wide 16-tap (§8.8.5.3, `log2_size == 4`, the `TX_16X16`
+diff --git a/src/simd/transform.rs b/src/simd/transform.rs
+index 0e45020..34fc5fe 100644
+--- a/src/simd/transform.rs
++++ b/src/simd/transform.rs
+@@ -4,7 +4,8 @@
+ //! storage vs. product width per bit depth) -- read them before touching any kernel.
+ 
+ use crate::transform::TxType;
+-use std::arch::x86_64::*;
++// VENDOR(uefi-player): core path works in both std and no_std builds.
++use core::arch::x86_64::*;
+ 
+ // ===========================================================================================
+ // SIMD inverse DCT (SIMD wave 4b; 10/12-bit added later). The scalar `transform::idct` is a
+diff --git a/src/superframe.rs b/src/superframe.rs
+index 9a34a38..785891b 100644
+--- a/src/superframe.rs
++++ b/src/superframe.rs
+@@ -14,6 +14,9 @@
+ //! [`crate::Decoder::decode_frame`] takes such a chunk directly and runs it through
+ //! [`split_superframe`] internally, decoding each contained VP9 frame in turn.
+ 
++// VENDOR(uefi-player): alloc prelude for the no_std build.
++use alloc::{vec, vec::Vec};
++
+ /// Splits one container chunk into the VP9 frame(s) it contains, in decode order.
+ ///
+ /// If `data` doesn't end with a valid superframe index, returns `data` itself as the sole
+diff --git a/src/test_support.rs b/src/test_support.rs
+index 830a47c..65eb42b 100644
+--- a/src/test_support.rs
++++ b/src/test_support.rs
+@@ -6,6 +6,9 @@
+ //! `test-support` feature, which this crate's own dev-dependency on itself enables. Never
+ //! compiled into a normal release build.
+ 
++// VENDOR(uefi-player): alloc prelude for the no_std build.
++use alloc::{vec, vec::Vec};
++
+ /// A bool encoder for tests only.
+ ///
+ /// This is an arithmetic encoder performing the inverse operation of
+diff --git a/src/tile.rs b/src/tile.rs
+index cfcfee3..dec5684 100644
+--- a/src/tile.rs
++++ b/src/tile.rs
+@@ -39,7 +39,9 @@ pub use mv_pred::Mv;
+ #[cfg(feature = "test-support")]
+ pub use parallel::{FORCE_SEQUENTIAL_TILES, FORCE_TILE_WORKERS};
+ 
+-use std::sync::Arc;
++// VENDOR(uefi-player): core/alloc paths work in both std and no_std builds.
++use alloc::sync::Arc;
++use alloc::{vec, vec::Vec};
+ 
+ use crate::bool_coder::{BoolCoderError, BoolDecoder};
+ use crate::common::INTRA_FRAME;
+@@ -509,11 +511,18 @@ impl TileDecoder {
+         let use_parallel = tile_cols > 1 && tile_rows == 1;
+         #[cfg(feature = "test-support")]
+         let use_parallel =
+-            use_parallel && !FORCE_SEQUENTIAL_TILES.load(std::sync::atomic::Ordering::Relaxed);
++            // VENDOR(uefi-player): core path works in both std and no_std builds.
++            use_parallel && !FORCE_SEQUENTIAL_TILES.load(core::sync::atomic::Ordering::Relaxed);
+         if use_parallel {
+             let max_workers = parallel::available_tile_workers();
+             if max_workers > 1 {
++                // VENDOR(uefi-player): worker threads need `std`; without it
++                // `available_tile_workers()` is 1, so this is unreachable and
++                // the sequential loop below always runs (bit-identical).
++                #[cfg(feature = "std")]
+                 return self.decode_tiles_parallel(data, tile_cols, max_workers);
++                #[cfg(not(feature = "std"))]
++                unreachable!("no_std tile decode is always sequential");
+             }
+         }
+ 
+diff --git a/src/tile/parallel.rs b/src/tile/parallel.rs
+index c5809d4..dde70d2 100644
+--- a/src/tile/parallel.rs
++++ b/src/tile/parallel.rs
+@@ -4,38 +4,58 @@
+ //! `std::thread::scope` driver. Split out of `tile.rs` (which keeps the sequential
+ //! tile/superblock traversal this path is bit-identical to).
+ 
++// VENDOR(uefi-player): worker threads need `std`; without it the column-strip
++// workers and the `thread::scope` driver below are compiled out (only the
++// tile-data splitter and the worker-count stub remain, serving the sequential
++// loop in `super::TileDecoder::decode_tiles`).
++#[cfg(feature = "std")]
+ use crate::counts::Counts;
++#[cfg(feature = "std")]
+ use crate::framebuffer::Plane;
+ 
+-use super::{get_tile_offset, MiGrid, TileDecoder, TileError};
++use alloc::vec::Vec;
++
++use super::{TileDecoder, TileError};
++#[cfg(feature = "std")]
++use super::{get_tile_offset, MiGrid};
+ 
+ /// Test-only knob: forces [`TileDecoder::decode_tiles`] down the sequential loop even when the
+ /// tile-parallel fast path would engage, so tests can assert that the parallel and sequential
+ /// decodes of a multi-tile stream are byte-identical (see `tests/tile_parallel_test.rs`).
+ /// Compiled only for test builds (the self-referential `test-support` dev-dependency).
+ #[cfg(feature = "test-support")]
+-pub static FORCE_SEQUENTIAL_TILES: std::sync::atomic::AtomicBool =
+-    std::sync::atomic::AtomicBool::new(false);
++pub static FORCE_SEQUENTIAL_TILES: core::sync::atomic::AtomicBool =
++    core::sync::atomic::AtomicBool::new(false);
+ 
+ /// Test/benchmark-only override for the worker count reported to tile dispatch. Zero keeps the
+ /// platform's [`std::thread::available_parallelism`] result; a positive value makes the
+ /// single-worker fallback and bounded parallel cases reproducible on any development machine.
+ #[cfg(feature = "test-support")]
+-pub static FORCE_TILE_WORKERS: std::sync::atomic::AtomicUsize =
+-    std::sync::atomic::AtomicUsize::new(0);
++pub static FORCE_TILE_WORKERS: core::sync::atomic::AtomicUsize =
++    core::sync::atomic::AtomicUsize::new(0);
+ 
+ pub(super) fn available_tile_workers() -> usize {
+     #[cfg(feature = "test-support")]
+     {
+-        let forced = FORCE_TILE_WORKERS.load(std::sync::atomic::Ordering::Relaxed);
++        // VENDOR(uefi-player): core path works in both std and no_std builds.
++        let forced = FORCE_TILE_WORKERS.load(core::sync::atomic::Ordering::Relaxed);
+         if forced > 0 {
+             return forced;
+         }
+     }
+-    std::thread::available_parallelism()
+-        .map(|n| n.get())
+-        .unwrap_or(1)
+-        .max(1)
++    // VENDOR(uefi-player): without `std` there is no thread pool to query; 1
++    // funnels the caller into the sequential loop.
++    #[cfg(feature = "std")]
++    {
++        std::thread::available_parallelism()
++            .map(|n| n.get())
++            .unwrap_or(1)
++            .max(1)
++    }
++    #[cfg(not(feature = "std"))]
++    {
++        1
++    }
+ }
+ 
+ impl TileDecoder {
+@@ -58,6 +78,8 @@ impl TileDecoder {
+     ///
+     /// The `above_*` context arrays stay full-width (a few bytes per MI column): they are
+     /// indexed absolutely, and slicing them would complicate the code for no measurable gain.
++    // VENDOR(uefi-player): column-strip worker, std-only (see the imports above).
++    #[cfg(feature = "std")]
+     pub(super) fn spawn_column_worker(&self, mi_col_start: u32, mi_col_end: u32) -> TileDecoder {
+         let grid_cols = self.mi_grid.cols();
+         let grid_rows = self.planes[0].height / 8;
+@@ -132,6 +154,8 @@ impl TileDecoder {
+     /// `mi_col_end` are copied -- the last column's superblock-rounded padding (which its strip
+     /// also holds, see [`Self::spawn_column_worker`]) is dropped, staying zero in the merged
+     /// frame exactly as in a sequential decode's output path.
++    // VENDOR(uefi-player): column-strip merge, std-only (see the imports above).
++    #[cfg(feature = "std")]
+     pub(super) fn merge_column_worker(&mut self, w: &TileDecoder) {
+         // Counts (order-independent integer sums).
+         self.counts.add_assign(&w.counts);
+@@ -199,6 +223,8 @@ impl TileDecoder {
+     /// tile column on its own worker thread (VP9 tile columns are independent), then merge each
+     /// column strip back into `self`. Bit-identical to the sequential path (disjoint column
+     /// writes; order-independent count sums). Uses `std::thread::scope` -- no external crate.
++    // VENDOR(uefi-player): `thread::scope` driver, std-only (see the imports above).
++    #[cfg(feature = "std")]
+     pub(super) fn decode_tiles_parallel(
+         &mut self,
+         data: &[u8],
+diff --git a/src/tile/residual.rs b/src/tile/residual.rs
+index 5a8040a..8b0e956 100644
+--- a/src/tile/residual.rs
++++ b/src/tile/residual.rs
+@@ -224,7 +224,8 @@ impl TileDecoder {
+                 None
+             },
+         ];
+-        let ref_views: [Option<RefPlaneView>; 2] = std::array::from_fn(|i| {
++        // VENDOR(uefi-player): core path works in both std and no_std builds.
++        let ref_views: [Option<RefPlaneView>; 2] = core::array::from_fn(|i| {
+             refs[i].map(|r| RefPlaneView {
+                 plane: match plane {
+                     0 => &r.y,
+@@ -529,6 +530,9 @@ impl TileDecoder {
+         // `simd/transform.rs`). Only WHT (lossless) transforms into `dequant` and takes the
+         // scalar loop. The SIMD paths are bit-exact against it for conformant streams (spec
+         // §8.7.1.1's stored-value bounds).
++        // VENDOR(uefi-player): AVX2 dispatch needs x86_64 (see simd.rs
++        // `avx2_enabled`); off-arch `fused` is false and the scalar
++        // `inverse_transform_block` always runs.
+         #[cfg(target_arch = "x86_64")]
+         let fused = !self.lossless && crate::simd::avx2_enabled();
+         #[cfg(not(target_arch = "x86_64"))]

@@ -144,6 +144,18 @@ pub(crate) fn format_desc(v: MediaFormat) -> String {
     .into_owned()
 }
 
+/// 供片模式显示名（存盘仍用 `file_str` 小写串）。
+/// 多核（`mp_draw`）/动态调度/壁纸恒为 `clip`（见 `play.feed_hint` 文案）。
+pub(crate) fn feed_desc(v: FeedMode) -> String {
+    match v {
+        FeedMode::Clip => t!("feed.desc_clip"),
+        FeedMode::Staged => t!("feed.desc_staged"),
+        FeedMode::Stream => t!("feed.desc_stream"),
+        FeedMode::ZeroCopy => t!("feed.desc_zero_copy"),
+    }
+    .into_owned()
+}
+
 /// 管线档位显示名（存盘仍用 `file_str` 小写串；名字只管消歧：
 /// `老*` = 上古实现对照循环，和加速页的当代矩阵不是一回事）。
 pub(crate) fn pipeline_name(v: PlayPipeline) -> String {

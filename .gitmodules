@@ -1,3 +1,21 @@
 [submodule "third_party/sprout"]
 	path = third_party/sprout
 	url = https://github.com/edera-dev/sprout.git
+[submodule "third_party/oxideav-theora"]
+	path = third_party/oxideav-theora
+	url = https://github.com/OxideAV/oxideav-theora
+[submodule "third_party/vp9dec"]
+	path = third_party/vp9dec
+	url = https://github.com/ChanyaVRC/vp9dec
+[submodule "third_party/rusty_h265"]
+	path = third_party/rusty_h265
+	url = https://github.com/Remade-With-Rust/rusty_h265
+[submodule "third_party/rusty_h264"]
+	path = third_party/rusty_h264
+	url = https://github.com/remade-with-rust/rusty_h264
+[submodule "third_party/filmcraft"]
+	path = third_party/filmcraft
+	url = https://github.com/storytold/filmcraft
+[submodule "third_party/h263-rs"]
+	path = third_party/h263-rs
+	url = https://github.com/ruffle-rs/h263-rs
