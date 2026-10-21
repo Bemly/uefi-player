@@ -53,27 +53,27 @@ description = "player.toml 跨平台可视化编辑器（host 工具，与 UEFI 
 #   `egui_extras` 表格排序器（要拖入整套表格件，与玻璃行不搭，故不用）。
 #   用法：`dnd(ui, id).with_animation_time(0.0).show(下标 id 行, …)`，
 #   落点 `update_vec` 写回（重复路径靠下标 id 区分，见 `playlist.rs` 头注释）。
-# - 动态背景硬解（host 全平台，固件侧不受影响；GUI 内零软解，用户拍板）：
-#   macOS 用同门 `shiguredo_video_toolbox 2026.1`（Apple VideoToolbox H.264 硬解，
-#   与本仓 `shiguredo_mp4` 同 vendor 同用法，MSRV 1.88 < 本仓 1.92，Apache-2.0）。
-#   Win/Linux 用 `gpu-video 0.4`（Vulkan Video H.264 硬解 + `BytesDecoder` NV12 回读，
-#   MSRV 1.85，MIT；`default-features = false` 关 wgpu 纹理互操作——本仓经 egui 托管
-#   纹理上屏即可，无需直连 wgpu，也避开版本耦合；上游兼容表即 Linux(NVIDIA/AMD
-#   Mesa)/Windows，macOS Metal 无 Vulkan Video 故 mac 不用它）。
-#   搜过不用：`egui-video 0.9`（ffmpeg6/7 + SDL2，CPU 软解，重 C 依赖，要 release
-#   opt-level）；`egui-sharkplayer 0.5`（libmpv2，自述 wgpu 下经内存往返 + 要系统
-#   libmpv，而本仓 renderer 强制 Wgpu）；`ffmpeg-next 9`（系统 FFmpeg 动态库，
-#   brew 升版即断 ABI，且默认 CPU 软解，硬解要手写 hwdevice）；`moq-video`
-#   （MoQ 网络流编解码，本地循环用它属大炮打蚊子，且 render 要 wgpu 30 与本仓 29
-#   冲突）。demux 双边复用 `shiguredo_mp4`，NV12/I420 经 BT.601 转 RGBA 后走 egui
-#   托管纹理上 wgpu，`LiveBackdrop` 双遍即折射到玻璃上。
-#   任一端硬解不可用（无 Vulkan Video 驱动等）一律静默回退静态底/纯色底，绝不回退软解
-#   （`rusty_h264-decoder` 等纯 Rust CPU 路 GUI 内禁用）。
-#   静态 `assets/bg.png`（片源第一帧，1280x720，约 600KB，`include_bytes!` 编进二进制）
-#   保留为兜底：缺片/首帧未到/硬解失败即回静态图，静态再无即纯色（装饰不断任何流程）。
-#   历史结论保留：`native` 纹理满窗画会吃掉全部玻璃面板（`egui-wgpu 0.35`
-#   原生纹理与背景层共存有坑，未深究）；视频帧一律走托管纹理（`TextureHandle::set`），
-#   面板全在；静态 twin 图（native id）只当兜底同矩形画，不与视频同帧叠画。
+# - 静态图片背景（host 全平台，固件侧不受影响；零解码、零线程、零软解）：
+#   片源第一帧构建时用 ffmpeg 抽成 `assets/bg.png`（1280x720，约 600KB，
+#   `include_bytes!` 编进二进制），启动时经 `image 0.25`（与转码同版本，
+#   已在依赖里，不新增）解一次，直接喂 glass 自家的 `set_backdrop`
+#   （`main.rs::load_bg_image`），每帧 `show_backdrop` 满窗画。
+#   曾走过的弯路（排查记录完整，结论保留）：动态硬解版（mac VideoToolbox +
+#   Win/Linux Vulkan Video，双硬解零软解）在 dev 下能跑，但 `native` 纹理
+#   满窗画会吃掉全部玻璃面板（`egui-wgpu 0.35` 原生纹理与背景层共存有坑，
+#   未深究）；自研 `video_bg` 模块（托管纹理/线程/转制）已整段删除，
+#   动态版另议时重写，不留僵尸代码与僵尸依赖。
+#   曾走过的弯路（排查记录完整，结论保留）：动态硬解版（mac VideoToolbox +
+#   Win/Linux Vulkan Video `gpu-video 0.4`，双硬解零软解）在 dev 下能跑，
+#   但 `native` 纹理满窗画会吃掉全部玻璃面板（`egui-wgpu 0.35`
+#   原生纹理与背景层共存有坑，未深究）；托管纹理满窗则面板全在。
+#   故静态图坚持托管纹理；动态版代码已整段移除（`video_bg.rs` 重写，
+#   `yuv_upload.rs` 删除），Linux/Win 动态另议时重写，不留僵尸依赖。
+#   搜过不用：`egui-video 0.9`（ffmpeg6/7 + SDL2，重 C 依赖）；
+#   `egui-sharkplayer 0.5`（libmpv2 + 要系统库）；`ffmpeg-next 9`
+#   （系统动态库，brew 升版即断 ABI）；`moq-video`（MoQ 网络流，大炮打蚊子，
+#   且 render 要 wgpu 30 与本仓 29 冲突）；内置 ffmpeg 二进制
+#   （每平台 30~80MB，与“同硬件多花体积+进程”无新能力，故不用）。
 [dependencies]
 egui_dnd = "0.16"
 eframe = { version = "0.35", default-features = false, features = ["accesskit", "default_fonts", "wgpu", "wayland", "x11"] }
@@ -98,9 +98,3 @@ ogg = "0.9"
 qoi = "0.4"
 serde = { version = "1", features = ["derive"] }
 toml = "1"
-
-[target.'cfg(target_os = "macos")'.dependencies]
-shiguredo_video_toolbox = "2026.1"
-
-[target.'cfg(not(target_os = "macos"))'.dependencies]
-gpu-video = { version = "0.4", default-features = false }

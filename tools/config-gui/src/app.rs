@@ -122,11 +122,7 @@ pub(crate) struct App {
     /// 主 ctx 的 backdrop 状态（`show_backdrop` 在 twin 里是空转，实测过）。
     /// 无 GPU 时为 None（回退纯色，不断任何流程）。
     /// `_tex`/`_view` 只为保活（native id 悬空即 UB 级黑屏，见保留注释）。
-    /// 动态视频有首帧时不画它（视频托管纹理同矩形盖位，避免双图叠画）。
     pub(crate) twin_photo: Option<TwinPhoto>,
-    /// 动态背景（`/Users/bemly/Movies/input.mp4` 前 40s 循环硬解，见 `video_bg`；
-    /// 托管纹理，双 renderer 自动镜像；失败/缺片静默回静态底，不断流程）。
-    pub(crate) video_bg: crate::video_bg::VideoBg,
     /// 图库状态（目录跟 `player.toml` 路径走）。
     pub(crate) gallery: GalleryState,
     /// 转码状态（worker 线程跑，UI 只轮询）。
@@ -140,14 +136,13 @@ pub(crate) struct App {
     icons: Icons,
 }
 
-/// 动作条图标（24 栅格单色 PNG，`NEAREST` 直显；主题占两席）。
+/// 动作条六图标（16x16 原色 PNG，`NEAREST` 直显）。
 pub(crate) struct Icons {
     pub(crate) open: egui::TextureHandle,
     pub(crate) save: egui::TextureHandle,
     pub(crate) save_as: egui::TextureHandle,
     pub(crate) reset: egui::TextureHandle,
-    pub(crate) theme_dark: egui::TextureHandle,
-    pub(crate) theme_light: egui::TextureHandle,
+    pub(crate) theme: egui::TextureHandle,
     pub(crate) lang: egui::TextureHandle,
 }
 
@@ -178,15 +173,10 @@ impl Icons {
                 "icon-reset",
                 include_bytes!("../assets/icons/reset.png"),
             ),
-            theme_dark: one(
+            theme: one(
                 ctx,
-                "icon-theme-dark",
-                include_bytes!("../assets/icons/theme_dark.png"),
-            ),
-            theme_light: one(
-                ctx,
-                "icon-theme-light",
-                include_bytes!("../assets/icons/theme_light.png"),
+                "icon-theme",
+                include_bytes!("../assets/icons/theme.png"),
             ),
             lang: one(ctx, "icon-lang", include_bytes!("../assets/icons/lang.png")),
         }
@@ -330,7 +320,6 @@ impl App {
             zh: false,
             live,
             twin_photo,
-            video_bg: crate::video_bg::VideoBg::new(),
             gallery: GalleryState::new(),
             transcode: TranscodeState::new(),
             toast: None,
@@ -974,41 +963,22 @@ impl App {
 
     /// 右下悬浮动作条：圆形像素图标按钮（用户拍板：文字改图标）。
     /// 轮子结论：`GlassButton` 只吃文本，库内无图标件；故空文本圆钮（`icon()`
-    /// 方垫 + `accessible_name` + 悬安示保障）+ MIT 单色像素位图
-    /// （`assets/icons/`，`NEAREST` 20pt 直显 + 主题色 tint，见该目录 README）。
+    /// 方垫 + `accessible_name` + 悬停提示保可访问性）+ CC0 16x16 像素位图
+    /// （`assets/icons/`，`NEAREST` 20pt 直显，原色不 tint，见该目录 README）。
     /// 布局（用户拍板，像图二）：5 图标连体胶囊（打开→保存→另存为→重置→语言），
     /// 明暗开关单独成圆、隔 8px 摆最边上。
     pub(crate) fn action_buttons(&mut self, ui: &mut egui::Ui) -> Action {
         let mut act = Action::None;
-
-        // 图标黑白跟随字体颜色（用户拍板）：暗色白 / 浅色黑与描边字同口径。
-        let col = if self.dark {
-            egui::Color32::WHITE
-        } else {
-            egui::Color32::BLACK
-        };
         ui.horizontal(|ui| {
             egui_glass::GlassToolbar::new(self.bar_style()).show(ui, |ui| {
                 // 连体胶囊：打开 → 保存 → 另存为 → 重置 → 语言（44 圆）。
-                if Self::icon_btn(
-                    ui,
-                    t!("toolbar.open").into_owned(),
-                    &self.icons.open,
-                    col,
-                    44.0,
-                )
-                .clicked()
+                if Self::icon_btn(ui, t!("toolbar.open").into_owned(), &self.icons.open, 44.0)
+                    .clicked()
                 {
                     act = Action::Open;
                 }
-                if Self::icon_btn(
-                    ui,
-                    t!("toolbar.save").into_owned(),
-                    &self.icons.save,
-                    col,
-                    44.0,
-                )
-                .clicked()
+                if Self::icon_btn(ui, t!("toolbar.save").into_owned(), &self.icons.save, 44.0)
+                    .clicked()
                 {
                     act = Action::Save;
                 }
@@ -1016,7 +986,6 @@ impl App {
                     ui,
                     t!("toolbar.save_as").into_owned(),
                     &self.icons.save_as,
-                    col,
                     44.0,
                 )
                 .clicked()
@@ -1027,7 +996,6 @@ impl App {
                     ui,
                     t!("toolbar.reset").into_owned(),
                     &self.icons.reset,
-                    col,
                     44.0,
                 )
                 .clicked()
@@ -1035,19 +1003,19 @@ impl App {
                     act = Action::Reset;
                 }
                 let lang = if self.zh { "EN" } else { "中文" }.to_owned();
-                if Self::icon_btn(ui, lang, &self.icons.lang, col, 44.0).clicked() {
+                if Self::icon_btn(ui, lang, &self.icons.lang, 44.0).clicked() {
                     act = Action::ToggleLang;
                 }
             });
             ui.add_space(8.0);
-            // 明暗开关单独成圆（56 圆与胶囊等高）：深色下给亮框满月（切浅色），
-            // 浅色下给暗框新月（切深色）；图标即目的地，见 icons README。
-            let (theme_tip, theme_icon) = if self.dark {
-                (t!("toolbar.to_light").into_owned(), &self.icons.theme_light)
+            // 明暗开关单独成圆（56 圆与胶囊等高）：两态共用阴阳鱼
+            // （上游像素集无日月，阴阳表暗黑/浅色二象，见 icons README）。
+            let theme_tip = if self.dark {
+                t!("toolbar.to_light").into_owned()
             } else {
-                (t!("toolbar.to_dark").into_owned(), &self.icons.theme_dark)
+                t!("toolbar.to_dark").into_owned()
             };
-            if Self::icon_btn(ui, theme_tip, theme_icon, col, 56.0).clicked() {
+            if Self::icon_btn(ui, theme_tip, &self.icons.theme, 56.0).clicked() {
                 act = Action::ToggleTheme;
             }
         });
@@ -1062,7 +1030,6 @@ impl App {
         ui: &mut egui::Ui,
         label: String,
         icon: &egui::TextureHandle,
-        col: egui::Color32,
         diam: f32,
     ) -> egui::Response {
         let r = egui_glass::GlassButton::new("")
@@ -1077,7 +1044,7 @@ impl App {
                 icon.id(),
                 egui::Rect::from_center_size(r.rect.center(), egui::vec2(side, side)),
                 egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                col,
+                egui::Color32::WHITE,
             );
         }
         r
@@ -1225,13 +1192,7 @@ impl eframe::App for App {
         // 只做中央薄片内的普通内容。
         // 先画的在下：背景图在最底，之后全部面板浮在上。右移让脸出导航
         // （见 `cover_shifted`）。无纸罩（用户明确不要白色遮罩）。
-        // 动态优先：有视频首帧即画视频（托管纹理，双 renderer 自动镜像，
-        // 见 `video_bg`）；无帧/回退即画静态 twin 图（native id 同矩形）。
         let screen = ui.ctx().viewport_rect();
-        // 推进只能在闭包外做（`live.run` 闭包禁写状态/禁时钟，见上游 `live.rs`）。
-        if self.glass {
-            self.video_bg.tick(ui.ctx());
-        }
         if let Some(live) = self.live.as_ref() {
             let clear = if self.dark {
                 egui::Color32::BLACK
@@ -1239,23 +1200,9 @@ impl eframe::App for App {
                 egui::Color32::WHITE
             };
             live.run(ui, clear, |page| {
-                // 注意：只画图，不加 label/分配，保持根光标全新。
-                if let Some(tex) = self.video_bg.texture.as_ref() {
-                    // 动态帧（托管纹理；与静态同矩形含右移，折射与所见一致）。
-                    let s = tex.size();
-                    if s[0] > 0 && s[1] > 0 {
-                        let r = Self::cover_shifted(screen, s[0] as f32, s[1] as f32, BG_SHIFT_X);
-                        page.painter().with_clip_rect(screen).image(
-                            tex.id(),
-                            r,
-                            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                            egui::Color32::WHITE,
-                        );
-                        return;
-                    }
-                }
                 // twin 图进折射源（native id 自动映射；离屏画不影响可见合成；
                 // 与可见遍同矩形（含右移），折射与所见一致）。
+                // 注意：只画图，不加 label/分配，保持根光标全新。
                 if let Some(t) = self.twin_photo.as_ref() {
                     let r = Self::cover_shifted(screen, t.w, t.h, BG_SHIFT_X);
                     page.painter().with_clip_rect(screen).image(
