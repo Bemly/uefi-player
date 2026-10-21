@@ -1,5 +1,5 @@
 # 20-video.toml：QEMU 黑盒矩阵分组（`matrix/` 目录，按用例前缀分组，合并后等价原 `matrix.toml`）。
-# 共 8 cases（播放 5 + 播放列表 3），单文件 ≤1000 行（AGENTS 口径）。新增 case 按前缀落对应文件（解码/槽位类进 60-decode.toml），并写 `covers`。
+# 共 8 cases（播放 5 + 播放列表 3），单文件 ≤1000 行（AGENTS 口径）。新增 case 按前缀落对应文件（解码/槽位/crew-roles 类进 60-decode.toml），并写 `covers`。
 #
 # 播放列表模型（`[playlist] loop` + `[[playlist.items]] path`，见 `docs/player.md`）：
 # 固件不再读 `[play] format`（旧键残留按 serde 默认忽略），每项按路径自动检测

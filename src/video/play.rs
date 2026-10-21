@@ -46,7 +46,8 @@ pub(crate) fn need_eager_clip() -> bool {
     // mp/dynamic 恒全量前视（行区切分）；其余懒/全量按 feed 走 clip 路。
     // wallpaper 恒 eager 由 `feed_for` tag 裁决（此处不分支）。
     // single 零缓存：eager 会一次全解（正确但多内存），mp/dynamic 下仍 eager（矩阵要求）。
-    // slots 例外（manual direct+all + qois/raw + 零拷系供片）：走 lazy 保留编码源，
+    // slots 例外（manual direct+all + qois/raw + 零拷系供片 + roles 准分）：
+    // 走 lazy 保留编码源，
     // AP 逐核真解码（见 `mp_slots`）；dynamic 后端恒 true（`dynamic_draw` 仍吃 eager）。
     match config::schedule_backend() {
         config::ScheduleBackend::Dynamic => true,
@@ -54,7 +55,10 @@ pub(crate) fn need_eager_clip() -> bool {
         config::ScheduleBackend::Manual => {
             let direct_all = config::effective_render() == config::RenderMode::Direct
                 && config::effective_workers() == config::WorkersMode::All;
-            if direct_all && super::mp::mp_slots::slots_feed_eligible() {
+            // 槽路意向（含 roles 门：显式 `combined`/单核预算直接 eager；其余走
+            // 乐观 lazy，分发期 `use_frame_slots` 复核 + `ensure_eager` 兜底，
+            // 语义与旧版一致）。
+            if direct_all && config::mp_slots_wanted() {
                 return false;
             }
             direct_all

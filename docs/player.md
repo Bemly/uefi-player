@@ -66,6 +66,24 @@
    `dynamic` 按实测核速加权分行（校准时 probe 定权计时；播放时全帧源 +
    BSP 每轮按各核上一轮耗时 EWMA 重算边界并发布，快核多拿，无 tile 游标开销，
    OSD 行恒划出）。
+- crew 上限与分工角色（`[schedule] cores`/`roles`，分发串口行
+  `sched: crew=<n>/<m> roles=<r> workers=<w>`，n=生效核数，m=实测总数，
+  旧 `play: path=` 行字节不变；QEMU 矩阵 `smp=4` 固定故 m=4）：
+  `cores` 0=auto（不限）/1-64（BSP + 最小编号 N-1 个 AP，钳 0..=64）；
+  `roles` auto（符合条件即 split，否则 combined）/combined（slots 门恒关，
+  全员行分区拷贝）/split（AP 解码到槽 + BSP 上传）。
+  生效核集：bsp_only→{BSP}；cores>0→前 min(cores,实测)；记忆值
+  （`measured_workers_n` 首轮 sweep 胜者回写，见下）；all→全核；auto 未测→sweep。
+- slots 路径门（`roles` 收敛后裁决）：适配方（qois/raw + 懒供片
+  zero_copy/single/stream + 生效核数>1）与 `roles != combined` 同时成立才进
+  `mp_slots`（`play: path=mp_slots …` 行不变；`need_eager_clip` 联动，
+  见 `src/video/play.rs`）；`roles == split` 但不适配方 → 警告 + 回行分区路
+  （`play: path=mp_draw`）；`roles == combined` 直接行分区路（无警告）。
+  矩阵覆盖：`60-decode.toml` 的 `video-crew-count`（cores=2 断言
+  `sched: crew=2/4` + 行路行）/`video-roles-split`（断言
+  `sched: crew=4/4 roles=split` + slots 路行 + scan 行）/
+  `video-roles-combined`（同适配方断言 `sched: crew=4/4 roles=combined` +
+  行路行证伪 slots）。
 - 后缓冲（`[render.tune] buffers`，0-16）：`>0` 时 direct 路先画影子再整推前台
   （多核散写的撕裂窗口压成一次 push；OSD 先画进影子再随推上屏）。
   单/多核路共用同一语义（出屏基址切换 + BSP 推 + `push_gen` 同步，N==1 也无竞态）；

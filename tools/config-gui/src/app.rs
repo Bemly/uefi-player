@@ -84,6 +84,8 @@ pub(crate) struct App {
     /// 存盘时对比：tune 变了就清空全部实测记忆（bench 条件变了，旧结论作废，
     /// 下次启动重测；否则改 tune 永不生效——记忆命中直接跳过矩阵）。
     pub(crate) tune_at_load: RenderTune,
+    /// 核心上限滑杆镜像：0..=64（0 = 自动不限，库内滑杆只吃 `f32`，整数档用 round 镜像）。
+    pub(crate) sched_cores_f: f32,
     pub(crate) glass: bool,
     /// 深色模式：egui visuals + 纯黑 backdrop + 深色玻璃预设三处联动。
     pub(crate) dark: bool,
@@ -162,6 +164,7 @@ impl App {
             tune_vsync_fps_f: default_vsync_fps() as f32,
             tune_buffers_f: default_buffers() as f32,
             tune_at_load: RenderTune::default(),
+            sched_cores_f: 0.0,
             glass,
             dark: false,
             zh: false,
@@ -209,6 +212,7 @@ impl App {
         self.tune_tile_f = self.cfg.render.tune.tile_rows.clamp(8, 512) as f32;
         self.tune_vsync_fps_f = self.cfg.render.tune.vsync_fps.clamp(15, 240) as f32;
         self.tune_buffers_f = self.cfg.render.tune.buffers.min(16) as f32;
+        self.sched_cores_f = self.cfg.schedule.cores.min(64) as f32;
         // 越界单选回到列表内（删行后旧下标悬空，下一帧点行即覆盖）。
         if let Some(s) = self.playlist_sel {
             if s >= self.cfg.playlist.items.len() {
@@ -284,30 +288,58 @@ impl App {
         }
     }
 
-    /// 渲染矩阵记忆行：全未测提示切 auto，否则报记忆值 + 校准时机型核数。
+    /// 渲染矩阵记忆行：全未测提示切 auto，否则报记忆值 + `cores n/m`
+    ///（n = `[schedule] measured_workers_n` 首轮 sweep 胜者，m = 校准时机型总数）。
     pub(crate) fn render_measured_line(&self) -> String {
         let m = &self.cfg.render;
+        let n = self.cfg.schedule.measured_workers_n;
         if m.measured_render == RenderMode::Auto
             && m.measured_workers == WorkersMode::Auto
             && m.measured_dist == DistMode::Auto
             && m.measured_vsync == VsyncMode::Auto
             && m.measured_cores == 0
+            && n == 0
         {
             t!("render.unmeasured").into_owned()
         } else {
             t!(
                 "render.measured",
                 v = format!(
-                    "{}/{}/{}/{}, {} cores",
+                    "{}/{}/{}/{}, cores {}/{}",
                     m.measured_render.file_str(),
                     m.measured_workers.file_str(),
                     m.measured_dist.file_str(),
                     m.measured_vsync.file_str(),
+                    n,
                     m.measured_cores
                 )
             )
             .into_owned()
         }
+    }
+
+    /// 调度 sweep 记忆行（只读展示）：0 = 未测，下次启动 sweep 并持久化胜者；
+    /// 有值报 `cores n/m`（n = 胜者，m = 校准时机型总数）。
+    pub(crate) fn schedule_measured_line(&self) -> String {
+        let n = self.cfg.schedule.measured_workers_n;
+        let m = self.cfg.render.measured_cores;
+        if n == 0 {
+            t!("sched.unmeasured").into_owned()
+        } else {
+            t!("sched.measured", n = n, m = m).into_owned()
+        }
+    }
+
+    /// 固件串口行同式摘要（仅展示）：`sched: crew=<n>/<m> roles=<r> workers=<w>`
+    ///（n = sweep 胜者，m = 校准时机型总数；未测时 n/m = 0/measured_cores）。
+    pub(crate) fn sched_crew_line(&self) -> String {
+        format!(
+            "sched: crew={}/{} roles={} workers={}",
+            self.cfg.schedule.measured_workers_n,
+            self.cfg.render.measured_cores,
+            self.cfg.schedule.roles.file_str(),
+            self.cfg.schedule.workers.file_str(),
+        )
     }
 
     pub(crate) fn load_path(&mut self, path: String) {
@@ -345,6 +377,7 @@ impl App {
     pub(crate) fn save_to(&mut self, path: &str) {
         clamp_tune(&mut self.cfg.render.tune);
         clamp_decode(&mut self.cfg.decode);
+        clamp_schedule(&mut self.cfg.schedule);
         // tune 变了 = bench 条件变了：旧记忆作废，下次启动重测。
         // 不做这个，改 tune 会被“有记忆快启”吞掉，永远不生效。
         if self.cfg.render.tune != self.tune_at_load {
@@ -354,6 +387,7 @@ impl App {
             self.cfg.render.measured_vsync = VsyncMode::Auto;
             self.cfg.render.measured_vsync_fps = 0;
             self.cfg.render.measured_cores = 0;
+            self.cfg.schedule.measured_workers_n = 0;
             self.cfg.play.measured_max_fps = 0;
         }
         self.tune_at_load = self.cfg.render.tune;
@@ -670,6 +704,15 @@ impl eframe::App for App {
                     ui.small(t!("sum.accel", v = self.cfg.accel.level.file_str()));
                     ui.small(t!("sum.render", v = self.cfg.render.mode.file_str()));
                     ui.small(t!("sum.workers", v = self.cfg.schedule.workers.file_str()));
+                    ui.small(t!(
+                        "sum.cores",
+                        v = if self.cfg.schedule.cores == 0 {
+                            String::from("auto")
+                        } else {
+                            self.cfg.schedule.cores.min(64).to_string()
+                        }
+                    ));
+                    ui.small(t!("sum.roles", v = self.cfg.schedule.roles.file_str()));
                     ui.small(t!("sum.dist", v = self.cfg.schedule.dist.file_str()));
                     ui.small(t!("sum.vsync", v = self.cfg.render.vsync.file_str()));
                     ui.small(t!("sum.wallpaper", v = self.wallpaper_text()));

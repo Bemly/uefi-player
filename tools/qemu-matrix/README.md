@@ -70,7 +70,7 @@ cargo run --manifest-path tools/qemu-matrix/Cargo.toml --target "$(rustc -vV | s
   八表 qois/raw/hevc/avc/vp9/h263/mpeg2v/theora）。
   串口 `video: feed=` 恒为生效值（覆盖时取 per-codec 值，另带 ` fetchovr=<fmt>` 令牌）；
   壁纸恒 eager 无视覆盖。`[play] pipeline` 与 `[render] workers/dist` 旧键已删除
-  （正典只剩 `[schedule]` workers/dist；旧值别名 `avx512`/`on`/整数壁纸 fps 已摘除）。
+  （正典只剩 `[schedule]` workers/dist/cores/roles；旧值别名 `avx512`/`on`/整数壁纸 fps 已摘除）。
   旧 7 行为映射（`render_additions` 为空）：staged/zero_copy/stream→对应 feed +
   `render.blt`；single→NEW `feed=single`；legacy_blt/direct/u64→clip+eager +
   对应 render/workers/accel（u64 步进由 `copy_block` 位宽分发覆盖）。
@@ -100,6 +100,18 @@ cargo run --manifest-path tools/qemu-matrix/Cargo.toml --target "$(rustc -vV | s
   `expect` 必须在超时前全部在串口出现；`soak_sec` 用于播放类 case（不断言画面，
   只看 N 秒内无红线——QEMU 里断言不了撕裂，只保活）。
 - `artifact` 用于落盘类（`hwbench`）：跑完重新挂载镜像，断言文件存在且含关键字。
+- 调度 crew/roles（`[schedule] cores`/`roles`，`60-decode.toml` 的
+  `video-crew-count`/`video-roles-split`/`video-roles-combined` 三例）：
+  `cores` 0=auto（不限）/1-64 上限（BSP + 最小编号 N-1 个 AP，钳 0..=64）；
+  `roles` auto（符合条件即 split，否则 combined）/combined（全员行分区拷贝，
+  slots 门恒关）/split（AP 解码到槽 + BSP 上传，仅 qois/raw 懒供片
+  zero_copy/single/stream，不适配方警告回落行分区路）。
+  生效核集：bsp_only→{BSP}；cores>0→前 min(cores,实测)；记忆值
+  （`measured_workers_n`）；all→全核；auto 未测→sweep。
+  分发时串口新增 `sched: crew=<n>/<m> roles=<r> workers=<w>` 行
+  （n=生效核数，m=实测总数；QEMU `smp=4` 固定故 m=4；旧 `play: path=` 行字节不变）。
+  首轮 sweep 胜者固件回写 `measured_workers_n` 持久化（0=未测，GUI 只读展示，
+  重测清零），与 `measured_workers/dist/cores` 同机制。
 
 ## 新增 case 规范（和 AGENTS 规则配套）
 
@@ -110,6 +122,10 @@ cargo run --manifest-path tools/qemu-matrix/Cargo.toml --target "$(rustc -vV | s
    path 行 + soak，不断言画质）；fetch 覆盖另加一例（全局 clip + per-codec stream，
    断言生效 `video: feed=stream` + `fetchovr=<fmt>` 令牌）。
 2. 有新串口日志 → 老 case 的 `expect` 能用就复用，不硬造新 case。
+   新分发串口行（`sched: crew=<n>/<m> roles=<r> workers=<w>`，QEMU `smp=4`
+   故 m=4）按 `video-crew-count` 样式（crew 子串 + path 行 + soak）；
+   roles 门按 `video-roles-split`（slots 路 `play: path=mp_slots` 前缀 + crew 行）/
+   `video-roles-combined`（行路 `play: path=mp_draw` 证伪 slots + crew 行）样式。
 3. 慢 case（>5min）标 `slow = true`，默认跳过，`--include-slow` 才跑。
 4. 播放列表/画廊 case 按 `playlist-*` / `wallpaper-gallery-*` 样式
   （`playlist: items=` + 逐项 `playlist: item` + `video: fmt=` + path 行 + soak；

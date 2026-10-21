@@ -115,6 +115,10 @@ pub(crate) struct MpCalCtx<'a> {
     pub(crate) times: *const AtomicUsize,
     /// dynamic 加权行边界（n+1 项；BSP 写、mode/round 发布后 AP 只读）。
     pub(crate) bounds: *const AtomicUsize,
+    /// 选中集上限（`config::crew` 决议的 k；`cap == n` 为旧行为全员参加）。
+    /// crew 外 AP（`who_am_i >= cap`）idle 自旋到 QUIT，不拷行区、不打卡；
+    /// BSP 侧 `MpDrive.expected` 须按 `cap` 配（`cap - 1`），否则打卡数对不上。
+    pub(crate) cap: usize,
 }
 
 /// AP 常驻循环：等新轮次号，按本轮模式拷（静态分区 / tile 游标领活 /
@@ -126,7 +130,19 @@ pub(crate) extern "efiapi" fn ap_cal_copy(arg: *mut c_void) {
         return;
     }
     let ctx = unsafe { &*(arg as *const MpCalCtx) };
-    let id = ctx.mp.who_am_i().unwrap_or(usize::MAX) % ctx.n.max(1);
+    // 选中集门：crew 外 AP idle 到 QUIT（不拷行区、不打卡；BSP-id 假设与
+    // start-all-but-idle-unchosen 理由见 `config::crew` 模块头）。
+    let phys = ctx.mp.who_am_i().unwrap_or(usize::MAX);
+    if phys >= ctx.cap.max(1) {
+        loop {
+            if ctx.round.load(Ordering::Acquire) == CAL_QUIT {
+                break;
+            }
+            core::hint::spin_loop();
+        }
+        return;
+    }
+    let id = phys % ctx.n.max(1);
     let (y0, y1) = rows_for_cal(id, ctx.n, ctx.height);
     let mut my_round = 0usize;
     loop {

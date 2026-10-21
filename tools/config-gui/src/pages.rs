@@ -128,6 +128,46 @@ impl App {
                         });
                         ui.small(workers_desc(self.cfg.schedule.workers));
                         ui.add_space(10.0);
+                        // cores 上限：bsp_only 钉死 1 核，整组隐藏（置灰不如隐藏，见壁纸/boot先例）。
+                        if self.cfg.schedule.workers != WorkersMode::BspOnly {
+                            ui.label(t!("sched.cores"));
+                            let cores_label = format!(
+                                "{}: {}",
+                                t!("sched.cores"),
+                                cores_text(self.cfg.schedule.cores)
+                            );
+                            egui_glass::GlassSlider::new(&mut self.sched_cores_f, 0.0..=64.0)
+                                .text(cores_label)
+                                .step_by(1.0)
+                                .style(if self.dark {
+                                    egui_glass::GlassStyle::dark()
+                                } else {
+                                    egui_glass::GlassStyle::regular()
+                                })
+                                .show(ui);
+                            self.cfg.schedule.cores =
+                                self.sched_cores_f.round().clamp(0.0, 64.0) as u32;
+                            ui.small(cores_desc());
+                            ui.add_space(10.0);
+                        }
+                        ui.label(t!("sched.roles"));
+                        ui.horizontal(|ui| {
+                            for v in RolesMode::ALL {
+                                if self.option_button(
+                                    ui,
+                                    self.cfg.schedule.roles == v,
+                                    v.file_str(),
+                                ) {
+                                    self.cfg.schedule.roles = v;
+                                }
+                            }
+                        });
+                        ui.small(roles_desc(self.cfg.schedule.roles));
+                        ui.add_space(10.0);
+                        // schedule sweep 记忆只读行（`cores n/m`，与固件 `sched: crew=` 同口径；
+                        // 清零走下方统一重测按钮，不在此单设按钮）。
+                        ui.label(self.schedule_measured_line());
+                        ui.add_space(10.0);
                         // dist 只在直写 + 全核时有意义：单核下整组隐藏。
                         if self.cfg.schedule.workers != WorkersMode::BspOnly {
                             ui.label(t!("accel.dist"));
@@ -254,12 +294,14 @@ impl App {
                     {
                         // 清零记忆并存盘：任一 auto 下次启动重校准。
                         // half 预算派生自矩阵计时，一并清零。
+                        // schedule sweep 胜者同理清零（只读展示，下次启动重 sweep）。
                         self.cfg.render.measured_render = RenderMode::Auto;
                         self.cfg.render.measured_workers = WorkersMode::Auto;
                         self.cfg.render.measured_dist = DistMode::Auto;
                         self.cfg.render.measured_vsync = VsyncMode::Auto;
                         self.cfg.render.measured_vsync_fps = 0;
                         self.cfg.render.measured_cores = 0;
+                        self.cfg.schedule.measured_workers_n = 0;
                         let p = self.path.clone();
                         self.save_to(&p);
                     }
@@ -607,8 +649,20 @@ impl App {
                     ui.label(t!("sum.blt", v = self.cfg.render.blt_op.file_str()));
                 }
                 ui.label(t!("sum.workers", v = self.cfg.schedule.workers.file_str()));
+                ui.label(t!(
+                    "sum.cores",
+                    v = if self.cfg.schedule.cores == 0 {
+                        String::from("auto")
+                    } else {
+                        self.cfg.schedule.cores.min(64).to_string()
+                    }
+                ));
+                ui.label(t!("sum.roles", v = self.cfg.schedule.roles.file_str()));
                 ui.label(t!("sum.dist", v = self.cfg.schedule.dist.file_str()));
                 ui.label(t!("sum.backend", v = self.cfg.schedule.backend.file_str()));
+                // 固件串口同式（仅展示）：`sched: crew=<n>/<m> roles=<r> workers=<w>`。
+                ui.label(self.sched_crew_line());
+                ui.label(self.schedule_measured_line());
                 ui.label(t!("sum.vsync", v = self.cfg.render.vsync.file_str()));
                 ui.label(self.render_measured_line());
                 ui.label(t!("sum.wallpaper", v = self.wallpaper_text()));

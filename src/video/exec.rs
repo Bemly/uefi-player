@@ -131,7 +131,12 @@ extern "efiapi" fn exec_ap(arg: *mut c_void) {
     }
     let ctx = unsafe { &*(arg as *const ApCtx) };
     let my_id = unsafe { (*ctx.mp).who_am_i().unwrap_or(usize::MAX) };
-    if my_id == 0 || my_id >= ctx.n {
+    if my_id == 0 {
+        return;
+    }
+    // 选中集门（`crew::ap_index_in_crew`）：编号 ≥ k 的闲 AP 早退（见 `crew`
+    // 模块头 start-all-but-idle-unchosen），不 poll 执行器、不 steal。
+    if config::ap_index_in_crew(my_id, ctx.n).is_none() {
         return;
     }
     let exec = unsafe { &*ctx.execs.add(my_id) };
@@ -386,7 +391,13 @@ pub fn dynamic_draw(
         }
     };
     let mp = open_protocol_exclusive::<MpServices>(mp_handle)?;
-    let n_cores = mp.get_number_of_processors()?.enabled.max(1);
+    // 选中集（`crew` 决议：BSP-id 自检 + 预算/记忆/workers 优先级；分带/槽环
+    // 全按 k 建，闲 AP 由 `exec_ap` 入口早退，仍走单次 broadcast，见 `crew` 头）。
+    let detected = mp.get_number_of_processors()?.enabled.max(1);
+    let n_cores = config::resolve_crew_count(detected, mp.who_am_i().unwrap_or(0));
+    // dynamic 后端恒 steal 泵（不分行/槽角色）：sched 行照打，roles 仅信息位
+    // （显式 split 不准入时同 manual 路 warn 一次）。
+    config::emit_sched_line(n_cores, detected, config::effective_roles(n_cores));
     if n_cores <= 1 {
         log::warn!("play: dynamic on single core, fallback nano_pump");
         return nano_pump(screen, clip, width, height, target, tps);

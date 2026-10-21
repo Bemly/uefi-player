@@ -8,9 +8,12 @@
 //! # 接入条件（`use_frame_slots`，分发前 `mp_draw` 裁决；`need_eager_clip` 联动）
 //! - 片源 qois/raw：帧独立、无跨帧解码状态（可行性见 `decoder::source` 文件头；
 //!   有状态六格式恒走行分区 eager 路）；
-//! - `workers == all`（快照 `effective_workers`）且核数 > 1；
+//! - 选中核数 > 1（`workers` 已折进选中集：bsp_only/预算/记忆全走到 `crew` 数，
+//!   不另查 `effective_workers` 三态）；
 //! - 有效供片（`config::effective_feed(fmt)`，每格式 `fetch` 覆盖全局后）为
 //!   `zero_copy` / `single` / `stream`（`clip`/`staged` 走旧路，逐字节旧行为）；
+//! - `roles != combined`（显式合恒行路；显式分不准入时 warn + 回落，见
+//!   `config::effective_roles`）；
 //! - `Clip` 为 lazy 形态（`need_eager_clip` 已为本格返回 false，编码源保留）。
 //! 其余一律回行分区 eager 路（`mp_draw` 下半段，不动；lazy 残留就地 `ensure_eager`）。
 //!
@@ -59,7 +62,7 @@
 //!   同 `mp_draw` 既有风格）；`unsafe fn` 体内显式 `unsafe {}` 块（edition 2024）。
 
 use super::OSD_ROWS;
-use crate::config::{self, CopyWidth, FeedMode, MediaFormat, WorkersMode};
+use crate::config::{self, CopyWidth, MediaFormat, RolesMode};
 use crate::error::Result;
 use crate::fs::Fs;
 use crate::graphics::{Screen, copy_block};
@@ -86,19 +89,12 @@ use uefi::proto::pi::mp::MpServices;
 /// 每核槽环深（1 在推 + 1 预取；总预取 ≤ 2·N 帧，内存有界）。
 const SLOTS_PER_CORE: usize = 2;
 
-/// 供片格（`need_eager_clip` 与 `use_frame_slots` 共用；不含核数）。
-pub(crate) fn slots_feed_eligible() -> bool {
-    let fmt = config::play_format();
-    matches!(fmt, MediaFormat::Qois | MediaFormat::Raw)
-        && matches!(
-            config::effective_feed(fmt),
-            FeedMode::ZeroCopy | FeedMode::Single | FeedMode::Stream
-        )
-}
-
-/// 接入裁决（`mp_draw` 分发前调；`clip.lazy.is_some()` 另由调用方确认）。
+/// 供片格由 `config::slots_feed_eligible` 统一口径（本模块不再自定，避免双源）。
+/// 接入裁决（`mp_draw` 分发前调；`clip.lazy.is_some()` 另由调用方确认）：
+/// 准入（供片格 + 选中核数 > 1）且 `roles != combined`（`auto` 准入即分；
+/// 显式 `split` 不准入时 `effective_roles` 内 warn + 回落，本函数只取布尔）。
 pub(crate) fn use_frame_slots(n_cores: usize) -> bool {
-    n_cores > 1 && config::effective_workers() == WorkersMode::All && slots_feed_eligible()
+    config::slots_eligible(n_cores) && config::effective_roles(n_cores) != RolesMode::Combined
 }
 
 /// 编码源（BSP scan-split 产物，会话期常驻只读共享；AP 按序号索引解码）。
@@ -199,7 +195,9 @@ extern "efiapi" fn slot_task(arg: *mut c_void) {
     }
     let ctx = unsafe { &*(arg as *const SlotTask) };
     let my_id = unsafe { (*ctx.mp).who_am_i().unwrap_or(usize::MAX) };
-    if my_id >= ctx.num_cores {
+    // 选中集门（`crew::ap_index_in_crew`）：编号 ≥ k 的闲 AP 早退（见 `crew`
+    // 模块头 start-all-but-idle-unchosen），永不碰环槽/GOP。
+    if config::ap_index_in_crew(my_id, ctx.num_cores).is_none() {
         return;
     }
     if my_id == 0 {
@@ -582,7 +580,10 @@ pub(crate) fn mp_draw_slots(
 ) -> Result {
     let mp_handle = get_handle_for_protocol::<MpServices>()?;
     let mp = open_protocol_exclusive::<MpServices>(mp_handle)?;
-    let n_cores = mp.get_number_of_processors()?.enabled.max(1);
+    // 选中集（`crew` 决议：BSP-id 自检 + 预算/记忆/workers 优先级；槽路隐含
+    // k > 1，环/分块/owner 全按 k 算，闲 AP 由 `slot_task` 入口早退）。
+    let detected = mp.get_number_of_processors()?.enabled.max(1);
+    let n_cores = config::resolve_crew_count(detected, mp.who_am_i().unwrap_or(0));
     drop(clip);
     let mut fs = Fs::new()?;
     let (source, row_bytes, vid_h) = scan_split(&mut fs)?;

@@ -70,6 +70,22 @@
   （no_std 下 fail-closed OFF，特性关时调用即 no-op）。接上线后六家皆受控
   （单比特跟随全局，无独立开关可拧）。
 
+## crew/roles 与 SIMD 正交（`[schedule] cores`/`roles` 只定核集与分工）
+
+- `cores`（crew 上限：0=auto 不限 / 1-64，BSP + 最小编号 N-1 个 AP）与 `roles`
+  （combined 全员行分区拷贝 / split AP 解码到槽 + BSP 上传）只决定哪些核参与、
+  核间分工（crew 数学 + roles 门见 `docs/player.md` 管线，键口径见
+  `docs/config.md`），不改变位宽选择：`copy_width()` 仍按开机 `resolve_accel`
+  全局一次，快照给行区搬运；解码六家单比特仍跟随全局（`level=scalar` 全关，
+  其余开，h264 收敛 Y256/Z512）——AP 解码与 BSP 解码同值，换 crew/roles 不换 ISA。
+- 串口：分发新增 `sched: crew=<n>/<m> roles=<r> workers=<w>` 行（旧 `play: path=`
+  行字节不变）；矩阵 `60-decode.toml` 的 `video-crew-count`/`video-roles-split`/
+  `video-roles-combined` 三例断言 crew 行 + 新旧 path 行（QEMU `smp=4` 固定故 m=4）。
+- `measured_workers_n`（首轮 sweep 胜者，固件回写持久化，GUI 只读 + 重测清零）
+  只记生效核数，不记位宽：`tune` 变化 / 重测按钮清零它时与
+  `measured_render/workers/dist/vsync/cores` 同批作废（GUI 侧已接线），
+  下次启动重 sweep。
+
 ## AVC 解码 SIMD（已 vendor + no_std 自 port，2026-10-21）
 
 轮子（`rusty_h264-decoder`）host 上开 `asm` 纯 Rust 可移植 SIMD 已证提速

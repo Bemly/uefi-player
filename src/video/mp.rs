@@ -17,7 +17,7 @@
 
 use super::decoder::Clip;
 use super::{VIDEO_H, VIDEO_W, rdtsc};
-use crate::config::{self, CopyWidth, DistMode};
+use crate::config::{self, CopyWidth, DistMode, RolesMode};
 use crate::error::Result;
 use crate::fs::Fs;
 use crate::graphics::mp_copy::{BoundGate, publish_bound_gate, read_bound_gate};
@@ -123,7 +123,9 @@ extern "efiapi" fn play_task(arg: *mut c_void) {
     let ctx = unsafe { &*(arg as *const PlayTask) };
 
     let my_id = unsafe { (*ctx.mp).who_am_i().unwrap_or(usize::MAX) };
-    if my_id >= ctx.num_cores {
+    // 选中集门（`crew::ap_index_in_crew`）：编号 ≥ k 的闲 AP 早退（见 `crew`
+    // 模块头 start-all-but-idle-unchosen），永不碰行区/GOP。
+    if config::ap_index_in_crew(my_id, ctx.num_cores).is_none() {
         return;
     }
 
@@ -500,12 +502,25 @@ pub fn mp_draw(
     // 双格式同一下游切分；坏帧记数在 `Clip` 内，见 `decoder.rs`）。
     let mp_handle = get_handle_for_protocol::<MpServices>()?;
     let mp = open_protocol_exclusive::<MpServices>(mp_handle)?;
-    let n_cores = mp.get_number_of_processors()?.enabled;
-    // zero-copy×mp 帧分区：qois/raw 无状态帧并行 + 全核 + 零拷/单例/流式供片 +
+    // 选中集（`crew` 决议：BSP-id 自检 + 预算/记忆/workers 优先级；行分区、
+    // BoundGate、影子环全按 k 算，闲 AP 由 `play_task` 入口早退）。
+    let detected = mp.get_number_of_processors()?.enabled.max(1);
+    let n_cores = config::resolve_crew_count(detected, mp.who_am_i().unwrap_or(0));
+    // 槽路裁决（准入且 roles != combined；显式 split 不准入时内含一次 warn）；
+    // 生效 roles 与裁决值恒一致（分即 Split，不分即 Combined），直接派生，
+    // 不二次调 `effective_roles`（免重复 warn）。
+    let slots = mp_slots::use_frame_slots(n_cores);
+    let roles = if slots {
+        RolesMode::Split
+    } else {
+        RolesMode::Combined
+    };
+    config::emit_sched_line(n_cores, detected, roles);
+    // zero-copy×mp 帧分区：qois/raw 无状态帧并行 + 准入 + 槽路角色 +
     // lazy 编码源就绪时，帧按核分区、各核真解码进槽环、BSP 按序整推（见 `mp_slots`）；
     // eager Clip 走下述行分区 eager 路（防双解码浪费）；lazy 残留（单核/配置漂移）
     // 就地补全，确保下述行分区恒吃 eager（逐字节旧行为）。
-    if mp_slots::use_frame_slots(n_cores) && clip.lazy.is_some() {
+    if slots && clip.lazy.is_some() {
         return mp_slots::mp_draw_slots(screen, clip, target, tps);
     }
     clip.ensure_eager()?;

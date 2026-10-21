@@ -696,13 +696,59 @@ impl ScheduleBackend {
     }
 }
 
+/// 核心分工（与固件 `RolesMode` 同构；`Combined` = 全员行分区拷贝，
+/// `Split` = AP 解码→槽 + BSP 上传（仅 qois/raw 懒供片，否则警告回落），
+/// `Auto` = 符合条件即 split 否则 combined）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum RolesMode {
+    #[default]
+    Auto,
+    Combined,
+    Split,
+}
+
+impl RolesMode {
+    pub(crate) const ALL: [Self; 3] = [Self::Auto, Self::Combined, Self::Split];
+    pub(crate) fn file_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Combined => "combined",
+            Self::Split => "split",
+        }
+    }
+    pub(crate) fn as_u8(self) -> u8 {
+        match self {
+            Self::Auto => 0,
+            Self::Combined => 1,
+            Self::Split => 2,
+        }
+    }
+    pub(crate) fn from_u8(v: u8) -> Self {
+        match v {
+            1 => Self::Combined,
+            2 => Self::Split,
+            _ => Self::Auto,
+        }
+    }
+}
+
 /// `[schedule]`：与固件 `ScheduleConfig` 同构（手写调度独立成矩阵配置）。
+/// `cores` 0 = 自动（不限，机型全核），N>0 = 至多 N 核（BSP + 最小编号 N-1 个 AP），钳 0..=64；
+/// `roles` 见 `RolesMode`；`measured_workers_n` 0 = 未测（固件首轮 sweep 持久化胜者，
+/// GUI 只读展示 + 重测清零）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub(crate) struct ScheduleConfig {
     pub(crate) backend: ScheduleBackend,
     pub(crate) workers: WorkersMode,
     pub(crate) dist: DistMode,
+    #[serde(default)]
+    pub(crate) cores: u32,
+    #[serde(default)]
+    pub(crate) roles: RolesMode,
+    #[serde(default)]
+    pub(crate) measured_workers_n: u32,
 }
 
 /// `[async]`：与固件 `AsyncConfig` 同构。

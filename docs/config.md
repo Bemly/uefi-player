@@ -126,6 +126,14 @@ backend = "manual"      # 调度后端：manual（手写 MP 三路，workers/dis
                         # | dynamic（多核 steal 泵，只直写前台；见下回退）
 workers = "auto"        # manual 后端多核开关：auto | bsp_only | all（只对 direct 有效）
 dist = "auto"           # manual 后端分工：auto | static | tile | dynamic（只对 direct+all 有效）
+cores = 0               # crew 上限：0 = auto（不限）；1-64 = 至多 N 核
+                        # （BSP + 最小编号 N-1 个 AP，钳 0..=64）
+roles = "auto"          # 核心分工：auto（符合条件即 split，否则 combined）
+                        # | combined（全员行分区拷贝，slots 门恒关）
+                        # | split（AP 解码到槽 + BSP 上传；仅 qois/raw 懒供片，
+                        #   不适配方警告回落行分区路）
+# 首轮 sweep 记忆（固件回写，GUI 只读展示 + 重测清零；"auto"/0 = 未测，下次启动必测）：
+measured_workers_n = 0  # sweep 胜者（生效核数；0 = 未测，下次启动 sweep 并回写）
 
 [wallpaper]
 enable = false          # 菜单背景 + 引导过渡总开关（关 = decor 为 None，壁纸不 halt 任何流程）
@@ -186,6 +194,16 @@ executor = "all"        # 诊断项 a 跑哪条执行器线：all（默认，都
   （`level=scalar` 则六家全关，其余开；串口 `accel: decode simd hevc=…` 行
   + `accel: h264 decode isa = …` 行值全跟随全局，供矩阵断言）。ee2ccad 窗口期的 `[accel.decode]` 表直接忽略，
   不断旧文件解析。
+- `[schedule] cores/roles`（crew 数学，见 `docs/player.md` 管线）：
+  生效核集 bsp_only→{BSP}；cores>0→前 min(cores,实测总数)；
+  有记忆值（`measured_workers_n`）用记忆值；workers=all→全核；
+  workers=auto 未测→首轮 sweep（胜者回写 `measured_workers_n` 持久化，
+  与 `measured_workers/dist/cores` 同机制；QEMU 矩阵 `smp=4` 故 m=4）。
+  分发串口行 `sched: crew=<n>/<m> roles=<r> workers=<w>`
+  （n=生效核数，m=实测总数）；旧 `play: path=` 行字节不变。
+- `roles` 门：slots 适配方（qois/raw + 懒供片 zero_copy/single/stream +
+  生效核数>1）且 roles!=combined 才进 `mp_slots`；roles==split 但不适配方→
+  警告 + 行分区路；roles==combined→直接行分区路（无警告）。
 - `schedule.backend=manual`：旧三路（blt 单线程引擎 / direct BSP 单核直写 /
   direct 全核 `mp_draw` 常驻 AP + 世代同步），`workers`/`dist` 按直写/全核门控生效。
 - `schedule.backend=nano`：单核执行器泵（取帧→上屏→限速/掉帧一帧一调度），

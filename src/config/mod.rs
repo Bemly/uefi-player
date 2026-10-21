@@ -6,29 +6,23 @@
 //! ```toml
 //! version = 1
 //! [accel]
-//! level = "auto"  # 性能序（滑杆档位）：auto | scalar | sse | sse2 | sse3 | ssse3
-//!                 # | sse41 | sse42 | popcnt | lzcnt | movbe | aes | pclmulqdq
-//!                 # | rdrand | rdseed | sha | gfni | tbm | sse4a（AMD 专有垫底，
-//!                 #   扩展叶 8000_0001H ECX bit 21/6；qemu64 无此叶，显式配了即
-//!                 #   按 X128 钳住用，不断 boot）| avx | f16c | fma | avx2
-//!                 # | bmi1 | bmi2 | avxvnni | avx512f | avx512cd | avx512dq
-//!                 # | avx512bw | avx512vl
-//!                 # auto = 开机探最高可用；显式超硬件警告+钳住；旧 "avx512" 已删
-//!                 # （非法值整文件回默认 + 警告，无别名）；旧 "on"（vsync）与整数
-//!                 # 壁纸 fps 同理（无别名/回退）。
-//!                 # 解码 SIMD 无独立开关：六家单比特跟随全局（scalar 关/其余开，见 `resolve_accel` 末尾）
+//! level = "auto"  # 性能序：auto | scalar | sse..sse42 | popcnt/lzcnt/movbe/aes/
+//!                 # pclmulqdq/rdrand/rdseed/sha/gfni | tbm/sse4a（AMD 专有垫底，
+//!                 # 扩展叶 8000_0001H ECX bit 21/6；qemu64 无此叶即按 X128 钳住）
+//!                 # | avx | f16c | fma | avx2 | bmi1 | bmi2 | avxvnni
+//!                 # | avx512f | avx512cd | avx512dq | avx512bw | avx512vl
+//!                 # auto = 开机探最高可用；显式超硬件警告+钳住；旧 "avx512"/"on"/
+//!                 # 整数壁纸 fps 皆整文件回默认 + 警告（无别名）。
+//!                 # 解码 SIMD 无独立开关：六家单比特跟随全局（scalar 关/其余开）
 //! [render]
 //! mode    = "auto"        # "auto" | "direct" | "blt"
 //!                         # `[render] workers/dist` 已删除（未知键忽略；正典只认 `[schedule]`）
 //! vsync   = "auto"        # "auto" | "static" | "half" | "off"（软件帧预算，无硬件 vsync）
 //! blt_op  = "buffer_to_video"
-//! # 首启校准记忆（固件回写，GUI 只读展示；"auto"/0 = 未测，下次启动必测）：
-//! measured_render  = "auto"  # "direct" | "blt"
-//! measured_workers = "auto"  # "bsp_only" | "all"
-//! measured_dist    = "auto"  # "static" | "tile" | "dynamic"
-//! measured_vsync   = "auto"  # "static" | "off"（auto 探测结论；static/half 不用它）
-//! measured_vsync_fps = 0    # half 实测预算（fps；0 = 未测，下次启动现测并回写）
-//! measured_cores   = 0       # 校准时机型 AP+BSP 总数
+//! # 首启校准记忆（固件回写，GUI 只读；"auto"/0 = 未测，下次必测）：
+//! measured_render/workers/dist/vsync（四三态，见 `types`）+ measured_vsync_fps
+//! （half 预算 fps）+ measured_cores（校准时机型总数）+ [schedule]
+//! measured_workers_n（核数，[render] 三态同步写，只做展示兼容）
 //! [render.tune]
 //! frames    = 30   # 每次矩阵/微基准的帧数（>=1）
 //! tile_rows = 64   # tile 高（行），MP 自调度切块粒度（8-512）
@@ -37,45 +31,40 @@
 //! window    = 4    # 流式供片全局默认（feed=stream 且 decode.<fmt>.buffers=0 跟随时用；1-32）
 //! [play]
 //! fps = "auto"            # "auto" | "max" | "1".."240"
-//! feed = "clip"           # 供片模式："clip"（全量预解码，默认，老文件缺键照读）
-//!                         # | "staged"（qois 显式三段逐帧，其余七格式等价 clip）
-//!                         # | "stream"（每格式窗边播边解，游标后淘汰）
-//!                         # | "zero_copy"（单复用缓冲即时解码，调用方须立即上传）
-//!                         # | "single"（零缓存逐帧重解 + render.blt，旧 single 同语义）
-//!                         # 只切 `Clip` 内部拿帧方式，上传路（blt/direct/mp/nano）零改
-//!                         # `[play] pipeline` 已删除（未知键忽略；旧 7 档映射见 `docs/player.md`）
-//!                         # `[play] format` 已删除（改走 `[playlist]` 每项自动检测，残留忽略）
+//! feed = "clip"           # 供片："clip"（全量预解码，默认）| "staged"（qois 三段，
+//!                         # 其余七格式等价 clip）| "stream"（窗边播边解）
+//!                         # | "zero_copy"（单缓冲即时解码）| "single"（逐帧重解 + blt）
+//!                         # 只切 `Clip` 拿帧方式，上传路零改；`[play] pipeline/format`
+//!                         # 已删（未知忽略；旧映射见 `docs/player.md`）
 //! measured_max_fps = 0    # 固件实测后回写，GUI 只读展示
-//! [playlist]              # 播放列表（`video::play` 逐项自动检测加载，见该文件头）
-//! loop = "loop_list"      # "loop_single"（重播当前项）| "loop_list"（回绕，默认）| "once"（播完回菜单）
-//! [[playlist.items]]      # 单键片源路径（qois 后缀 / frameNNNN.raw 目录扫描 /
-//! path = "1080p/video.mp4" # mp4 容器探针 hevc>avc>vp9 / hevc/.265 / ivf / h263 / m2v / ogv）
-//! [[playlist.items]]      # 失败项 `playlist: skip` 警告跳过，不断播；空列表播片直接 Err
-//! path = "1080p/video.hevc"
+//! [playlist]              # 播放列表（`video::play` 逐项自动检测加载）
+//! loop = "loop_list"      # "loop_single" | "loop_list"（默认）| "once"
+//! [[playlist.items]]      # 单键片源路径（qois / frameNNNN.raw 目录 / mp4 探针
+//! path = "1080p/video.mp4" # hevc>avc>vp9 / .hevc/.265 / .ivf / .h263 / .m2v / .ogv）
+//!                         # 失败项 `playlist: skip` 警告跳过；空列表播片直接 Err
 //! [decode.hevc]           # 每格式解码表（六软解 + qois/raw 全键，缺表缺键全默认）：
-//! threads = "bsp_only"    # "bsp_only"（默认，顺序安全）| "all"（qois/raw 立即兑现，
-//!                         # 有状态解析但告警仍顺序）
-//! zero_copy = false       # 单选开关（默认 false；feed=zero_copy 照常零拷，本项叠加 hint）
-//! streaming = false       # 单选开关（默认 false；feed=stream 照常窗口，本项叠加 hint）
-//! buffers = 0             # 滑杆下标（0 = 跟随 tune.window 全局默认，1-32 显式覆盖每格式）
-//!                         # 其余 [decode.avc/vp9/h263/mpeg2v/theora/qois/raw] 同五键
-//! fetch = "clip"            # 可选覆盖（默认缺键 = 继承全局 [play] feed；显式值只覆盖本格式；壁纸恒 clip 忽略覆盖）
+//! threads = "bsp_only"    # "bsp_only"（默认）| "all"（qois/raw 兑现，有状态告警仍顺序）
+//! zero_copy/streaming = false # 单选 hint（feed 照常走对应复用/窗口，本项叠加）
+//! buffers = 0             # 0 = 跟随 tune.window，1-32 显式覆盖；其余七格式同五键
+//! fetch = "clip"          # 可选覆盖（缺键继承全局 feed；壁纸恒 clip 忽略覆盖）
 //! [wallpaper]
-//! enable = false          # 菜单背景 + 引导过渡总开关（默认关；开但画廊空 = 静默无壁纸）
-//! loop = "loop_list"      # 画廊循环（单曲/回绕/播一次；单曲只取首项，一次末帧保持）
-//! fps = "15"               # 背景帧率三态（与 [play] fps 同构；默认 "15"，整数值整文件回默认）
-//! preload = 8             # 按项预载封顶（0 = 不封顶，和播片一样拉满；
-//!                         # 1080p BGRA 单帧约 8MB，长动画注意内存）
-//! popup_freeze = true     # 选项弹窗时冻结壁纸（false 则行区继续播）
-//! [[wallpaper.items]]     # 单键片源路径（与播放列表同一自动检测；`format`/`frames` 旧键已删）
+//! enable = false          # 菜单背景 + 引导过渡总开关（默认关；开但空 = 静默无壁纸）
+//! loop = "loop_list"      # 单曲/回绕/播一次（单曲只首项，一次末帧保持）
+//! fps = "15"              # 与 [play] fps 同构三态（默认 "15"；整数值整文件回默认）
+//! preload = 8             # 按项预载封顶（0 = 不封顶；1080p 单帧约 8MB）
+//! popup_freeze = true     # 选项弹窗冻结壁纸（false 则行区继续播）
+//! [[wallpaper.items]]     # 单键片源路径（同一自动检测；B 过渡长 = 项数，旧键忽略）
 //! path = "wallpaper/wall.qois"
-//! # B 过渡长度由画廊项数代替 `frames`（旧键残留忽略）。
 //! [boot]
 //! auto/windows/linux/shell/uki/macos = true  # 多卷自动发现总开关 + 种类（关 = 只列本卷 BLS）
 //! strict = false          # 严格模式：BLS 只认本卷 + XBOOTLDR 卷（systemd 严格模式)
 //! [schedule] backend = "manual" | "nano" | "dynamic"（手写 MP / 单核泵 / 多核 steal 泵）
-//! workers = "auto"（manual 后端多核开关：auto | bsp_only | all）
-//! dist = "auto"（manual 后端分工：auto | static | tile | dynamic）
+//! workers = "auto"（多核开关：auto | bsp_only | all）
+//! dist = "auto"（分工：auto | static | tile | dynamic）
+//! cores = 0（用核预算：0 = 不限；N = 至多 N 核，BSP + 最小编号 N-1 AP；1..64）
+//! roles = "auto"（分工角色：auto = 准入即分（现状）| combined（恒行路）
+//!   | split（仅准入时槽路，否则 warn + 回落行路））
+//! measured_workers_n = 0（核数记忆：0 = 未测，首启 auto sweep 回写）
 //! [async] executor = "all"  # 诊断项 a 跑哪条执行器线："all"（默认）| "nano" | "dynamic"
 //! ```
 
@@ -90,9 +79,16 @@ use uefi::cstr16;
 use crate::error::NyaStatus;
 use crate::fs::Fs;
 
+mod crew;
 mod decode;
 mod types;
 
+pub use crew::persist_measured_workers_n;
+pub use crew::{
+    ap_index_in_crew, core_cells, effective_crew_count, effective_roles, emit_sched_line,
+    measured_workers_n, mp_slots_wanted, pick_core_count, resolve_crew_count, schedule_cores,
+    slots_eligible,
+};
 pub use decode::{
     decode_buffers, decode_effective_feed, decode_fetch, decode_streaming, decode_threads,
     decode_window, decode_zero_copy, effective_feed,
@@ -231,7 +227,7 @@ fn load_path(ptr: &AtomicUsize, len: &AtomicUsize, i: usize) -> Option<String> {
 }
 
 /// 开机读一次；返回需要屏显的警告行。
-/// 正典只有 `[schedule] workers/dist`（`[render]` 旧键未知忽略，不再照读）；
+/// 正典只有 `[schedule] workers/dist/cores/roles`（`[render]` 旧键未知忽略）；
 /// `[play] pipeline` 已删（未知忽略）；非法枚举/整数壁纸值整文件回默认 + 警告。
 pub fn load() -> Option<String> {
     let (cfg, warn) = parse();
@@ -239,6 +235,7 @@ pub fn load() -> Option<String> {
     RENDER.store(cfg.render.mode.as_u8(), Ordering::Relaxed);
     WORKERS.store(cfg.schedule.workers.as_u8(), Ordering::Relaxed);
     DIST.store(cfg.schedule.dist.as_u8(), Ordering::Relaxed);
+    crew::store_all(&cfg.schedule);
     SCHED_BACKEND.store(cfg.schedule.backend.as_u8(), Ordering::Relaxed);
     VSYNC.store(cfg.render.vsync.as_u8(), Ordering::Relaxed);
     MEASURED_RENDER.store(cfg.render.measured_render.as_u8(), Ordering::Relaxed);
@@ -289,13 +286,16 @@ pub fn load() -> Option<String> {
     BOOT_STRICT.store(cfg.boot.strict as u8, Ordering::Relaxed);
     ASYNC_EXECUTOR.store(cfg.r#async.executor.as_u8(), Ordering::Relaxed);
     log::info!(
-        "cfg: version={} accel.level={:?} render.mode={:?} sched.backend={:?} workers={:?} dist={:?} vsync={:?} blt_op={:?} tune.frames={} measured(render={:?} workers={:?} dist={:?} vsync={:?} vhalf={} cores={}) play.fps={} play.feed={:?} measured_max_fps={} playlist.items={} wallpaper.items={} async.executor={:?} boot(auto={} win={} lin={} sh={} uki={} mac={} strict={})",
+        "cfg: version={} accel.level={:?} render.mode={:?} sched.backend={:?} workers={:?} dist={:?} cores={} roles={:?} wmem={} vsync={:?} blt_op={:?} tune.frames={} measured(render={:?} workers={:?} dist={:?} vsync={:?} vhalf={} cores={}) play.fps={} play.feed={:?} measured_max_fps={} playlist.items={} wallpaper.items={} async.executor={:?} boot(auto={} win={} lin={} sh={} uki={} mac={} strict={})",
         cfg.version,
         cfg.accel.level,
         cfg.render.mode,
         cfg.schedule.backend,
         cfg.schedule.workers,
         cfg.schedule.dist,
+        cfg.schedule.cores,
+        cfg.schedule.roles,
+        cfg.schedule.measured_workers_n,
         cfg.render.vsync,
         cfg.render.blt_op,
         cfg.render.tune.frames,
@@ -801,7 +801,8 @@ pub fn needs_render_bench() -> bool {
     };
     if !render_is_blt
         && workers_mode() == WorkersMode::Auto
-        && measured_workers() == WorkersMode::Auto
+        && schedule_cores() == 0
+        && measured_workers_n() == 0
     {
         return true;
     }

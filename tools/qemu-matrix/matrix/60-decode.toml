@@ -1,5 +1,16 @@
-# 60-decode.toml：QEMU 黑盒矩阵分组（`matrix/` 目录，解码表 + 零拷×多核槽位路径）。
-# 共 11 cases（解码 9 + 槽位 2），单文件 ≤1000 行（AGENTS 口径）。
+# 60-decode.toml：QEMU 黑盒矩阵分组（`matrix/` 目录，解码表 + 零拷×多核槽位路径 + crew/roles）。
+# 共 14 cases（解码 9 + 槽位 2 + crew/roles 3），单文件 ≤1000 行（AGENTS 口径）。
+#
+# 调度 crew/roles（`[schedule] cores`/`roles`，分发串口行
+# `sched: crew=<n>/<m> roles=<r> workers=<w>`，旧 `play: path=` 行字节不变；
+# QEMU `smp=4` 固定故 m=4）：`cores` 0=auto（不限）/1-64 上限
+# （BSP + 最小编号 N-1 个 AP，钳 0..=64）；`roles` auto（符合条件即 split
+# 否则 combined）/combined（全员行分区拷贝，slots 门恒关）/split
+# （AP 解码到槽 + BSP 上传，仅 qois/raw 懒供片，不适配方警告回落行分区路）。
+# 生效核集：bsp_only→{BSP}；cores>0→前 min(cores,实测)；记忆值
+# （`measured_workers_n`）；all→全核；auto 未测→sweep。
+# 首轮 sweep 胜者固件回写 `measured_workers_n` 持久化（0=未测，GUI 只读展示，
+# 重测清零），与 `measured_workers/dist/cores` 同机制。
 #
 # 解码表（`[decode.<fmt>]` 八格式各五键：threads bsp_only/all + zero_copy/streaming 布尔 +
 # buffers 0=跟随 tune.window/1-32 显式 + fetch 缺省继承全局 feed）。
@@ -421,4 +432,106 @@ dist = "static"
 boot_expect = ["cfg: version=1", "play.feed=Stream", "idle: ready"]
 keys = [{ send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 }, { send = "p", wait_after = 3 }, { send = "0", wait_for = ["menu: ready"], wait_after = 5 }]
 expect = ["playlist: item 1/1 path=1080p/frame0000.raw", "play: path=mp_slots frame-parallel fmt=raw fetch=stream", "mp: slots scan raw frames=2 1920x1080", "video: fmt=Raw"]
+soak_sec = 10
+
+# crew 上限（`[schedule] cores=2` + workers=all + clip/eager qois：非 slots 适配方，
+# 行分区 eager 路）：断言新分发串行 `sched: crew=2/4`（QEMU smp=4 固定 m=4）+
+# 旧 `play: path=mp_draw` 字节不变（roles 缺省 auto，不断言 roles 值）。
+[[case]]
+name = "video-crew-count"
+covers = ["src/video/mp.rs", "src/video.rs", "src/config/types.rs", "usb_reports/1080p/video.qois"]
+timeout_sec = 180
+needs_video = true
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+vsync = "off"
+[play]
+fps = "max"
+feed = "clip"
+[playlist]
+loop = "loop_list"
+[[playlist.items]]
+path = "1080p/video.qois"
+[wallpaper]
+enable = false
+[schedule]
+backend = "manual"
+workers = "all"
+cores = 2
+"""
+boot_expect = ["cfg: version=1", "play.feed=Clip", "idle: ready"]
+keys = [{ send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 }, { send = "p", wait_after = 3 }, { send = "0", wait_for = ["menu: ready"], wait_after = 5 }]
+expect = ["playlist: items=1 loop=loop_list", "playlist: item 1/1 path=1080p/video.qois", "video: fmt=Qois", "sched: crew=2/4", "play: path=mp_draw"]
+soak_sec = 10
+
+# roles=split 适配方（qois + feed=stream 懒供片 + workers=all）：AP 解码到槽 +
+# BSP 上传 slots 路：断言 `play: path=mp_slots` 前缀 + `sched: crew=4/4 roles=split`
+# + 旧 scan 行字节不变。
+[[case]]
+name = "video-roles-split"
+covers = ["src/video/mp_slots.rs", "src/video.rs", "src/config/types.rs", "usb_reports/1080p/video.qois"]
+timeout_sec = 180
+needs_video = true
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+vsync = "off"
+[play]
+fps = "max"
+feed = "stream"
+[playlist]
+loop = "loop_list"
+[[playlist.items]]
+path = "1080p/video.qois"
+[wallpaper]
+enable = false
+[schedule]
+backend = "manual"
+workers = "all"
+roles = "split"
+"""
+boot_expect = ["cfg: version=1", "play.feed=Stream", "idle: ready"]
+keys = [{ send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 }, { send = "p", wait_after = 3 }, { send = "0", wait_for = ["menu: ready"], wait_after = 5 }]
+expect = ["playlist: items=1 loop=loop_list", "playlist: item 1/1 path=1080p/video.qois", "video: fmt=Qois", "sched: crew=4/4 roles=split", "play: path=mp_slots frame-parallel fmt=qois fetch=stream", "mp: slots scan qois chunks="]
+soak_sec = 10
+
+# roles=combined 同适配方（qois + feed=stream 懒供片 + workers=all）：slots 门
+# 恒关，回行分区路：断言行路 `play: path=mp_draw`（即不断 slots，以行路行证伪）
+# + `sched: crew=4/4 roles=combined`；video-mp 同款行路口径。
+[[case]]
+name = "video-roles-combined"
+covers = ["src/video/mp_slots.rs", "src/video.rs", "src/config/types.rs", "usb_reports/1080p/video.qois"]
+timeout_sec = 180
+needs_video = true
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+vsync = "off"
+[play]
+fps = "max"
+feed = "stream"
+[playlist]
+loop = "loop_list"
+[[playlist.items]]
+path = "1080p/video.qois"
+[wallpaper]
+enable = false
+[schedule]
+backend = "manual"
+workers = "all"
+roles = "combined"
+"""
+boot_expect = ["cfg: version=1", "play.feed=Stream", "idle: ready"]
+keys = [{ send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 }, { send = "p", wait_after = 3 }, { send = "0", wait_for = ["menu: ready"], wait_after = 5 }]
+expect = ["playlist: items=1 loop=loop_list", "playlist: item 1/1 path=1080p/video.qois", "video: fmt=Qois", "sched: crew=4/4 roles=combined", "play: path=mp_draw"]
 soak_sec = 10

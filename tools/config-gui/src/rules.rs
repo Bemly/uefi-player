@@ -68,7 +68,7 @@ pub(crate) fn tune_visible(cfg: &FileConfig) -> TuneVisible {
 /// 读盘钳制：Blt 三个非上屏操作 GUI 置灰不可选，残留值钳回 B2V
 /// （播放行为无变化——固件上屏路本来就只认 B2V；手写值想出引擎数
 /// 的改完别点保存，或固件侧照读，见 player.md）。
-/// 解码缓冲逐格式钳 0-32（0 = 跟随 `tune.window`；超限手写值钳住，不断解析）。
+/// 解码缓冲逐格式钳 0-32 + `[schedule] cores` 钳 0..=64（0 保留，超限压界，不断解析）。
 /// `[play] pipeline` / `[render] workers/dist` 已删：老文件残留键 serde 默认忽略，
 /// 无需迁移（`[schedule]` 为准）。
 pub(crate) fn coerce_loaded(mut cfg: FileConfig) -> FileConfig {
@@ -76,7 +76,12 @@ pub(crate) fn coerce_loaded(mut cfg: FileConfig) -> FileConfig {
         cfg.render.blt_op = BltOpKind::BufferToVideo;
     }
     clamp_decode(&mut cfg.decode);
+    clamp_schedule(&mut cfg.schedule);
     cfg
+}
+
+pub(crate) fn clamp_schedule(s: &mut ScheduleConfig) {
+    s.cores = s.cores.min(64);
 }
 
 /// 落盘前钳制解码缓冲（滑杆已钳 0-32，这里防手改文件后的脏值回写；
@@ -227,6 +232,9 @@ mod blackbox_matrix {
                 backend: s,
                 workers: w,
                 dist: d,
+                cores: 8,
+                roles: RolesMode::Split,
+                measured_workers_n: 6,
             },
         };
         let text = toml::to_string(&cfg).unwrap();
@@ -265,6 +273,9 @@ mod blackbox_matrix {
         assert_eq!(cfg.play.feed, FeedMode::Clip);
         assert_eq!(cfg.schedule.dist, DistMode::Auto);
         assert_eq!(cfg.schedule.workers, WorkersMode::Auto);
+        assert_eq!(cfg.schedule.cores, 0);
+        assert_eq!(cfg.schedule.roles, RolesMode::Auto);
+        assert_eq!(cfg.schedule.measured_workers_n, 0);
         assert_eq!(cfg.render.vsync, VsyncMode::Auto);
         assert_eq!(cfg.render.blt_op, BltOpKind::BufferToVideo);
         assert_eq!(cfg.render.tune.buffers, default_buffers());
@@ -893,25 +904,49 @@ mod blackbox_matrix {
         assert!(tune_visible(&m).frames);
     }
 
-    /// `[schedule]` 三档位回写：36 组合不断字段；
-    /// 老文件 `[render]` 旧键已删，残留直接忽略（未知键 serde 默认忽略），`[schedule]` 全默认。
+    /// `[schedule]` 回写：3×3×4×3 = 108 组合 + 钳制/继承/measured（cores 全量不进笛卡尔）。
     #[test]
     fn schedule_roundtrip_matrix() {
         for b in ScheduleBackend::ALL {
             for w in WorkersMode::ALL {
                 for d in DistMode::ALL {
-                    let mut cfg = FileConfig::default();
-                    cfg.schedule.backend = b;
-                    cfg.schedule.workers = w;
-                    cfg.schedule.dist = d;
-                    let back: FileConfig = toml::from_str(&toml::to_string(&cfg).unwrap()).unwrap();
-                    assert_eq!(back.schedule.backend, b);
-                    assert_eq!(back.schedule.workers, w);
-                    assert_eq!(back.schedule.dist, d);
-                    assert_eq!(back, cfg);
+                    for r in RolesMode::ALL {
+                        let mut cfg = FileConfig::default();
+                        cfg.schedule.backend = b;
+                        cfg.schedule.workers = w;
+                        cfg.schedule.dist = d;
+                        cfg.schedule.roles = r;
+                        cfg.schedule.cores = 8;
+                        cfg.schedule.measured_workers_n = 6;
+                        let back: FileConfig =
+                            toml::from_str(&toml::to_string(&cfg).unwrap()).unwrap();
+                        assert_eq!(RolesMode::from_u8(r.as_u8()).file_str(), r.file_str());
+                        assert_eq!(back, cfg);
+                    }
                 }
             }
         }
+        for (input, expected) in [(0u32, 0u32), (1, 1), (64, 64), (99, 64)] {
+            let loaded: FileConfig =
+                toml::from_str(&format!("[schedule]\ncores = {input}\n")).unwrap();
+            assert_eq!(coerce_loaded(loaded).schedule.cores, expected, "{input}");
+        }
+        let legacy: FileConfig = toml::from_str("version = 1\n").unwrap();
+        assert_eq!(legacy.schedule.cores, 0);
+        assert_eq!(legacy.schedule.roles, RolesMode::Auto);
+        assert_eq!(legacy.schedule.measured_workers_n, 0);
+        let explicit: FileConfig =
+            toml::from_str("version = 1\n[schedule]\ncores = 4\nroles = \"split\"\n").unwrap();
+        assert_eq!(explicit.schedule.cores, 4);
+        assert_eq!(explicit.schedule.roles, RolesMode::Split);
+        assert!(toml::from_str::<FileConfig>("[schedule]\nroles = \"bogus\"\n").is_err());
+        let mut cfg = FileConfig::default();
+        cfg.schedule.measured_workers_n = 5;
+        let back: FileConfig = toml::from_str(&toml::to_string(&cfg).unwrap()).unwrap();
+        assert_eq!(back.schedule.measured_workers_n, 5);
+        cfg.schedule.measured_workers_n = 0;
+        let cleared: FileConfig = toml::from_str(&toml::to_string(&cfg).unwrap()).unwrap();
+        assert_eq!(cleared, cfg);
         // 老文件：`[render]` 旧键残留 → 直接忽略，`[schedule]` 全默认。
         let old: FileConfig = toml::from_str(
             "version = 1\n[render]\nmode = \"direct\"\nworkers = \"all\"\ndist = \"tile\"\n",

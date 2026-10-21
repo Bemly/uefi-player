@@ -194,6 +194,48 @@ impl WorkersMode {
     }
 }
 
+/// 多核角色分工（`[schedule] roles`，只管 manual 行路 vs 槽路走哪条；`auto` 恒
+/// 等价现状：槽路准入（qois/raw + 零拷系供片 + 多核）即分、否则合）：
+/// - `Combined`（合）：全部选中核行分区拷屏（`mp_draw` 行路，BSP 也拷自己份）；
+/// - `Split`（分）：AP 解码进自家槽环（`SlotRing`）+ BSP 按序整推（`mp_slots` 槽路；
+///   仅帧独立且零拷系供片（见 `slots_feed_eligible`）+ 选中核数 > 1 时可进，
+///   否则 warn + 回落合，不进槽路）；
+/// - `Auto`（默认）：准入即分（现状行为），否则合。
+/// 无别名（非法值整文件回默认 + 警告，与其它枚举档位同规则）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum RolesMode {
+    #[default]
+    Auto,
+    Combined,
+    Split,
+}
+
+impl RolesMode {
+    pub(crate) fn as_u8(self) -> u8 {
+        match self {
+            Self::Auto => 0,
+            Self::Combined => 1,
+            Self::Split => 2,
+        }
+    }
+    pub(crate) fn from_u8(v: u8) -> Self {
+        match v {
+            1 => Self::Combined,
+            2 => Self::Split,
+            _ => Self::Auto,
+        }
+    }
+    /// 配置文件拼写（serde 小写同形，供串口 `sched:` 行）。
+    pub(crate) const fn file_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Combined => "combined",
+            Self::Split => "split",
+        }
+    }
+}
+
 /// 帧搬运位宽（P2 真分发的落点）：`accel.level` 只管“档位语义”，
 /// 真正上屏/播放走这个位宽。SSE 系同宽 128（标量/密码类档按基线下限同宽处理），
 /// AVX/F16C 是 VEX-128，AVX2/FMA/BMI/AVXVNNI 是 256，AVX512 系是 512。
@@ -331,13 +373,28 @@ impl ScheduleBackend {
 
 /// `[schedule]`：手写调度独立成矩阵配置（P2.5）。`workers`/`dist` 从 `[render]`
 /// 搬家至此；缺表老文件继续认 `[render]` 旧键（`load` 一次性 fallback + 警告，
-/// 不写回）。`measured_*` 记忆仍在 `[render]`（校准维度未变）。
+/// 不写回）。`measured_*` 记忆仍在 `[render]`（校准维度未变），另见
+/// `[schedule] measured_workers_n`（核数记忆，`[render] measured_workers`
+/// 只留三态做展示兼容）。
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct ScheduleConfig {
     pub backend: ScheduleBackend,
     pub workers: WorkersMode,
     pub dist: DistMode,
+    /// 用核预算（0 = 不限，随 workers/记忆走；N > 0 = 至多用 N 核：
+    /// BSP + 最小编号 N-1 个 AP，见 `crew` 模块头 BSP-id 假设）。
+    /// 与 workers 取交集：`bsp_only` 恒单核；其余先钳预算。0..=64（超限钳 64）。
+    #[serde(default)]
+    pub cores: u32,
+    /// 角色分工（默认 `auto` = 准入即分；`combined` 恒行路；`split` 仅准入时槽路，
+    /// 否则 warn + 回落行路，见 `effective_roles`）。
+    #[serde(default)]
+    pub roles: RolesMode,
+    /// 核数记忆（0 = 未测，首启 auto sweep 后回写；`[render] measured_workers`
+    /// 三态同步写回，只做展示兼容）。
+    #[serde(default)]
+    pub measured_workers_n: u32,
 }
 
 /// 垂直同步（软件帧预算，GOP 无硬件 vsync）：`Static` = 按 `tune.vsync_fps`

@@ -106,6 +106,29 @@ pub(crate) fn sched_desc(v: ScheduleBackend) -> String {
     .into_owned()
 }
 
+pub(crate) fn roles_desc(v: RolesMode) -> String {
+    match v {
+        RolesMode::Auto => t!("sched.desc_roles_auto"),
+        RolesMode::Combined => t!("sched.desc_roles_combined"),
+        RolesMode::Split => t!("sched.desc_roles_split"),
+    }
+    .into_owned()
+}
+
+/// 核心上限行文本（0 = 自动不限，N>0 = 至多 N 核）。
+pub(crate) fn cores_text(cores: u32) -> String {
+    if cores == 0 {
+        t!("sched.cores_auto").into_owned()
+    } else {
+        format!("{} cores", cores.min(64))
+    }
+}
+
+/// 核心上限说明（0/auto 语义 + 取值范围）。
+pub(crate) fn cores_desc() -> String {
+    t!("sched.desc_cores").into_owned()
+}
+
 pub(crate) fn vsync_desc(v: VsyncMode) -> String {
     match v {
         VsyncMode::Auto => t!("accel.desc_vsync_auto"),
