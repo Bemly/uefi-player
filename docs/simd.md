@@ -1,4 +1,4 @@
-# SIMD 矩阵（`accel.level` 真分发）
+# SIMD 矩阵（`accel.level` 真分发 + `[accel.decode]` 三键）
 
 > P2 落点：`config::copy_width()`。bench 只出数（`HWBENCH`），矩阵做选择；
 > `auto` = CPUID/XCR0 探最高可用（`resolve_accel`，开机一次）。
@@ -23,6 +23,25 @@
 - `video::mp_draw`：`PlayTask.copy` 快照位宽，BSP 镂空块 + AP 整块同走 `copy_block`。
 - `blt_loop` / `direct_loop`：经 `upload_frame` 自动分发。
 - `hw_bench` / `gop_simd`：保持全矩阵实测（bench 用，不参与选择）。
+
+## 解码 SIMD 接线（`[accel.decode]` 三键，`resolve_accel` 末尾同推）
+
+> 单比特语义：各家 `auto` = 跟随全局（`level=scalar` 则关，其余开）；
+> 显式 `scalar`/`max` 覆盖全局。`max` 用硬件探到的最高推（无视全局钳制，
+> 搬运与解码独立选路）。串口 `accel: decode simd hevc=… vp9=… h263=…`
+> 供 QEMU 矩阵断言（`accel-decode-switches` + `hevc-probe` 的 boot_expect）。
+
+| 家 | 开关接收端 | 开时上限 | 关时 | 硬件门 |
+|---|---|---|---|---|
+| `hevc` | `rusty_h265::accel::{force_scalar,force_isa}` | `Baseline`/`Sse41`/`Avx2`（`auto` 按 `copy_width()`，`max` 按硬件最高） | 标量双胞胎 | 固件门（轮内无第二套 CPUID/XCR0 探） |
+| `vp9` | `vp9dec::simd::set_simd_allowed` | 轮子 AVX2 max（`avx2_enabled` 再验硬件） | 顺序标量 | 轮内 CPUID/XCR0 镜像门（含首探幂等自开 XSAVE；std 另有 env knob） |
+| `h263` | `h263_rs_yuv::bt601` + `h263_rs_deblock::deblock` 的 `set_simd_enabled`（两开关同推） | wide SSE2 基线核 | 标量 twin（`simd` 特性关时调用即 no-op） | 无（SSE2 是 x86-64 psABI 基线，无 XCR0 依赖；双路逐字节一致已锁死） |
+
+- 首解前幂等 `ensure_xsave_enabled` 保持（`resolve_accel` 开机 + `hevc_probe`
+  首解前各保一次；vp9 轮内首探自保第三道，h263 不需要）。
+- 悬空历史：此前 vp9 的 `set_simd_allowed` 与 h263 两 `set_simd_enabled`
+  在固件侧零调用——vp9 缺省开（轮内默认 true，自带硬件门故正确但不受控），
+  h263 缺省关（no_std fail-closed，静默标量）。本轮接上线后三家皆受控。
 
 ## AVC 解码（标量 shipped；SIMD 待上游解禁）
 

@@ -221,3 +221,29 @@ host 像素级回归（ffmpeg md5 + 标量/SIMD 双路一致）→
 （decoder 39 + accel 30 通过）→ QEMU 矩阵（`hevc-probe` 首跑即绿）。
 `simd`+无 `std` 组合明确不支持（ twins 没 port，唯一非机械点是
 运行时 ISA 检测对接固件 CPUID 门禁），留待上游或另立项。
+
+### 7.5 解码 SIMD 细粒度开关（2026-10-21，`[accel.decode]` 三键）
+
+背景：全局 `[accel] level` 单滑杆只推了 hevc（`force_scalar`/`force_isa`）；
+vp9 的 `set_simd_allowed`、h263 yuv/deblock 的 `set_simd_enabled` 在固件侧
+零调用——vp9 缺省开（轮内默认 true，自带硬件门故正确但不受全局钳制），
+h263 缺省关（no_std fail-closed，静默标量）。
+
+- 固件 `src/config.{mod,types}`：本轮把存量超限的 `src/config.rs`（1467 行）
+  按“schema 类型 vs 运行时生效值”拆成 `types.rs`（schema 枚举/结构体）+
+  `mod.rs`（原子存储/`load`/`resolve_accel`），各 <900 行。
+  新增 `DecodeSimd`（`auto`/`scalar`/`max`，小写序列化）+
+  `AccelDecode{hevc,vp9,h263}`（`#[serde(default)]`，老文件缺表缺键全 `auto`）。
+  `resolve_accel` 末尾按 `copy_width()` 单比特语义同推三家
+  （`auto`=跟随全局，显式键覆盖；`max` 用硬件探到的最高推，无视全局钳制），
+  串口 `accel: decode simd hevc=on/off vp9=… h263=…` 供矩阵断言。
+  固件 `Cargo.toml` 给 `h263-rs-yuv`/`h263-rs-deblock` 开 `simd` 特性
+  （wide 本就 `#![no_std]`，UEFI 构建已验）；vp9dec 无需特性（x86_64 核常编）。
+- GUI：加速页全局滑杆下方加三行（hevc/vp9/h263），三态单选用 GlassButton 行
+  （与同页 workers 三态同形，不用滑杆、故无 `*_f` 镜像），文案走 `locales/`，
+  摘要页加 `sum.decode` 行。`schema.rs` 与固件同构（字段名/枚举字符串一致）。
+- 矩阵：GUI `decode_roundtrip_matrix`（27 组合 + 老文件/半表兼容，不进主笛卡尔
+  避 27 倍膨胀）；QEMU 新 `accel-decode-switches` case（显式覆盖断言）+
+  `hevc-probe` boot_expect 加默认全开断言；runner `CORE` 的 `src/config.rs`
+  改为 `src/config/`（目录拆分后前缀仍命中）。
+- 接线语义表见 `docs/simd.md`“解码 SIMD 接线”节；`docs/config.md` 同步更新。

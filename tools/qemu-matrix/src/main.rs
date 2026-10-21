@@ -211,7 +211,7 @@ const CORE: &[&str] = &[
     "src/idle.rs",
     "src/graphics.rs",
     "src/diag/common.rs",
-    "src/config.rs",
+    "src/config/",
     "src/fs.rs",
     "src/error.rs",
 ];
@@ -1031,7 +1031,8 @@ mod selection_tests {
     #[test]
     fn core_implicit() {
         // covers 为空的纯标定类 case：核心文件动了要跑，非核心不动不跑。
-        assert!(case_hit(&[], &chg(&["src/config.rs"])));
+        assert!(case_hit(&[], &chg(&["src/config/mod.rs"])));
+        assert!(case_hit(&[], &chg(&["src/config/types.rs"])));
         assert!(!case_hit(&[], &chg(&["src/video/exec.rs"])));
         assert!(case_hit(&chg(&["src/video/"]), &chg(&["src/video/exec.rs"])));
     }

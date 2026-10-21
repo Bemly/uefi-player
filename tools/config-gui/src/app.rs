@@ -184,6 +184,20 @@ impl App {
         next
     }
 
+    /// 解码开关行（三颗玻璃按钮，auto/scalar/max 三选一；hevc/vp9/h263 共用形状，
+    /// 与同页 workers 三态同式——单选用 GlassButton，不用滑杆，故无 `*_f` 镜像）。
+    pub(crate) fn decode_row(&mut self, ui: &mut egui::Ui, cur: DecodeSimd) -> DecodeSimd {
+        let mut next = cur;
+        ui.horizontal(|ui| {
+            for v in DecodeSimd::ALL {
+                if self.option_button(ui, cur == v, v.file_str()) {
+                    next = v;
+                }
+            }
+        });
+        next
+    }
+
     /// 实测行：有值报数，无值提示切 auto 下次启动测。
     /// `&self`：背景纸（`page_backdrop`）只读重排也能调，不写状态。
     pub(crate) fn measured_line(&self) -> String {

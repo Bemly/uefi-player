@@ -10,6 +10,10 @@ version = 1
 [accel]
 level = "auto"          # auto | scalar | sse2 | ssse3 | sse41 | sse42 | avx | avx2 | avx512
                         # auto = 开机探最高可用；显式超硬件警告+钳住
+[accel.decode]          # 三家解码 SIMD 各一键（缺表缺键全 auto = 跟随 level）
+hevc = "auto"           # auto（scalar=关/其余=开）| scalar（强制标量）| max（强制轮子上限）
+vp9 = "auto"            # 同上（单比特开关：开=轮子 AVX2，关=顺序标量）
+h263 = "auto"           # 同上（yuv + deblock 两开关同推，无 XSAVE 门）
 
 [render]
 mode    = "auto"        # auto | direct | blt
@@ -96,6 +100,10 @@ executor = "all"        # 诊断项 a 跑哪条执行器线：all（默认，都
   AP 永不碰 GOP；单核路走影子 + CPU 整推；Blt 单发路不变）。
   所选 `blt_op` 若非 `buffer_to_video`，矩阵里单发出数（引擎能力对照，不参选）。
 - `accel.level=auto`：探最高可用位宽；显式档位只管上限语义，实际搬运走位宽。
+- `[accel.decode].hevc/vp9/h263=auto`：跟随全局（`level=scalar` 则关，其余开）；
+  显式 `scalar` 驻标量双胞胎（哪怕全局开高档），显式 `max` 取轮子上限
+  （哪怕全局是 `scalar`；hevc 按硬件探到的最高推 ISA，搬运与解码独立选路）。
+  缺表/缺键老文件全按 `auto` 照读，现行为不变。
 - `schedule.backend=manual`：旧三路（blt 单线程引擎 / direct BSP 单核直写 /
   direct 全核 `mp_draw` 常驻 AP + 世代同步），`workers`/`dist` 按直写/全核门控生效。
 - `schedule.backend=nano`：单核执行器泵（取帧→上屏→限速/掉帧一帧一调度），

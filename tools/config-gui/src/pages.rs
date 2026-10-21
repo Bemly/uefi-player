@@ -43,6 +43,22 @@ impl App {
                     AccelLevel::ALL[self.accel_f.round().clamp(0.0, 8.0) as usize];
                 ui.small(t!("accel.auto_level"));
                 ui.add_space(10.0);
+                ui.label(t!("accel.decode"));
+                ui.small(t!("accel.decode_hint"));
+                ui.add_space(4.0);
+                // 三家各一行：三态单选用 GlassButton 行（与同页 workers 三态同形）。
+                ui.label("hevc");
+                self.cfg.accel.decode.hevc = self.decode_row(ui, self.cfg.accel.decode.hevc);
+                ui.small(decode_desc(self.cfg.accel.decode.hevc));
+                ui.add_space(4.0);
+                ui.label("vp9");
+                self.cfg.accel.decode.vp9 = self.decode_row(ui, self.cfg.accel.decode.vp9);
+                ui.small(decode_desc(self.cfg.accel.decode.vp9));
+                ui.add_space(4.0);
+                ui.label("h263");
+                self.cfg.accel.decode.h263 = self.decode_row(ui, self.cfg.accel.decode.h263);
+                ui.small(decode_desc(self.cfg.accel.decode.h263));
+                ui.add_space(10.0);
                 ui.label(t!("accel.mode"));
                 ui.horizontal(|ui| {
                     if self.option_button(
@@ -469,6 +485,15 @@ impl App {
                 ui.small(t!("sum.hint"));
                 ui.add_space(8.0);
                 ui.label(t!("sum.accel", v = self.cfg.accel.level.file_str()));
+                ui.label(t!(
+                    "sum.decode",
+                    v = format!(
+                        "{}/{}/{}",
+                        self.cfg.accel.decode.hevc.file_str(),
+                        self.cfg.accel.decode.vp9.file_str(),
+                        self.cfg.accel.decode.h263.file_str(),
+                    )
+                ));
                 ui.label(t!("sum.render", v = self.cfg.render.mode.file_str()));
                 if self.cfg.render.mode == RenderMode::Blt {
                     ui.label(t!("sum.blt", v = self.cfg.render.blt_op.file_str()));

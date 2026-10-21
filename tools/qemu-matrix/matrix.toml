@@ -8,7 +8,8 @@
 # 选择规则：`covers` 前缀命中改动文件即跑；`covers` 写 `"*"` 的 menu-smoke
 # 是锚点（任何改动都带它，保开机底线）；`covers = []` = 纯标定类，只靠隐式核心。
 # 隐式核心（runner 里 CORE 常量，逐 case 写 8 遍太吵）：src/main.rs、menu.rs、
-# idle.rs、graphics.rs、diag/common.rs、config.rs、fs.rs、error.rs——这些动了等于全跑。
+# idle.rs、graphics.rs、diag/common.rs、src/config/（mod.rs+types.rs）、fs.rs、
+# error.rs——这些动了等于全跑。
 # 以下动了直接全跑（选择依据本身可能已过期）：tools/qemu-matrix/**、
 # 根 Cargo.toml、.cargo/、rust-toolchain.toml、sprout pin（third_party/sprout
 # 工作区恒脏只看分支 diff，日常忽略）。提交门禁仍是全矩阵，`--changed` 只省迭代时间。
@@ -748,13 +749,39 @@ fps = "max"
 [wallpaper]
 enable = false
 """
-boot_expect = ["cfg: version=1", "idle: ready"]
+boot_expect = ["cfg: version=1", "accel: decode simd hevc=on vp9=on h263=on", "idle: ready"]
 keys = [
   { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
   { send = "p", wait_after = 3 },
   { send = "d", wait_for = ["menu: ready"], wait_after = 5 },
 ]
 expect = ["hevc: decoded 10 frames", "hevc: PASS"]
+
+# 解码细粒度开关：显式键覆盖全局（hevc 强制标量、vp9 强制最快、h263 缺键跟随），
+# `resolve_accel` 的三家串口行即断言。无按键：只验开机解析。
+[[case]]
+name = "accel-decode-switches"
+covers = ["src/config/"]
+timeout_sec = 180
+config = """
+version = 1
+[accel]
+level = "auto"
+[accel.decode]
+hevc = "scalar"
+vp9 = "max"
+[render]
+mode = "direct"
+workers = "bsp_only"
+dist = "static"
+vsync = "off"
+[play]
+fps = "max"
+[wallpaper]
+enable = false
+"""
+boot_expect = ["cfg: version=1", "accel: decode simd hevc=off vp9=on h263=on", "idle: ready"]
+expect = ["accel: hevc decode isa = rusty_h265-accel: scalar"]
 
 # 弹窗导航：开弹窗 → q 回壁纸 → 再开（open 第二遍 = 待机循环没卡死）。
 [[case]]

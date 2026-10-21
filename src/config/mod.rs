@@ -7,6 +7,10 @@
 //! version = 1
 //! [accel]
 //! level = "auto"
+//! [accel.decode]            # 三家解码 SIMD 各一键（缺表缺键全 auto=跟随 level）
+//! hevc = "auto"             # auto（scalar=关/其余=开）| scalar（强制标量）| max（强制轮子上限）
+//! vp9 = "auto"              # 同上（单比特开关：开=轮子 max，关=标量双胞胎）
+//! h263 = "auto"             # 同上（yuv/deblock 两开关同推）
 //! [render]
 //! mode    = "auto"        # "auto" | "direct" | "blt"
 //! workers = "auto"        # "auto" | "bsp_only" | "all"（多核开关）
@@ -60,686 +64,17 @@
 //! ```
 
 use alloc::format;
-use alloc::string::{String, ToString};
+use alloc::string::String;
 use core::sync::atomic::{AtomicU8, AtomicU32, Ordering};
 
-use serde::{Deserialize, Serialize};
 use uefi::cstr16;
 
 use crate::error::NyaStatus;
 use crate::fs::Fs;
 
-/// 指令集加速档位。`Auto` = 运行时探 CPUID/XCR0 取最高可用。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum AccelLevel {
-    #[default]
-    Auto,
-    Scalar,
-    Sse2,
-    Ssse3,
-    Sse41,
-    Sse42,
-    Avx,
-    Avx2,
-    Avx512,
-}
+mod types;
 
-impl AccelLevel {
-    fn as_u8(self) -> u8 {
-        match self {
-            Self::Auto => 0,
-            Self::Scalar => 1,
-            Self::Sse2 => 2,
-            Self::Ssse3 => 3,
-            Self::Sse41 => 4,
-            Self::Sse42 => 5,
-            Self::Avx => 6,
-            Self::Avx2 => 7,
-            Self::Avx512 => 8,
-        }
-    }
-    fn from_u8(v: u8) -> Self {
-        match v {
-            1 => Self::Scalar,
-            2 => Self::Sse2,
-            3 => Self::Ssse3,
-            4 => Self::Sse41,
-            5 => Self::Sse42,
-            6 => Self::Avx,
-            7 => Self::Avx2,
-            8 => Self::Avx512,
-            _ => Self::Auto,
-        }
-    }
-}
-
-/// 渲染路径。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum RenderMode {
-    /// 开机微基准在 direct 与 blt 之间选快的。
-    #[default]
-    Auto,
-    /// CPU 直写 framebuffer。
-    Direct,
-    /// 走 GOP Blt 引擎。
-    Blt,
-}
-
-impl RenderMode {
-    fn as_u8(self) -> u8 {
-        match self {
-            Self::Auto => 0,
-            Self::Direct => 1,
-            Self::Blt => 2,
-        }
-    }
-    fn from_u8(v: u8) -> Self {
-        match v {
-            1 => Self::Direct,
-            2 => Self::Blt,
-            _ => Self::Auto,
-        }
-    }
-}
-
-/// 多核开关：`Auto` = 校准矩阵实测（BSP 单核直写 vs 全核并行），只在
-/// `render.mode` 允许直写时有意义（Blt 路径恒单线程，忽略本项）。
-///
-/// 新位置是 `[schedule] workers`；这里是 legacy 别名：`[schedule]` 表存在即忽略，
-/// 缺表老文件继续认这里的值（一次性，不写回）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum WorkersMode {
-    #[default]
-    Auto,
-    /// 只用 BSP 单核（关闭 MP 并行）。
-    BspOnly,
-    /// 全核并行（AP+BSP）。
-    All,
-}
-
-impl WorkersMode {
-    fn as_u8(self) -> u8 {
-        match self {
-            Self::Auto => 0,
-            Self::BspOnly => 1,
-            Self::All => 2,
-        }
-    }
-    fn from_u8(v: u8) -> Self {
-        match v {
-            1 => Self::BspOnly,
-            2 => Self::All,
-            _ => Self::Auto,
-        }
-    }
-}
-
-/// 帧搬运位宽（P2 真分发的落点）：`accel.level` 只管“档位语义”，
-/// 真正上屏/播放走这个位宽。128 位档（SSE2~SSE4.2）同宽，AVX 是 VEX-128。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CopyWidth {
-    U64 = 1,
-    X128 = 2,
-    V128 = 3,
-    Y256 = 4,
-    Z512 = 5,
-}
-
-impl CopyWidth {
-    pub(crate) fn from_u8(v: u8) -> Self {
-        match v {
-            5 => Self::Z512,
-            4 => Self::Y256,
-            3 => Self::V128,
-            2 | 0 => Self::X128,
-            _ => Self::U64,
-        }
-    }
-}
-
-/// 多核分工（P2 调度矩阵）：`Static` = 每核固定行区（零调度开销，同构最优）；
-/// `Tile` = 帧切小块（行区），BSP+AP 从原子游标自助领活（异构大小核/负载不均时赢，
-/// 顺带把 OSD 行区划出 tile，AP 不再盖 OSD 字）；`Dynamic` = 按实测核速加权分行
-/// （快核多拿；校准时 probe 定权计时，播放时每轮按各核上一轮耗时重算，无 tile 游标开销）。
-/// `Auto` = 同机实测三选一。
-///
-/// 新位置是 `[schedule] dist`；这里是 legacy 别名（规则同 `WorkersMode`）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum DistMode {
-    #[default]
-    Auto,
-    Static,
-    Tile,
-    Dynamic,
-}
-
-impl DistMode {
-    fn as_u8(self) -> u8 {
-        match self {
-            Self::Auto => 0,
-            Self::Static => 1,
-            Self::Tile => 2,
-            Self::Dynamic => 3,
-        }
-    }
-    fn from_u8(v: u8) -> Self {
-        match v {
-            1 => Self::Static,
-            2 => Self::Tile,
-            3 => Self::Dynamic,
-            _ => Self::Auto,
-        }
-    }
-}
-
-/// 异步执行器线（`uefi-async` 两条堆线，诊断项 `a` 跑哪条）：
-/// - `All`（默认）：nano + dynamic 都跑，各自断言；
-/// - `Nano`：只跑单核借用节点线（链表轮询，无跨核原语）；
-/// - `Dynamic`：只跑多核 work-stealing 线（spawn/cancel/retune + steal）。
-/// 只管诊断覆盖，不切生产调度（播片/壁纸仍是手写 MP，迁移另立项）。
-/// 缺键老配置按 `All` 照读。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum AsyncExecutor {
-    #[default]
-    All,
-    Nano,
-    Dynamic,
-}
-
-impl AsyncExecutor {
-    const fn as_u8(self) -> u8 {
-        match self {
-            Self::All => 0,
-            Self::Nano => 1,
-            Self::Dynamic => 2,
-        }
-    }
-    fn from_u8(v: u8) -> Self {
-        match v {
-            1 => Self::Nano,
-            2 => Self::Dynamic,
-            _ => Self::All,
-        }
-    }
-}
-
-/// `[async]`：目前只有诊断项消费（`async_exec` 按档跑线），缺表缺键全默认。
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
-#[serde(default)]
-pub struct AsyncConfig {
-    pub executor: AsyncExecutor,
-}
-
-/// 调度后端（`[schedule] backend`，生产路径走哪套调度）：
-/// - `Manual`（默认）：手写 MP（`mp_draw` 常驻 AP + 世代同步；`blt/direct_loop`
-///   单核泵），`workers`/`dist` 生效，行为与搬家前逐行一致；
-/// - `Nano`：单核执行器泵（一个永不结束的 pump task：取帧 → `upload_frame` →
-///   限速/掉帧），`render` 全 honoring（blt/direct/影子都走），`workers`/`dist` 忽略；
-/// - `Dynamic`：多核 steal 泵（按核分带，BSP 每帧 spawn，AP steal；BSP 独判掉帧，
-///   确定性与手写一致）：只直写前台。`render=blt`（Blt 引擎单线程）/ 无 MP /
-///   `tune.buffers>0`（影子环 v1 不支持）时 warn + 回退（前两者回 nano，后者回 manual）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum ScheduleBackend {
-    #[default]
-    Manual,
-    Nano,
-    Dynamic,
-}
-
-impl ScheduleBackend {
-    const fn as_u8(self) -> u8 {
-        match self {
-            Self::Manual => 0,
-            Self::Nano => 1,
-            Self::Dynamic => 2,
-        }
-    }
-    fn from_u8(v: u8) -> Self {
-        match v {
-            1 => Self::Nano,
-            2 => Self::Dynamic,
-            _ => Self::Manual,
-        }
-    }
-}
-
-/// `[schedule]`：手写调度独立成矩阵配置（P2.5）。`workers`/`dist` 从 `[render]`
-/// 搬家至此；缺表老文件继续认 `[render]` 旧键（`load` 一次性 fallback + 警告，
-/// 不写回）。`measured_*` 记忆仍在 `[render]`（校准维度未变）。
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
-#[serde(default)]
-pub struct ScheduleConfig {
-    pub backend: ScheduleBackend,
-    pub workers: WorkersMode,
-    pub dist: DistMode,
-}
-
-/// 垂直同步（软件帧预算，GOP 无硬件 vsync）：`Static` = 按 `tune.vsync_fps`
-/// 固定封顶；`Half` = 开机实测冠军路最高帧率，取半稳定跑并回写
-/// `measured_vsync_fps`（下次启动复用）；`Auto` = 按 `tune.vsync_fps` 预算探测
-/// 冠军路，零超期则开（封顶同预算）否则关；`Off` = 只按 `play.fps` 跑。
-/// 旧文件的 `"on"` 按 `static` 照读（alias，不断旧配置）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum VsyncMode {
-    #[default]
-    Auto,
-    #[serde(alias = "on")]
-    Static,
-    Half,
-    Off,
-}
-
-impl VsyncMode {
-    fn as_u8(self) -> u8 {
-        match self {
-            Self::Auto => 0,
-            Self::Static => 1,
-            Self::Off => 2,
-            Self::Half => 3,
-        }
-    }
-    fn from_u8(v: u8) -> Self {
-        match v {
-            1 => Self::Static,
-            2 => Self::Off,
-            3 => Self::Half,
-            _ => Self::Auto,
-        }
-    }
-}
-
-/// `mode = "blt"` 时用哪个 Blt 动作。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum BltOpKind {
-    #[default]
-    BufferToVideo,
-    VideoToVideo,
-    VideoFill,
-    VideoToBltBuffer,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
-#[serde(default)]
-pub struct AccelConfig {
-    pub level: AccelLevel,
-}
-
-const fn default_frames() -> u32 {
-    30
-}
-
-const fn default_tile_rows() -> u32 {
-    64
-}
-
-const fn default_buffers() -> u32 {
-    0
-}
-
-const fn default_vsync_fps() -> u32 {
-    60
-}
-
-/// `[render.tune]`：矩阵全部数字旋钮（GUI 逐项可拨，无 auto 维度，改完即生效）。
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-#[serde(default)]
-pub struct RenderTune {
-    #[serde(default = "default_frames")]
-    pub frames: u32,
-    /// tile 高（行）：MP 自调度切块粒度，BSP+AP 共用。
-    #[serde(default = "default_tile_rows")]
-    pub tile_rows: u32,
-    /// vsync 预算帧率：`static` 的封顶 + `auto` 探测的达标线。
-    /// `half` 不用它（实测取半自带预算），`off` 更不用。
-    #[serde(default = "default_vsync_fps")]
-    pub vsync_fps: u32,
-    /// 后缓冲帧数（0-16，0 = 直写前台现状）：`>0` 时播放/壁纸先画影子再整推，
-    /// 把多核散写的撕裂窗口压成一次 push。Blt 路已是单引擎 push，本项无意义。
-    /// 显式旋钮（不进矩阵 bench，改它照样清记忆重测）；内存约 N×帧大小，
-    /// 分配失败自动退回直写（只记 warning，不断播）。
-    #[serde(default = "default_buffers")]
-    pub buffers: u32,
-}
-
-impl Default for RenderTune {
-    fn default() -> Self {
-        Self {
-            frames: default_frames(),
-            tile_rows: default_tile_rows(),
-            vsync_fps: default_vsync_fps(),
-            buffers: default_buffers(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
-#[serde(default)]
-pub struct RenderConfig {
-    pub mode: RenderMode,
-    /// legacy 别名（见 `WorkersMode`）：`[schedule]` 表存在即忽略。
-    pub workers: WorkersMode,
-    /// legacy 别名（见 `DistMode`）：`[schedule]` 表存在即忽略。
-    pub dist: DistMode,
-    pub vsync: VsyncMode,
-    pub blt_op: BltOpKind,
-    pub tune: RenderTune,
-    /// auto 校准记忆：`Auto`/`0` = 未测。固件回写，GUI 只读展示 + 重测清零。
-    /// 缺键（老配置）按未测处理，下次启动必校准。
-    #[serde(default)]
-    pub measured_render: RenderMode,
-    #[serde(default)]
-    pub measured_workers: WorkersMode,
-    #[serde(default)]
-    pub measured_dist: DistMode,
-    #[serde(default)]
-    pub measured_vsync: VsyncMode,
-    /// half 实测预算（fps；0 = 未测）：`vsync=half` 首启现测取半后回写，下次复用。
-    /// 缺键（老配置）按未测处理。`static`/`auto`/`off` 不用它。
-    #[serde(default)]
-    pub measured_vsync_fps: u32,
-    /// 校准时机型 AP+BSP 总数（0 = 未测，供矩阵归因/复核）。
-    #[serde(default)]
-    pub measured_cores: u32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct Config {
-    pub version: u32,
-    pub accel: AccelConfig,
-    pub render: RenderConfig,
-    pub play: PlayConfig,
-    pub wallpaper: WallpaperConfig,
-    pub boot: BootConfig,
-    pub schedule: ScheduleConfig,
-    pub r#async: AsyncConfig,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            version: 1,
-            accel: AccelConfig::default(),
-            render: RenderConfig::default(),
-            play: PlayConfig::default(),
-            wallpaper: WallpaperConfig::default(),
-            boot: BootConfig::default(),
-            schedule: ScheduleConfig::default(),
-            r#async: AsyncConfig::default(),
-        }
-    }
-}
-
-/// `[boot]`：多卷自动发现开关（P1 全功能对齐）。本卷 BLS 永远列（不受开关影响，
-/// 老行为）；`strict` = BLS 只认本卷 + XBOOTLDR 卷（systemd 严格模式）。
-/// `macos` = OpenCore 链式接力（`\EFI\OC\OpenCore.efi` 存在即链；不扫通用
-/// `BOOTX64.EFI`，那可能是我们自己，会自举死循环；macOS 原生引导不做，
-/// 要 bless/APFS，超出 UEFI 范围）。
-/// 缺键老配置按默认（全开、不严格）处理。
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-#[serde(default)]
-pub struct BootConfig {
-    #[serde(default = "default_true")]
-    pub auto: bool,
-    #[serde(default = "default_true")]
-    pub windows: bool,
-    #[serde(default = "default_true")]
-    pub linux: bool,
-    #[serde(default = "default_true")]
-    pub shell: bool,
-    #[serde(default = "default_true")]
-    pub uki: bool,
-    #[serde(default = "default_true")]
-    pub macos: bool,
-    #[serde(default)]
-    pub strict: bool,
-}
-
-const fn default_true() -> bool {
-    true
-}
-
-impl Default for BootConfig {
-    fn default() -> Self {
-        Self {
-            auto: true,
-            windows: true,
-            linux: true,
-            shell: true,
-            uki: true,
-            macos: true,
-            strict: false,
-        }
-    }
-}
-
-fn default_wallpaper_fps() -> String {
-    String::from("15")
-}
-
-const fn default_wallpaper_preload() -> u32 {
-    8
-}
-
-/// `[wallpaper] fps` 反序列化：字符串三态（`"auto"`/`"max"`/`"15"`）+
-/// 兼容老文件整数（`fps = 15` 照读为 `"15"`，不断旧配置）。
-/// `toml` 标量经 `deserialize_any` 进 `visit_i64/u64/str`，no_std 可用。
-fn de_wallpaper_fps<'de, D>(d: D) -> Result<String, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    struct V;
-    impl<'de> serde::de::Visitor<'de> for V {
-        type Value = String;
-        fn expecting(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
-            f.write_str("wallpaper fps as string or integer")
-        }
-        fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<String, E> {
-            Ok(v.to_string())
-        }
-        fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<String, E> {
-            Ok(v.to_string())
-        }
-        fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<String, E> {
-            Ok(String::from(v))
-        }
-    }
-    d.deserialize_any(V)
-}
-
-/// `[wallpaper]`：动态壁纸开关（P4）。片源双格式（`format` 矩阵，见 `MediaFormat`）：
-/// - `raw`（默认）：`wallpaper/frameNNNN.raw`，BGRA 直存，首版定死 1920x1080；
-/// - `qois`：`wallpaper/wall.qois`（与视频同格式），开机预解码。
-/// `popup_freeze`：选项弹窗弹出时冻结壁纸（默认 true；false 则行区继续播，
-/// 选项画在文字区，见 `idle.rs`）。缺键老配置按默认（关/raw/冻结）处理。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct WallpaperConfig {
-    pub enable: bool,
-    /// 背景循环帧率三态（与 `[play] fps` 同构：`"auto"` 最左 / `"max"` 最右 /
-    /// 中间 `1`-`240` 显式封顶；默认 `"15"`，老文件整数照读）。
-    #[serde(
-        default = "default_wallpaper_fps",
-        deserialize_with = "de_wallpaper_fps"
-    )]
-    pub fps: String,
-    /// B 过渡封顶帧数（0 = 全播预载集）。
-    #[serde(default)]
-    pub frames: u32,
-    /// 预载帧数上限（内存兜底；单帧 1920x1080x4 ≈ 8MB）。
-    /// 0 = 不封顶（和播片一样拉满：有多少读多少，长动画注意内存）。
-    #[serde(default = "default_wallpaper_preload")]
-    pub preload: u32,
-    /// 片源格式（默认 raw，老文件照读）。
-    #[serde(default = "default_wallpaper_format")]
-    pub format: MediaFormat,
-    /// 选项弹窗时冻结壁纸（默认 true；false 则行区继续播）。
-    #[serde(default = "default_true")]
-    pub popup_freeze: bool,
-}
-
-impl Default for WallpaperConfig {
-    fn default() -> Self {
-        Self {
-            enable: false,
-            fps: default_wallpaper_fps(),
-            frames: 0,
-            preload: default_wallpaper_preload(),
-            format: MediaFormat::Raw,
-            popup_freeze: true,
-        }
-    }
-}
-
-/// 片源格式矩阵（播放器 + 壁纸共用，`Clip` 统一解码）：
-/// - `Qois`：QOI 压缩序列（省 U 盘，费解码）；
-/// - `Raw`：BGRA 裸帧序列（零解码直搬，费显存/体积）。
-/// 非法值整个文件回默认 + 警告（与其它枚举档位同规则，不单独兜底）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum MediaFormat {
-    Qois,
-    Raw,
-}
-
-const fn default_play_format() -> MediaFormat {
-    MediaFormat::Qois
-}
-
-const fn default_wallpaper_format() -> MediaFormat {
-    MediaFormat::Raw
-}
-
-impl MediaFormat {
-    const fn as_u8(self) -> u8 {
-        match self {
-            MediaFormat::Qois => 0,
-            MediaFormat::Raw => 1,
-        }
-    }
-
-    fn from_u8(v: u8) -> MediaFormat {
-        match v {
-            1 => MediaFormat::Raw,
-            _ => MediaFormat::Qois,
-        }
-    }
-}
-
-fn default_fps() -> String {
-    String::from("auto")
-}
-
-/// 播放管线（`[play] pipeline`，手动切换播放实现）：
-/// - `Clip`（默认）：`Clip` 全量预解码 + 现行三路/执行器后端（`schedule.backend` 生效）；
-/// - `Staged`：流式三段解码（QOI→Raw→Blt，旧 `draw_all_mem` 循环）；
-/// - `ZeroCopy`：流式零拷贝解码（直解进 Blt 缓冲 + R/B 交换，旧 `draw_all_mem_zero_copy` 循环）；
-/// - `Stream`：真文件流式（边读边解，旧 `draw` 循环，不全量进内存）；
-/// - `Single`：单帧反复（旧 `draw_once` 循环，每帧重读文件，仅对照）；
-/// - `LegacyBlt`/`LegacyDirect`/`LegacyU64`：`Clip` 预解码 + 老上传循环
-///   （Blt 整推 / BSP 直写 / u64 步进直写，不走 render 矩阵与执行器后端）。
-/// 非 `Clip` 管线只读 qois 片源（`format = "raw"` 时 warn 回落 `Clip`）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum PlayPipeline {
-    #[default]
-    Clip,
-    Staged,
-    ZeroCopy,
-    Stream,
-    Single,
-    LegacyBlt,
-    LegacyDirect,
-    LegacyU64,
-}
-
-impl PlayPipeline {
-    const fn as_u8(self) -> u8 {
-        match self {
-            Self::Clip => 0,
-            Self::Staged => 1,
-            Self::ZeroCopy => 2,
-            Self::Stream => 3,
-            Self::Single => 4,
-            Self::LegacyBlt => 5,
-            Self::LegacyDirect => 6,
-            Self::LegacyU64 => 7,
-        }
-    }
-
-    fn from_u8(v: u8) -> Self {
-        match v {
-            1 => Self::Staged,
-            2 => Self::ZeroCopy,
-            3 => Self::Stream,
-            4 => Self::Single,
-            5 => Self::LegacyBlt,
-            6 => Self::LegacyDirect,
-            7 => Self::LegacyU64,
-            _ => Self::Clip,
-        }
-    }
-}
-
-/// 播放帧率开关（GUI 滑杆：最左 auto / 中间 1-240 / 最右 max）。
-/// - `Auto`：首启实测最大播放帧率并回写，按 `min(视频帧率, 实测*3/4)` 跑；
-/// - `Max`：不限速；
-/// - `Capped(n)`：显式限速。非法值回落 `Auto`。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FpsPolicy {
-    Auto,
-    Max,
-    Capped(u32),
-}
-
-pub fn parse_fps(s: &str) -> FpsPolicy {
-    match s.trim().to_ascii_lowercase().as_str() {
-        "max" => FpsPolicy::Max,
-        "auto" | "" => FpsPolicy::Auto,
-        n => n
-            .parse::<u32>()
-            .map(|v| FpsPolicy::Capped(v.clamp(1, 240)))
-            .unwrap_or(FpsPolicy::Auto),
-    }
-}
-
-/// `[play]`：`fps` 是字符串（三态没法用纯数字表达），`measured_max_fps`
-/// 只由固件实测回写（0 = 未测），GUI 只读展示。`format` 切片源：
-/// `qois`（默认，`1080p/video.qois`）/ `raw`（`1080p/frameNNNN.raw` 序列）。
-/// `pipeline` 切播放实现（默认 `clip`，老文件缺键照读；非 clip 只读 qois）。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct PlayConfig {
-    #[serde(default = "default_fps")]
-    pub fps: String,
-    #[serde(default)]
-    pub measured_max_fps: u32,
-    /// 片源格式（默认 qois，老文件照读）。
-    #[serde(default = "default_play_format")]
-    pub format: MediaFormat,
-    /// 播放管线（默认 clip，老文件照读）。
-    #[serde(default)]
-    pub pipeline: PlayPipeline,
-}
-
-impl Default for PlayConfig {
-    fn default() -> Self {
-        Self {
-            fps: default_fps(),
-            measured_max_fps: 0,
-            format: MediaFormat::Qois,
-            pipeline: PlayPipeline::Clip,
-        }
-    }
-}
+pub use types::*;
 
 /// 解析结果：配置 + 可选的屏显警告（文件不存在不算错，返回 None）
 /// + `[schedule]` 表是否存在（`workers`/`dist` 搬家后的新老位置裁决用）。
@@ -787,6 +122,10 @@ pub fn parse() -> (Config, Option<String>, bool) {
 // ---------- 生效值（原子存储；AP/任意处可读，无需 OnceLock） ----------
 
 static ACCEL: AtomicU8 = AtomicU8::new(0);
+/// `[accel.decode]` 三键生效值（各 0 = auto，1 = scalar，2 = max；缺键按 auto 照读）。
+static DECODE_HEVC: AtomicU8 = AtomicU8::new(0);
+static DECODE_VP9: AtomicU8 = AtomicU8::new(0);
+static DECODE_H263: AtomicU8 = AtomicU8::new(0);
 static RENDER: AtomicU8 = AtomicU8::new(0);
 static WORKERS: AtomicU8 = AtomicU8::new(0);
 static DIST: AtomicU8 = AtomicU8::new(0);
@@ -852,6 +191,9 @@ static MAX_ACCEL: AtomicU8 = AtomicU8::new(0);
 pub fn load() -> Option<String> {
     let (cfg, warn, has_schedule) = parse();
     ACCEL.store(cfg.accel.level.as_u8(), Ordering::Relaxed);
+    DECODE_HEVC.store(cfg.accel.decode.hevc.as_u8(), Ordering::Relaxed);
+    DECODE_VP9.store(cfg.accel.decode.vp9.as_u8(), Ordering::Relaxed);
+    DECODE_H263.store(cfg.accel.decode.h263.as_u8(), Ordering::Relaxed);
     RENDER.store(cfg.render.mode.as_u8(), Ordering::Relaxed);
     // workers/dist 搬家裁决：`[schedule]` 表存在用新位置，否则认 `[render]` 旧键
     // （缺表老文件；显式旧键给一行警告后照读，不写回）。
@@ -908,9 +250,12 @@ pub fn load() -> Option<String> {
     BOOT_STRICT.store(cfg.boot.strict as u8, Ordering::Relaxed);
     ASYNC_EXECUTOR.store(cfg.r#async.executor.as_u8(), Ordering::Relaxed);
     log::info!(
-        "cfg: version={} accel.level={:?} render.mode={:?} sched.backend={:?} workers={:?} dist={:?} vsync={:?} blt_op={:?} tune.frames={} measured(render={:?} workers={:?} dist={:?} vsync={:?} vhalf={} cores={}) play.fps={} play.fmt={:?} measured_max_fps={} wallpaper.fmt={:?} async.executor={:?} boot(auto={} win={} lin={} sh={} uki={} mac={} strict={})",
+        "cfg: version={} accel.level={:?} decode(hevc={:?} vp9={:?} h263={:?}) render.mode={:?} sched.backend={:?} workers={:?} dist={:?} vsync={:?} blt_op={:?} tune.frames={} measured(render={:?} workers={:?} dist={:?} vsync={:?} vhalf={} cores={}) play.fps={} play.fmt={:?} measured_max_fps={} wallpaper.fmt={:?} async.executor={:?} boot(auto={} win={} lin={} sh={} uki={} mac={} strict={})",
         cfg.version,
         cfg.accel.level,
+        cfg.accel.decode.hevc,
+        cfg.accel.decode.vp9,
+        cfg.accel.decode.h263,
         cfg.render.mode,
         cfg.schedule.backend,
         workers,
@@ -950,6 +295,17 @@ pub fn load() -> Option<String> {
 
 pub fn accel_level() -> AccelLevel {
     AccelLevel::from_u8(ACCEL.load(Ordering::Relaxed))
+}
+
+/// `[accel.decode]` 三键生效值（缺键按 `Auto`=跟随 `level` 照读）。
+pub fn decode_hevc() -> DecodeSimd {
+    DecodeSimd::from_u8(DECODE_HEVC.load(Ordering::Relaxed))
+}
+pub fn decode_vp9() -> DecodeSimd {
+    DecodeSimd::from_u8(DECODE_VP9.load(Ordering::Relaxed))
+}
+pub fn decode_h263() -> DecodeSimd {
+    DecodeSimd::from_u8(DECODE_H263.load(Ordering::Relaxed))
 }
 
 pub fn render_mode() -> RenderMode {
@@ -1078,8 +434,9 @@ pub fn vsync_enabled() -> bool {
 /// 开机探一次硬件最大搬运位宽（P2）：先 `ensure_xsave_enabled`（CPL0 直接开，
 /// 幂等），再按 CPUID/XCR0 取最高可用。调一次，`upload_frame` 每次读结论。
 /// 必须在任何上屏/bench 之前调（`main` 里调，bench/播放只读）。
-/// 末尾把 `[accel]` 单比特开关推进解码轮子：`scalar`=关（驻标量双胞胎），
-/// 其余=开（轮子按 `copy_width()` 钳后的上限跑，显式超硬件在这里被钳住）。
+/// 末尾把 `[accel]` 开关推进三家解码轮子：各家 `auto`=跟随全局
+/// （`scalar`=关/其余=开），显式 `scalar`/`max` 覆盖全局；
+/// 首解前各轮子自保（`hevc_probe` 的幂等 `ensure` + vp9 轮内镜像门）保持。
 pub fn resolve_accel() {
     #[cfg(target_arch = "x86_64")]
     {
@@ -1097,29 +454,73 @@ pub fn resolve_accel() {
         }
         log::info!("accel: hardware max width = {:?}", max_width_name(max));
         // 解码轮子的运行时检测就是这道固件门（轮内无第二套 CPUID/XCR0 探）：
-        // `copy_width()` 已是 min(配置, 硬件)，按它推上限，首解前生效。
-        // `V128`（AVX）在轮侧无 VEX-128 档，取其下最高档 `Sse41`
+        // `auto` 家按 `copy_width()`（= min(配置, 硬件)）推上限，首解前生效；
+        // 显式 `scalar` 驻标量双胞胎，显式 `max` 按硬件探到的最高推（无视全局
+        // 钳制，搬运与解码本就独立选路）。
+        // `V128`（AVX）在 hevc 轮侧无 VEX-128 档，取其下最高档 `Sse41`
         //（AVX 机器恒有 SSE4.1，可安全执行）。
-        match copy_width() {
-            CopyWidth::U64 => rusty_h265::accel::force_scalar(),
-            CopyWidth::X128 => rusty_h265::accel::force_isa(rusty_h265::accel::Isa::Baseline),
-            CopyWidth::V128 => rusty_h265::accel::force_isa(rusty_h265::accel::Isa::Sse41),
-            CopyWidth::Y256 | CopyWidth::Z512 => {
-                rusty_h265::accel::force_isa(rusty_h265::accel::Isa::Avx2)
-            }
+        match decode_hevc() {
+            DecodeSimd::Scalar => rusty_h265::accel::force_scalar(),
+            DecodeSimd::Max => push_hevc_isa(hw_max_width()),
+            DecodeSimd::Auto => push_hevc_isa(copy_width()),
         }
         log::info!("accel: hevc decode isa = {}", rusty_h265::accel::describe());
+        // vp9（`vp9dec::simd`，x86_64 内核常编，运行时单比特门）与
+        // h263（`yuv`+`deblock` 的 `set_simd_enabled`，`simd` 特性下 wide 核，
+        // 关特性时调用即 no-op）：同推单比特语义（`scalar`=关/`max`=开，
+        // `auto`=跟随全局 `copy_width() != U64`）。
+        vp9dec::simd::set_simd_allowed(decode_on(decode_vp9()));
+        let h263_on = decode_on(decode_h263());
+        h263_rs_yuv::bt601::set_simd_enabled(h263_on);
+        h263_rs_deblock::deblock::set_simd_enabled(h263_on);
+        log::info!(
+            "accel: decode simd hevc={} vp9={} h263={}",
+            onoff(decode_on(decode_hevc())),
+            onoff(decode_on(decode_vp9())),
+            onoff(h263_on),
+        );
     }
+}
+
+/// 单家开关的开关量：`auto` 跟随全局（`scalar`=关/其余=开），显式键覆盖。
+fn decode_on(m: DecodeSimd) -> bool {
+    match m {
+        DecodeSimd::Auto => copy_width() != CopyWidth::U64,
+        DecodeSimd::Scalar => false,
+        DecodeSimd::Max => true,
+    }
+}
+
+/// hevc 轮子按位宽推 ISA 上限（`U64`=驻标量，其余见既有映射）。
+fn push_hevc_isa(w: CopyWidth) {
+    match w {
+        CopyWidth::U64 => rusty_h265::accel::force_scalar(),
+        CopyWidth::X128 => rusty_h265::accel::force_isa(rusty_h265::accel::Isa::Baseline),
+        CopyWidth::V128 => rusty_h265::accel::force_isa(rusty_h265::accel::Isa::Sse41),
+        CopyWidth::Y256 | CopyWidth::Z512 => {
+            rusty_h265::accel::force_isa(rusty_h265::accel::Isa::Avx2)
+        }
+    }
+}
+
+fn onoff(on: bool) -> &'static str {
+    if on { "on" } else { "off" }
 }
 
 /// 实际生效的搬运位宽：`auto` 取硬件最大；显式档位钳到硬件最大。
 pub fn copy_width() -> CopyWidth {
-    let max = CopyWidth::from_u8(MAX_ACCEL.load(Ordering::Relaxed));
+    let max = hw_max_width();
     let want = match accel_level() {
         AccelLevel::Auto => max,
         explicit => level_width(explicit),
     };
     if want as u8 > max as u8 { max } else { want }
+}
+
+/// 硬件探到的最大搬运位宽（`resolve_accel` 的结论；`max` 档解码开关用它推轮子
+/// 上限，无视全局 `level` 的钳制；搬运与解码本就独立选路）。
+fn hw_max_width() -> CopyWidth {
+    CopyWidth::from_u8(MAX_ACCEL.load(Ordering::Relaxed))
 }
 
 fn level_width(l: AccelLevel) -> CopyWidth {

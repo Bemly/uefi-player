@@ -93,3 +93,12 @@ pub(crate) fn vsync_desc(v: VsyncMode) -> String {
     }
     .into_owned()
 }
+
+pub(crate) fn decode_desc(v: DecodeSimd) -> String {
+    match v {
+        DecodeSimd::Auto => t!("accel.desc_decode_auto"),
+        DecodeSimd::Scalar => t!("accel.desc_decode_scalar"),
+        DecodeSimd::Max => t!("accel.desc_decode_max"),
+    }
+    .into_owned()
+}

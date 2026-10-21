@@ -50,6 +50,29 @@ impl AccelLevel {
     }
 }
 
+/// `[accel.decode]` 单家解码 SIMD 开关（与固件 `DecodeSimd` 同构）：
+/// `Auto` = 跟随全局 `level`（scalar 关/其余开），`Scalar` = 强制标量，
+/// `Max` = 强制轮子上限。老文件缺表缺键按 `Auto` 照读。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum DecodeSimd {
+    #[default]
+    Auto,
+    Scalar,
+    Max,
+}
+
+impl DecodeSimd {
+    pub(crate) const ALL: [Self; 3] = [Self::Auto, Self::Scalar, Self::Max];
+    pub(crate) fn file_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Scalar => "scalar",
+            Self::Max => "max",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum RenderMode {
@@ -220,14 +243,27 @@ pub(crate) fn parse_fps(s: &str) -> FpsPolicy {
 #[serde(default)]
 pub(crate) struct AccelConfig {
     pub(crate) level: AccelLevel,
+    /// 细粒度解码开关（`[accel.decode]` 三键；缺表缺键全 `Auto`=跟随 `level`）。
+    #[serde(default)]
+    pub(crate) decode: AccelDecode,
 }
 
 impl Default for AccelConfig {
     fn default() -> Self {
         Self {
             level: AccelLevel::Auto,
+            decode: AccelDecode::default(),
         }
     }
+}
+
+/// `[accel.decode]`：三家解码器各一键（与固件 `AccelDecode` 同构）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub(crate) struct AccelDecode {
+    pub(crate) hevc: DecodeSimd,
+    pub(crate) vp9: DecodeSimd,
+    pub(crate) h263: DecodeSimd,
 }
 
 /// `[render.tune]`：矩阵全部数字旋钮（无 auto 维度，改完存盘即生效）。

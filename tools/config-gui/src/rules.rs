@@ -150,7 +150,10 @@ mod blackbox_matrix {
     ) {
         let cfg = FileConfig {
             version: 1,
-            accel: AccelConfig { level: a },
+            accel: AccelConfig {
+                level: a,
+                decode: AccelDecode::default(),
+            },
             render: RenderConfig {
                 mode: m,
                 workers: WorkersMode::Auto,
@@ -680,5 +683,41 @@ mod blackbox_matrix {
         let kept = coerce_loaded(new, true);
         assert_eq!(kept.schedule.backend, ScheduleBackend::Nano);
         assert_eq!(kept.render.workers, WorkersMode::All);
+    }
+
+    /// `[accel.decode]` 三键回写（3³ = 27 组合；不进主笛卡尔，避免 27 倍膨胀）+
+    /// 老文件缺表缺键按 auto 照读（= 跟随全局，不炸旧配置）。
+    #[test]
+    fn decode_roundtrip_matrix() {
+        let mut n = 0;
+        for h in DecodeSimd::ALL {
+            for v in DecodeSimd::ALL {
+                for g in DecodeSimd::ALL {
+                    let mut cfg = FileConfig::default();
+                    cfg.accel.decode.hevc = h;
+                    cfg.accel.decode.vp9 = v;
+                    cfg.accel.decode.h263 = g;
+                    let back: FileConfig =
+                        toml::from_str(&toml::to_string(&cfg).unwrap()).unwrap();
+                    assert_eq!(back.accel.decode.hevc, h);
+                    assert_eq!(back.accel.decode.vp9, v);
+                    assert_eq!(back.accel.decode.h263, g);
+                    assert_eq!(back, cfg);
+                    n += 1;
+                }
+            }
+        }
+        assert_eq!(n, 27);
+        // 老文件：无 `[accel.decode]` 表 → 三键全 auto（跟随全局）。
+        let legacy: FileConfig =
+            toml::from_str("version = 1\n[accel]\nlevel = \"scalar\"\n").unwrap();
+        assert_eq!(legacy.accel.decode.hevc, DecodeSimd::Auto);
+        assert_eq!(legacy.accel.decode.vp9, DecodeSimd::Auto);
+        assert_eq!(legacy.accel.decode.h263, DecodeSimd::Auto);
+        // 半表：只写一键，其余 auto。
+        let partial: FileConfig = toml::from_str("[accel.decode]\nvp9 = \"max\"\n").unwrap();
+        assert_eq!(partial.accel.decode.vp9, DecodeSimd::Max);
+        assert_eq!(partial.accel.decode.hevc, DecodeSimd::Auto);
+        assert_eq!(partial.accel.decode.h263, DecodeSimd::Auto);
     }
 }
