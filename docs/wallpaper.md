@@ -1,9 +1,14 @@
 # 动态壁纸（P4，播放器 `Clip` 的薄调用层）
 
-> 片源格式矩阵（`[wallpaper] format`，默认 `raw`）：
+> 片源格式矩阵（`[wallpaper] format`，默认 `raw`，与 `[play]` 同一 `MediaFormat`
+> 矩阵，八格式全通，`wall.*` 同名文件）：
 > - `raw`：零解码直搬（老路，首帧无抖动）；
 > - `qois`：`wallpaper/wall.qois`（与视频同格式），开机预解码
->   （与播片同代价，首帧无抖动但启动慢一拍，`preload` 同样封顶）。
+>   （与播片同代价，首帧无抖动但启动慢一拍，`preload` 同样封顶）；
+> - `hevc`（`wall.mp4` hev 轨优先，无则 `wall.hevc`）/ `avc`（`wall.mp4` avc 轨）
+>   / `vp9`（`wall.mp4` vp09 轨优先，无则 `wall.ivf`）/ `h263`（`wall.h263`）
+>   / `mpeg2v`（`wall.m2v`）/ `theora`（`wall.ogv`）：软解预解码，
+>   坏帧记数跳过、全坏静默无壁纸（不断菜单；`preload` 同样截断）。
 > 解码全部复用 `video::decoder::Clip`，壁纸只剩开关 + 帧率 + 循环语义。
 
 ## 格式与布局（`raw`）

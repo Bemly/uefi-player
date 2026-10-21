@@ -172,21 +172,13 @@ impl App {
         }
     }
 
-    /// 片源格式行（两颗玻璃按钮，qois/raw 二选一，壁纸页专用形状）。
+    /// 片源格式行（播放/壁纸共用八按钮，与下同形；
+    /// 壁纸页曾只有 qois/raw 双按钮，现八格式全通故合流）。
     pub(crate) fn format_row(&mut self, ui: &mut egui::Ui, cur: MediaFormat) -> MediaFormat {
-        let mut next = cur;
-        ui.horizontal(|ui| {
-            if self.option_button(ui, cur == MediaFormat::Qois, &t!("format.qois")) {
-                next = MediaFormat::Qois;
-            }
-            if self.option_button(ui, cur == MediaFormat::Raw, &t!("format.raw")) {
-                next = MediaFormat::Raw;
-            }
-        });
-        next
+        self.format_row_all(ui, cur)
     }
 
-    /// 播放片源行（七颗玻璃按钮，与上面双按钮同形；七格式全可用，
+    /// 播放片源行（八颗玻璃按钮，横向自动换行；八格式全可用，
     /// 无 GlassButton 禁用态问题故不置灰——blt 行置灰是引擎对照，本行无此需求）。
     pub(crate) fn format_row_all(&mut self, ui: &mut egui::Ui, cur: MediaFormat) -> MediaFormat {
         let mut next = cur;

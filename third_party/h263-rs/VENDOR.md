@@ -169,12 +169,18 @@
    细节（本轮 host + UEFI 双编译已证）；升级 itertools 大版本时重验
    `vert` 的八行并行循环编译与双路一致单测。
 
-## 播放器 `format` 接线状态（2026-10-21）：格式可选、解码后继
+## 播放器 `format` 接线状态（2026-10-21）：已接通（`video.h263` 裸流）
 
-- `[play] format = "h263"` 已进固件/GUI 同构 schema（小写串 `h263`，旧文件缺键照读），
-  GUI 播放页可选；但 `Clip` 分发未接——选中即明确报错
-  （“selectable, decoder follows later”），不硬编解码，不断解析/boot。
-- 后继项（本箱注释 + QEMU 矩阵 `format-h263-parse` 只验解析，不断言解码）：
-  样片（无 `src/diag/data` 内嵌样片）→ `Clip::from_h263_*`（planar YUV → BGRA，
-  校验和口径 md5(Y)+md5(RGBA) 见本箱头注释）→ `diag` 探针项 → 矩阵 case。
-  届时 QEMU h263-probe + 帧率 gate（见上节已知风险第 3 条）一并落地。
+- `[play] format = "h263"` 固件 `Clip::from_h263_*` + GUI 同构 schema 全通；
+  样片 `src/diag/data/video.h263`（ffmpeg testsrc 128x96×10 帧，QCIF 基线）。
+- 上游 PTYPE 行为修正（`parser/picture.rs`，`VENDOR(uefi-player):` 标）：
+  基线 `PictType` 首比特 0=INTRA(I)/1=INTER(P)（ITU-T H.263 §5.1.2 Table 2，
+  ffmpeg 自家解码器同式），上游写反导致一切基线 I 帧被判 P、无参考帧可拷、
+  首帧即 `UncodedIFrameBlocks`。修正后 ffmpeg 基线流 10/10 解码，
+  与 ffmpeg 解 YUV 逐字节比对：首帧纯 intra 差 1.7% max 1（整数 IDCT 舍入），
+  P 帧正常漂移 max 3（MC+IDCT 累积，容差口径 max|Δ|≤3，见下）。
+  箱内单测 37 全绿（25+5+7，解析映射无单测锁死）。
+- 校验和口径：md5(Y)+md5(RGBA)（见 §帧输出与校验和口径），
+  另接受 max|Δ|≤3 的 ffmpeg 容差比对（P 帧漂移预期内）。
+- 仍只承诺 Sorenson Spark / 基线（`DecoderOption::empty()`，标准 PTYPE 路）；
+  Sorenson 变体流另议（FLV 拆包不在本仓）。

@@ -56,10 +56,16 @@ where
         };
 
         let low_ptype_bits: u8 = reader.read_bits(5)?;
+        // VENDOR(uefi-player): PictType MSB-first first bit: 0 = INTRA (I),
+        // 1 = INTER (P) per ITU-T H.263 §5.1.2 Table 2 (ffmpeg's h263dec
+        // reads the same bit identically). Upstream had I/P swapped here,
+        // which mislabeled every baseline I-frame as P (and, with no
+        // reference frame yet, every ffmpeg-style stream died at picture 0
+        // with UncodedIFrameBlocks); verified against ffmpeg-decoded YUV.
         let mut r#type = if low_ptype_bits & 0x10 != 0 {
-            PictureTypeCode::IFrame
-        } else {
             PictureTypeCode::PFrame
+        } else {
+            PictureTypeCode::IFrame
         };
 
         if low_ptype_bits & 0x08 != 0 {

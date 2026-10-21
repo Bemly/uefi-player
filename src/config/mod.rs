@@ -440,17 +440,22 @@ pub fn resolve_accel() {
         }
         log::info!("accel: hardware max width = {:?}", max_width_name(max));
         // 解码轮子的运行时检测就是这道固件门（轮内无第二套 CPUID/XCR0 探）：
-        // 六家单比特跟随全局 `copy_width()`（`scalar`=关/其余=开），首解前生效。
+        // 五家单比特跟随全局 `copy_width()`（`scalar`=关/其余=开），首解前生效；
+        // h264 例外收敛到 Y256/Z512（见下）。
         // `V128`（AVX/F16C）在 hevc 轮侧无 VEX-128 档，取其下最高档 `Sse41`
         //（AVX 机器恒有 SSE4.1，可安全执行）。
         let on = copy_width() != CopyWidth::U64;
         push_hevc_isa(copy_width());
         log::info!("accel: hevc decode isa = {}", rusty_h265::accel::describe());
         // h264（vendor 的 `rusty_h264_accel`，`set_simd_enabled` 单比特门；
-        // 关时全入口走标量双胞胎，开时 SSE2 基线核 + AVX2（no_std 下 have 恒
-        // 最高档，真门就是这里的一推；轮内无第二套探，见该目录 VENDOR.md）。
+        // no_std 下 `have_avx2/have_sse41` 恒取最高档（真门就是这里的一推，
+        // 轮内无第二套探，见该目录 VENDOR.md），故只在 AVX2+XCR0 已验证的
+        // Y256/Z512 才开（`probe_max_width` 的 Y256 门 = AVX 门 + AVX2 硬件位，
+        // 缺一个即钳住，不断 boot）；其余位宽驻标量保正确（QEMU qemu64 实锤
+        // 过开开关即 VEX #UD，见 `docs/simd.md` AVC 节）。
         // `describe()` 供 QEMU 矩阵断言（hevc 同款 `isa` 行）。
-        rusty_h264_accel::set_simd_enabled(on);
+        let h264_on = matches!(copy_width(), CopyWidth::Y256 | CopyWidth::Z512);
+        rusty_h264_accel::set_simd_enabled(h264_on);
         log::info!("accel: h264 decode isa = {}", rusty_h264_accel::describe());
         // vp9（`vp9dec::simd`，x86_64 内核常编，运行时单比特门）与
         // h263（`yuv`+`deblock` 的 `set_simd_enabled`，`simd` 特性下 wide 核，
@@ -469,7 +474,7 @@ pub fn resolve_accel() {
             onoff(on),
             onoff(on),
             onoff(on),
-            onoff(on),
+            onoff(h264_on),
             onoff(on),
             onoff(on),
         );

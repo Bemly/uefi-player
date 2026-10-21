@@ -340,12 +340,13 @@ keys = [
 expect = ["play: path=direct_loop", "video: fmt=Vp9"]
 soak_sec = 10
 
-# 格式解析 h263：无样片，只验解析（boot cfg 行即格式落盘证明）+ 待机，不断言解码。
-# 解码后继（见 docs/player.md），不按键不播放。
+# 格式 h263：裸流样片软解进 Clip（needs_h263video 拷裸流样片），走 direct 单核整轮。
+# 八格式矩阵的 h263 分支证明：分发 + 预解码（`video: fmt=H263` 行）+ 同一下游切分不断播。
 [[case]]
-name = "format-h263-parse"
-covers = ["src/config/", "src/video/decoder.rs"]
+name = "video-h263"
+covers = ["src/video.rs", "src/video/", "src/diag/data/video.h263"]
 timeout_sec = 180
+needs_h263video = true
 config = """
 version = 1
 [accel]
@@ -362,12 +363,20 @@ format = "h263"
 enable = false
 """
 boot_expect = ["cfg: version=1", "play.fmt=H263", "idle: ready"]
+keys = [
+  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
+  { send = "p", wait_after = 3 },
+  { send = "0", wait_for = ["menu: ready"], wait_after = 5 },
+]
+expect = ["play: path=direct_loop", "video: fmt=H263"]
+soak_sec = 10
 
-# 格式解析 mpeg2v：无样片，只验解析 + 待机，不断言解码（解码后继，见 docs/player.md）。
+# 格式 mpeg2v：裸基本流样片接入单元切分软解进 Clip，走 direct 单核整轮。
 [[case]]
-name = "format-mpeg2v-parse"
-covers = ["src/config/", "src/video/decoder.rs"]
+name = "video-mpeg2v"
+covers = ["src/video.rs", "src/video/", "src/diag/data/video.m2v"]
 timeout_sec = 180
+needs_mpeg2vvideo = true
 config = """
 version = 1
 [accel]
@@ -384,12 +393,20 @@ format = "mpeg2v"
 enable = false
 """
 boot_expect = ["cfg: version=1", "play.fmt=Mpeg2v", "idle: ready"]
+keys = [
+  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
+  { send = "p", wait_after = 3 },
+  { send = "0", wait_for = ["menu: ready"], wait_after = 5 },
+]
+expect = ["play: path=direct_loop", "video: fmt=Mpeg2v"]
+soak_sec = 10
 
-# 格式解析 theora：无样片，只验解析 + 待机，不断言解码（解码后继，见 docs/player.md）。
+# 格式 theora：Ogg 样片手写拆包软解进 Clip，走 direct 单核整轮。
 [[case]]
-name = "format-theora-parse"
-covers = ["src/config/", "src/video/decoder.rs"]
+name = "video-theora"
+covers = ["src/video.rs", "src/video/", "src/diag/data/video.ogv"]
 timeout_sec = 180
+needs_theoravideo = true
 config = """
 version = 1
 [accel]
@@ -406,6 +423,105 @@ format = "theora"
 enable = false
 """
 boot_expect = ["cfg: version=1", "play.fmt=Theora", "idle: ready"]
+keys = [
+  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
+  { send = "p", wait_after = 3 },
+  { send = "0", wait_for = ["menu: ready"], wait_after = 5 },
+]
+expect = ["play: path=direct_loop", "video: fmt=Theora"]
+soak_sec = 10
+
+# 格式 avc：MP4 样片石雨堂拆 avc 轨转 Annex-B 软解进 Clip，走 direct 单核整轮。
+[[case]]
+name = "video-avc"
+covers = ["src/video.rs", "src/video/", "src/diag/data/video-avc.mp4"]
+timeout_sec = 180
+needs_avcvideo = true
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+workers = "bsp_only"
+dist = "static"
+vsync = "off"
+[play]
+fps = "max"
+format = "avc"
+[wallpaper]
+enable = false
+"""
+boot_expect = ["cfg: version=1", "play.fmt=Avc", "idle: ready"]
+keys = [
+  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
+  { send = "p", wait_after = 3 },
+  { send = "0", wait_for = ["menu: ready"], wait_after = 5 },
+]
+expect = ["play: path=direct_loop", "video: fmt=Avc"]
+soak_sec = 10
+
+# 格式 hevc-MP4：MP4 样片石雨堂拆 hev 轨转 Annex-B 软解进 Clip（容器路证明；
+# Annex-B 裸流路由 video-hevc 覆盖）。
+[[case]]
+name = "video-hevc-mp4"
+covers = ["src/video.rs", "src/video/", "src/diag/data/video-hevc.mp4"]
+timeout_sec = 180
+needs_hevcmp4video = true
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+workers = "bsp_only"
+dist = "static"
+vsync = "off"
+[play]
+fps = "max"
+format = "hevc"
+[wallpaper]
+enable = false
+"""
+boot_expect = ["cfg: version=1", "play.fmt=Hevc", "idle: ready"]
+keys = [
+  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
+  { send = "p", wait_after = 3 },
+  { send = "0", wait_for = ["menu: ready"], wait_after = 5 },
+]
+expect = ["play: path=direct_loop", "video: fmt=Hevc"]
+soak_sec = 10
+
+# 格式 vp9-MP4：MP4 样片石雨堂拆 vp09 轨裸帧软解进 Clip（容器路证明；
+# IVF 裸容器路由 video-vp9 覆盖）。
+[[case]]
+name = "video-vp9-mp4"
+covers = ["src/video.rs", "src/video/", "src/diag/data/video-vp9.mp4"]
+timeout_sec = 180
+needs_vp9mp4video = true
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+workers = "bsp_only"
+dist = "static"
+vsync = "off"
+[play]
+fps = "max"
+format = "vp9"
+[wallpaper]
+enable = false
+"""
+boot_expect = ["cfg: version=1", "play.fmt=Vp9", "idle: ready"]
+keys = [
+  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
+  { send = "p", wait_after = 3 },
+  { send = "0", wait_for = ["menu: ready"], wait_after = 5 },
+]
+expect = ["play: path=direct_loop", "video: fmt=Vp9"]
+soak_sec = 10
 
 # 调度后端 nano：单核执行器泵走渲染路径（direct 单核），workers/dist 忽略。
 [[case]]
@@ -882,7 +998,7 @@ fps = "max"
 [wallpaper]
 enable = false
 """
-boot_expect = ["cfg: version=1", "accel: decode simd hevc=on vp9=on h263=on h264=on mpeg2v=on theora=on", "idle: ready"]
+boot_expect = ["cfg: version=1", "accel: decode simd hevc=on vp9=on h263=on h264=off mpeg2v=on theora=on", "idle: ready"]
 keys = [
   { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
   { send = "p", wait_after = 3 },
@@ -1008,6 +1124,38 @@ keys = [
   { send = "7", wait_for = ["menu: ready"], wait_after = 5 },
 ]
 expect = ["AVX is "]
+forbid = ["panicked at", "CpuDeadLoop", "menu bg skipped"]
+
+# 壁纸 avc：wall.mp4（1080p avc 轨）容器拆轨预解码循环；弹窗 → p → 0 照常响应。
+# 统一 Clip 的 MP4 分支在壁纸侧的证明（与 qois 的 wallpaper-qois 对称）。
+[[case]]
+name = "wallpaper-avc"
+covers = ["src/wallpaper.rs", "src/video/", "src/diag/data/wall-avc.mp4"]
+timeout_sec = 180
+needs_avcwallpaper = true
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+workers = "bsp_only"
+dist = "static"
+vsync = "off"
+[play]
+fps = "max"
+[wallpaper]
+enable = true
+fps = 15
+format = "avc"
+"""
+boot_expect = ["cfg: version=1", "idle: ready"]
+keys = [
+  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
+  { send = "p", wait_after = 3 },
+  { send = "0", wait_for = ["menu: ready"], wait_after = 5 },
+]
+expect = ["wallpaper: preloaded 10 frames"]
 forbid = ["panicked at", "CpuDeadLoop", "menu bg skipped"]
 
 # 壁纸预载拉满：preload = 0 不封顶（3 帧黑场全进内存，和播片一样）；

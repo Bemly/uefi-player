@@ -4,6 +4,8 @@ use uefi::Status;
 use uefi::proto::console::gop::BltPixel;
 use uefi::proto::media::file::{File, FileInfo, RegularFile};
 
+use super::demux::Mp4VideoKind;
+
 /// 整文件进内存的流式帧源（旧 `staged`/`zero_copy` 管线用：`Clip` 预解码之前的形态，
 /// 内存换时间——文件全驻留，逐帧只解码不重复读盘）。
 pub struct VideoMemory {
@@ -71,14 +73,22 @@ impl VideoMemory {
 }
 
 //////// 统一播放剪辑：预解码帧集（`Vec<Vec<BltPixel>>` + 游标）。
-//////// 片源七格式（`[play]/[wallpaper] format` 矩阵，见 `config::MediaFormat`）：
+//////// 片源八格式（`[play]/[wallpaper] format` 矩阵，见 `config::MediaFormat`）：
 //////// - qois：`u32le len + QOI` 串接文件，解码为 BGRA（播放器 P3 老路）；
 //////// - raw：`frameNNNN.raw` BGRA 直存序列，零解码直搬（壁纸 P4 老路）；
-//////// - hevc：`video.hevc`（Annex-B）→ vendor `rusty_h265` 软解 → YUV420 转 BGRA；
-//////// - vp9：`video.ivf`（IVF 容器）→ vendor `vp9dec` 软解 → YUV420 转 BGRA；
-//////// - h263/mpeg2v/theora：格式可选、解码后继（选中即明确报错，不硬编解码，
-////////   见 `docs/player.md`）。
-//////// 壁纸只是薄调：`wallpaper::load` 按开关选格式调这里，循环/上屏走同一套。
+//////// - hevc：`video.mp4`（hev 轨，石雨堂拆包 → Annex-B）或 `video.hevc`
+////////   （Annex-B 裸流）→ vendor `rusty_h265` 软解 → YUV420 转 BGRA；
+//////// - avc：`video.mp4`（avc 轨，石雨堂拆 avcC → Annex-B）→ vendor
+////////   `rusty_h264_decoder` 软解 → YUV420 转 BGRA；
+//////// - vp9：`video.mp4`（vp09 轨，样片即裸帧）或 `video.ivf`（IVF 容器）
+////////   → vendor `vp9dec` 软解 → YUV420 转 BGRA；
+//////// - h263：`video.h263` 裸流 → vendor `h263-rs` 软解 → YUV420 转 BGRA；
+//////// - mpeg2v：`video.m2v` 裸基本流（接入单元切分）→ vendor
+////////   `filmcraft-mpeg2v` 软解 → YUV420 转 BGRA（只收 4:2:0）；
+//////// - theora：`video.ogv`（OggS 磁盘原格式，手写拆包）→ vendor
+////////   `oxideav-theora` 软解 → 显示区裁剪 + 翻转 + YUV420 转 BGRA（只收 4:2:0）。
+//////// 壁纸只是薄调：`wallpaper::load` 按开关选格式调这里（`wall.*` 同名文件），
+//////// 循环/上屏走同一套。
 pub struct Clip {
     /// 帧几何（qois 取文件头一致值，raw 取首帧/定值；上屏方按此切行）。
     pub w: usize,
@@ -251,6 +261,38 @@ impl Clip {
         out
     }
 
+    /// YUV420 → BGRA（左下原点版，theora 用）：`CroppedFrame` 平面是
+    /// lower-left 行序（`samples[y * width + x]`，y 向上），上屏前垂直翻转。
+    /// 换算式与 `yuv420_to_bgra` 同式，只有行号取反。
+    fn yuv420_to_bgra_vflip(y: &[u8], u: &[u8], v: &[u8], w: usize, h: usize) -> Vec<BltPixel> {
+        let uv_stride = w.div_ceil(2).max(1);
+        let mut out = Vec::new();
+        if out.try_reserve_exact(w.saturating_mul(h)).is_err() {
+            return out;
+        }
+        out.extend(core::iter::repeat_n(
+            BltPixel::new(0, 0, 0),
+            w.saturating_mul(h),
+        ));
+        for row in 0..h {
+            let src = h.saturating_sub(1).saturating_sub(row);
+            for col in 0..w {
+                let yy = y
+                    .get(src.saturating_mul(w).saturating_add(col))
+                    .copied()
+                    .unwrap_or(0) as i32;
+                let uv_idx = (src / 2).saturating_mul(uv_stride).saturating_add(col / 2);
+                let uu = u.get(uv_idx).copied().unwrap_or(128) as i32 - 128;
+                let vv = v.get(uv_idx).copied().unwrap_or(128) as i32 - 128;
+                let r = (yy + ((359 * vv) >> 8)).clamp(0, 255) as u8;
+                let g = (yy - ((88 * uu + 183 * vv) >> 8)).clamp(0, 255) as u8;
+                let b = (yy + ((454 * uu) >> 8)).clamp(0, 255) as u8;
+                out[row.saturating_mul(w).saturating_add(col)] = BltPixel::new(r, g, b);
+            }
+        }
+        out
+    }
+
     /// hevc 字节流解码核心（`tag` 只进串口）：Annex-B 经 vendor `rusty_h265`
     /// 整流解码（与 `diag::hevc_probe` 同路：`push_annexb` + `flush` + 取帧），
     /// 坏帧计数跳过，全坏/几何不一致直接报错（与 `from_qois_bytes` 同策略）。
@@ -355,6 +397,47 @@ impl Clip {
         Self::from_hevc_bytes(&buf, tag)
     }
 
+    /// vp9 单样片解码结果收集（IVF/MP4 双路共用）：只要显示帧
+    /// （隐藏 altref 无画面，直接跳过），只收 8-bit 4:2:0。
+    /// 坏帧计数跳过，全坏/几何不一致调用方报错（与其它路同策略）。
+    fn collect_vp9_frame(
+        frames: &mut Vec<Vec<BltPixel>>,
+        skipped: &mut u32,
+        expect: &mut Option<(u32, u32)>,
+        w: &mut usize,
+        h: &mut usize,
+        decoded: Vec<vp9dec::DecodedFrame>,
+    ) {
+        for d in decoded {
+            // 隐藏帧（altref）无显示画面：不收，不记坏。
+            let Some(f) = d.frame else { continue };
+            // 只收 8-bit 4:2:0（轮子输出的唯一固件口径；其余记数跳过）。
+            if f.bit_depth != 8 || f.subsampling_x != 1 || f.subsampling_y != 1 {
+                *skipped += 1;
+                continue;
+            }
+            let (vp9dec::PlaneData::U8(y), vp9dec::PlaneData::U8(u), vp9dec::PlaneData::U8(v)) =
+                (&f.y, &f.u, &f.v)
+            else {
+                *skipped += 1;
+                continue;
+            };
+            match *expect {
+                None => {
+                    *expect = Some((f.width, f.height));
+                    *w = f.width as usize;
+                    *h = f.height as usize;
+                }
+                Some((ew, eh)) if (f.width, f.height) != (ew, eh) => {
+                    *skipped += 1;
+                    continue;
+                }
+                _ => {}
+            }
+            frames.push(Self::yuv420_to_bgra(y, u, v, *w, *h));
+        }
+    }
+
     /// vp9 字节流解码核心（`tag` 只进串口）：IVF 容器经 vendor `vp9dec`
     /// 的 `IvfReader` 拆帧 + `Decoder::decode_frame` 逐帧解码，
     /// 只要显示帧（`show_frame == 1`；隐藏 altref 无画面，直接跳过），
@@ -387,34 +470,14 @@ impl Clip {
                     continue;
                 }
             };
-            for d in decoded {
-                // 隐藏帧（altref）无显示画面：不收，不记坏。
-                let Some(f) = d.frame else { continue };
-                // 只收 8-bit 4:2:0（轮子输出的唯一固件口径；其余记数跳过）。
-                if f.bit_depth != 8 || f.subsampling_x != 1 || f.subsampling_y != 1 {
-                    skipped += 1;
-                    continue;
-                }
-                let (vp9dec::PlaneData::U8(y), vp9dec::PlaneData::U8(u), vp9dec::PlaneData::U8(v)) =
-                    (&f.y, &f.u, &f.v)
-                else {
-                    skipped += 1;
-                    continue;
-                };
-                match expect {
-                    None => {
-                        expect = Some((f.width, f.height));
-                        w = f.width as usize;
-                        h = f.height as usize;
-                    }
-                    Some((ew, eh)) if (f.width, f.height) != (ew, eh) => {
-                        skipped += 1;
-                        continue;
-                    }
-                    _ => {}
-                }
-                frames.push(Self::yuv420_to_bgra(y, u, v, w, h));
-            }
+            Self::collect_vp9_frame(
+                &mut frames,
+                &mut skipped,
+                &mut expect,
+                &mut w,
+                &mut h,
+                decoded,
+            );
         }
 
         if frames.is_empty() {
@@ -442,7 +505,13 @@ impl Clip {
     }
 
     /// 整文件读入后解码（`video.ivf`，32 字节头 + 12 字节帧头 + 负载）。
-    pub fn from_vp9_file(mut file: RegularFile, tag: &str) -> crate::error::Result<Self> {
+    pub fn from_vp9_file(file: RegularFile, tag: &str) -> crate::error::Result<Self> {
+        let buf = Self::read_whole_file(file, tag)?;
+        Self::from_vp9_bytes(&buf, tag)
+    }
+
+    /// 整文件读入（各 `from_*_file` 共用：`get_info` 自适应长度 + 一次读全）。
+    fn read_whole_file(mut file: RegularFile, tag: &str) -> crate::error::Result<Vec<u8>> {
         let mut info_buf = vec![0u8; 128];
         let info = loop {
             match file.get_info::<FileInfo>(&mut info_buf) {
@@ -458,7 +527,429 @@ impl Clip {
 
         let mut buf = vec![0u8; info.file_size() as usize];
         file.read(&mut buf)?;
-        Self::from_vp9_bytes(&buf, tag)
+        let _ = tag;
+        Ok(buf)
+    }
+
+    /// MP4 容器解码（`tag` 只进串口）：石雨堂拆轨 → avc/hevc 拼 Annex-B 走
+    /// 既有字节流核心；vp9 裸帧逐样片解码（与 IVF 路同收集器）。
+    /// 片源：`1080p/video.mp4`（单视频轨；多轨只收首个匹配轨）。
+    pub fn from_mp4_file(
+        file: RegularFile,
+        want: Mp4VideoKind,
+        tag: &str,
+    ) -> crate::error::Result<Self> {
+        let buf = Self::read_whole_file(file, tag)?;
+        let track = super::demux::demux_mp4_track(&buf, want, tag)?;
+        match want {
+            Mp4VideoKind::Avc => Self::from_avc_bytes(&track.annexb, tag),
+            Mp4VideoKind::Hevc => Self::from_hevc_bytes(&track.annexb, tag),
+            Mp4VideoKind::Vp9 => Self::from_vp9_raw_frames(&track.raw_frames, tag),
+        }
+    }
+
+    /// vp9 裸帧序列解码核心（MP4 `Vp09` 轨用）：样片即完整 VP9 帧，
+    /// 收集器与 IVF 路同一套（显示帧/8-bit 4:2:0 口径一致）。
+    pub fn from_vp9_raw_frames(samples: &[Vec<u8>], tag: &str) -> crate::error::Result<Self> {
+        let mut dec = vp9dec::Decoder::new();
+        let mut frames = Vec::new();
+        let mut skipped = 0u32;
+        let mut expect: Option<(u32, u32)> = None;
+        let mut w = 0usize;
+        let mut h = 0usize;
+        for s in samples {
+            let decoded = match dec.decode_frame(s) {
+                Ok(d) => d,
+                Err(_) => {
+                    skipped += 1;
+                    continue;
+                }
+            };
+            Self::collect_vp9_frame(
+                &mut frames,
+                &mut skipped,
+                &mut expect,
+                &mut w,
+                &mut h,
+                decoded,
+            );
+        }
+
+        if frames.is_empty() {
+            return Err(crate::error::NyaStatus::_Debug(alloc::format!(
+                "{}: no valid frames ({} skipped)",
+                tag,
+                skipped
+            )));
+        }
+        if skipped > 0 {
+            log::warn!(
+                "{}: predecoded {} frames, skipped {} bad",
+                tag,
+                frames.len(),
+                skipped
+            );
+        }
+
+        Ok(Self {
+            w,
+            h,
+            frames,
+            cursor: 0,
+        })
+    }
+
+    /// avc 字节流解码核心（`tag` 只进串口）：Annex-B 经 vendor
+    /// `rusty_h264_decoder` 整流解码（与 `diag::avc_probe` 同路），
+    /// YUV420 → BGRA（只收 tight 8-bit 4:2:0，坏帧计数跳过）。
+    /// 片源：MP4 `avcC` 参数集 + 样片转 Annex-B（见 `demux_mp4_track`）。
+    pub fn from_avc_bytes(data: &[u8], tag: &str) -> crate::error::Result<Self> {
+        let decoded = rusty_h264_decoder::Decoder::new()
+            .decode_stream(data)
+            .map_err(|e| {
+                crate::error::NyaStatus::_Debug(alloc::format!(
+                    "{}: avc decode error: {:?}",
+                    tag,
+                    e
+                ))
+            })?;
+        let mut frames = Vec::new();
+        let mut skipped = 0u32;
+        let mut expect: Option<(usize, usize)> = None;
+        let mut w = 0usize;
+        let mut h = 0usize;
+        for f in &decoded {
+            // 只收 tight 8-bit 4:2:0（串行解码器本就产出此形状；其余记数跳过）。
+            let planes = f.as_planes();
+            if !planes.is_tight() {
+                skipped += 1;
+                continue;
+            }
+            match expect {
+                None => {
+                    expect = Some((f.width, f.height));
+                    w = f.width;
+                    h = f.height;
+                }
+                Some((ew, eh)) if (f.width, f.height) != (ew, eh) => {
+                    skipped += 1;
+                    continue;
+                }
+                _ => {}
+            }
+            frames.push(Self::yuv420_to_bgra(planes.y, planes.u, planes.v, w, h));
+        }
+
+        if frames.is_empty() {
+            return Err(crate::error::NyaStatus::_Debug(alloc::format!(
+                "{}: no valid frames ({} skipped)",
+                tag,
+                skipped
+            )));
+        }
+        if skipped > 0 {
+            log::warn!(
+                "{}: predecoded {} frames, skipped {} bad",
+                tag,
+                frames.len(),
+                skipped
+            );
+        }
+
+        Ok(Self {
+            w,
+            h,
+            frames,
+            cursor: 0,
+        })
+    }
+
+    /// h263 裸流解码核心（`tag` 只进串口）：vendor `h263-rs` 流式解码
+    /// （`H263State` + `H263Reader`，标准基线空选项；事务回滚语义下
+    /// 连续坏包直接截断，避免空转）。
+    /// 片源：`1080p/video.h263`（裸 H.263 基线流，无容器）。
+    pub fn from_h263_bytes(data: &[u8], tag: &str) -> crate::error::Result<Self> {
+        use h263_rs::parser::H263Reader;
+        let mut state = h263_rs::H263State::new(h263_rs::DecoderOption::empty());
+        let mut reader = H263Reader::from_source(data);
+        let mut frames = Vec::new();
+        let mut skipped = 0u32;
+        let mut expect: Option<(u16, u16)> = None;
+        let mut w = 0usize;
+        let mut h = 0usize;
+        loop {
+            match state.decode_next_picture(&mut reader) {
+                Ok(()) => {}
+                Err(e) if e.is_eof_error() => break,
+                Err(_) => {
+                    // 事务回滚后同字节重试必重错：记数并截断（坏流不断解析）。
+                    skipped += 1;
+                    break;
+                }
+            }
+            let Some(pic) = state.get_last_picture() else {
+                skipped += 1;
+                continue;
+            };
+            let dims = match pic.format().into_width_and_height() {
+                Some(d) => d,
+                None => {
+                    skipped += 1;
+                    continue;
+                }
+            };
+            match expect {
+                None => {
+                    expect = Some(dims);
+                    w = dims.0 as usize;
+                    h = dims.1 as usize;
+                }
+                Some(ew) if ew != dims => {
+                    skipped += 1;
+                    continue;
+                }
+                _ => {}
+            }
+            let (y, u, v) = pic.as_yuv();
+            // 4:2:0 紧凑平面校验（半帧不上屏）。
+            if y.len() != w.saturating_mul(h)
+                || u.len() != (w / 2).saturating_mul(h / 2)
+                || v.len() != (w / 2).saturating_mul(h / 2)
+            {
+                skipped += 1;
+                continue;
+            }
+            frames.push(Self::yuv420_to_bgra(y, u, v, w, h));
+        }
+
+        if frames.is_empty() {
+            return Err(crate::error::NyaStatus::_Debug(alloc::format!(
+                "{}: no valid frames ({} skipped)",
+                tag,
+                skipped
+            )));
+        }
+        if skipped > 0 {
+            log::warn!(
+                "{}: predecoded {} frames, skipped {} bad",
+                tag,
+                frames.len(),
+                skipped
+            );
+        }
+
+        Ok(Self {
+            w,
+            h,
+            frames,
+            cursor: 0,
+        })
+    }
+
+    /// 整文件读入后解码（`video.h263`，裸流）。
+    pub fn from_h263_file(file: RegularFile, tag: &str) -> crate::error::Result<Self> {
+        let buf = Self::read_whole_file(file, tag)?;
+        Self::from_h263_bytes(&buf, tag)
+    }
+
+    /// mpeg2 裸流解码核心（`tag` 只进串口）：vendor `filmcraft-mpeg2v`
+    /// 按接入单元切分（`access_units` 找起始码）逐 AU 解码 + `flush` 收尾帧，
+    /// 只收 4:2:0（422/444 记数跳过）。pts 按 AU 序号递增。
+    /// 片源：`1080p/video.m2v`（裸基本流，无容器）。
+    pub fn from_mpeg2v_bytes(data: &[u8], tag: &str) -> crate::error::Result<Self> {
+        let mut dec = filmcraft_mpeg2v::Decoder::new();
+        let mut frames = Vec::new();
+        let mut skipped = 0u32;
+        let mut expect: Option<(u32, u32)> = None;
+        let mut w = 0usize;
+        let mut h = 0usize;
+        let push_pic = |pic: &filmcraft_mpeg2v::Picture,
+                        frames: &mut Vec<Vec<BltPixel>>,
+                        skipped: &mut u32,
+                        expect: &mut Option<(u32, u32)>,
+                        w: &mut usize,
+                        h: &mut usize| {
+            // 只收 4:2:0（转换器唯一口径；422/444 记数跳过）。
+            if pic.chroma != filmcraft_mpeg2v::ChromaFormat::Yuv420 {
+                *skipped += 1;
+                return;
+            }
+            match *expect {
+                None => {
+                    *expect = Some((pic.width, pic.height));
+                    *w = pic.width as usize;
+                    *h = pic.height as usize;
+                }
+                Some((ew, eh)) if (pic.width, pic.height) != (ew, eh) => {
+                    *skipped += 1;
+                    return;
+                }
+                _ => {}
+            }
+            // 平面长度校验（半帧不上屏）。
+            let yb = (*w).saturating_mul(*h);
+            let cb = (*w / 2).saturating_mul(*h / 2);
+            if pic.y.len() < yb || pic.cb.len() < cb || pic.cr.len() < cb {
+                *skipped += 1;
+                return;
+            }
+            frames.push(Self::yuv420_to_bgra(
+                &pic.y[..yb],
+                &pic.cb[..cb],
+                &pic.cr[..cb],
+                *w,
+                *h,
+            ));
+        };
+        for (i, r) in filmcraft_mpeg2v::access_units(data).iter().enumerate() {
+            match dec.decode(&data[r.clone()], i as i64) {
+                Ok(pics) => {
+                    for pic in &pics {
+                        push_pic(pic, &mut frames, &mut skipped, &mut expect, &mut w, &mut h);
+                    }
+                }
+                Err(_) => {
+                    skipped += 1;
+                }
+            }
+        }
+        for pic in dec.flush() {
+            push_pic(&pic, &mut frames, &mut skipped, &mut expect, &mut w, &mut h);
+        }
+
+        if frames.is_empty() {
+            return Err(crate::error::NyaStatus::_Debug(alloc::format!(
+                "{}: no valid frames ({} skipped)",
+                tag,
+                skipped
+            )));
+        }
+        if skipped > 0 {
+            log::warn!(
+                "{}: predecoded {} frames, skipped {} bad",
+                tag,
+                frames.len(),
+                skipped
+            );
+        }
+
+        Ok(Self {
+            w,
+            h,
+            frames,
+            cursor: 0,
+        })
+    }
+
+    /// 整文件读入后解码（`video.m2v`，裸基本流）。
+    pub fn from_mpeg2v_file(file: RegularFile, tag: &str) -> crate::error::Result<Self> {
+        let buf = Self::read_whole_file(file, tag)?;
+        Self::from_mpeg2v_bytes(&buf, tag)
+    }
+
+    /// theora 包序列解码核心（`tag` 只进串口）：vendor `oxideav-theora`
+    ///（ident/comment/setup 三头 + 数据包），`crop_for_display` 取显示区，
+    /// 左下原点翻转后 YUV420 → BGRA。只收 4:2:0（422/444 明确跳过）。
+    /// 包源：`demux_ogg_packets`（OggS 是 theora 磁盘原格式，见 `demux.rs`）。
+    pub fn from_theora_packets(packets: &[Vec<u8>], tag: &str) -> crate::error::Result<Self> {
+        if packets.len() < 3 {
+            return Err(crate::error::NyaStatus::_Debug(alloc::format!(
+                "{}: theora needs 3 header packets, got {}",
+                tag,
+                packets.len()
+            )));
+        }
+        let ident = oxideav_theora::decode_identification_header(&packets[0]).map_err(|e| {
+            crate::error::NyaStatus::_Debug(alloc::format!("{}: theora ident error: {:?}", tag, e))
+        })?;
+        if ident.pf != oxideav_theora::PixelFormat::Yuv420 {
+            return Err(crate::error::NyaStatus::_Debug(alloc::format!(
+                "{}: theora only supports 4:2:0 (got {:?})",
+                tag,
+                ident.pf
+            )));
+        }
+        // comment 包只校验可解析（内容不消费）。
+        let _ = oxideav_theora::parse_comment_header(&packets[1]).map_err(|e| {
+            crate::error::NyaStatus::_Debug(alloc::format!(
+                "{}: theora comment error: {:?}",
+                tag,
+                e
+            ))
+        })?;
+        let setup = oxideav_theora::decode_setup_header(&packets[2]).map_err(|e| {
+            crate::error::NyaStatus::_Debug(alloc::format!("{}: theora setup error: {:?}", tag, e))
+        })?;
+        let mut dec = oxideav_theora::FrameDecoder::new(ident, setup).map_err(|e| {
+            crate::error::NyaStatus::_Debug(alloc::format!(
+                "{}: theora decoder error: {:?}",
+                tag,
+                e
+            ))
+        })?;
+        let mut frames = Vec::new();
+        let mut skipped = 0u32;
+        let mut w = 0usize;
+        let mut h = 0usize;
+        for p in &packets[3..] {
+            let d = match dec.decode_frame(p) {
+                Ok(d) => d,
+                Err(_) => {
+                    skipped += 1;
+                    continue;
+                }
+            };
+            let c = match dec.crop_for_display(&d) {
+                Ok(c) => c,
+                Err(_) => {
+                    skipped += 1;
+                    continue;
+                }
+            };
+            w = c.dims_y.width as usize;
+            h = c.dims_y.height as usize;
+            if w == 0 || h == 0 {
+                skipped += 1;
+                continue;
+            }
+            frames.push(Self::yuv420_to_bgra_vflip(
+                &c.samples_y,
+                &c.samples_cb,
+                &c.samples_cr,
+                w,
+                h,
+            ));
+        }
+
+        if frames.is_empty() {
+            return Err(crate::error::NyaStatus::_Debug(alloc::format!(
+                "{}: no valid frames ({} skipped)",
+                tag,
+                skipped
+            )));
+        }
+        if skipped > 0 {
+            log::warn!(
+                "{}: predecoded {} frames, skipped {} bad",
+                tag,
+                frames.len(),
+                skipped
+            );
+        }
+
+        Ok(Self {
+            w,
+            h,
+            frames,
+            cursor: 0,
+        })
+    }
+
+    /// 整文件读入后解码（`video.ogv`，OggS 封装的 theora 磁盘原格式）。
+    pub fn from_theora_file(file: RegularFile, tag: &str) -> crate::error::Result<Self> {
+        let buf = Self::read_whole_file(file, tag)?;
+        let packets = super::demux::demux_ogg_packets(&buf, tag)?;
+        Self::from_theora_packets(&packets, tag)
     }
 
     /// raw 序列目录（`frameNNNN.raw`，BGRA 直存）：`want` 封顶预载数，

@@ -327,3 +327,40 @@ oxideav-theora（`simd` wide 整数核，`simd::set_simd_enabled`）的 vendor �
   `boot_expect` 同步六家断言（旧三家子串仍能命中，新行是精确全断言）。
 - 验证：固件 `build/clippy/fmt -p uefi-player` + GUI host 单测 +
   qemu-matrix 单测 + `menu-smoke`/`hevc-probe` 全绿后 commit+push。
+
+### 7.8 全格式播放 + 壁纸同步 + MP4/Ogg 拆包（2026-10-21，用户拍板八格式全通）
+
+背景：`[play] format` 七档中 h263/mpeg2v/theora 是报错臂、AVC 连档位都没有；
+`[wallpaper] format` 只有 raw/qois；用户要求播放器必须支持全部格式、壁纸同步、
+HEVC/AVC 走石雨堂 MP4 解析、其余走裸流、VP-in-MP4 也加。本轮一次做完。
+
+- 新建 `src/video/demux.rs`：MP4（石雨堂 `Mp4FileDemuxer`：avcC/hvcC/vpcC +
+  长度前缀→Annex-B，vp09 样片即裸帧直送；多轨只收首个匹配视频轨）+
+  OggS（手写：`OggS` 页头 + 段表组包 + MSB-first 非反射 CRC32，错页记数跳过；
+  反射版全页 mismatch 实锤，见本节）。
+- `decoder.rs`：`from_avc_bytes`（Annex-B→`rusty_h264_decoder`，tight 420 门）、
+  `from_mp4_file`（按 `Mp4VideoKind` 分派三路）、vp9 收集器抽共用
+  （IVF/MP4 双路）、`from_h263_bytes`（空选项基线，错包截断防空转）、
+  `from_mpeg2v_bytes`（`access_units` 切分 + `flush`，只收 420）、
+  `from_theora_packets/file`（ident/comment/setup 三头 + `crop_for_display` +
+  左下原点翻转，只收 420；Ogg CRC 见上）。
+- `MediaFormat::Avc`（固件≡GUI 同构，8 档；`load_video_clip`：mp4 优先裸流回退，
+  hevc/vp9 缺容器回裸流老路；`wallpaper::load`：`wall.*` 同名文件全通，
+  缺片源静默无壁纸）。GUI：播放/壁纸共用八按钮行，中英 locales + rules 8×8。
+- 样片（`src/diag/data/`，ffmpeg 9.0.1 制）：`video-avc.mp4`/`video-hevc.mp4`/
+  `video-vp9.mp4`（160x120×10，vp9 必须 `-profile:v 0` 420——默认 profile 1 是
+  4:4:4，固件 420 门会全跳过，host 实锤）、`video.h263`（128x96×10 QCIF）、
+  `video.m2v`/`video.ogv`（160x120×10）、`wall-avc.mp4`（1080p×10）。
+- h263 上游 PTYPE 反转修正（`parser/picture.rs`，`VENDOR` 标，ITU-T H.263 §5.1.2
+  Table 2：PictType 0=INTRA；上游反了致基线 I 帧判 P、无参考帧首帧即
+  `UncodedIFrameBlocks`）：修正后 10/10，ffmpeg YUV 逐字节比对首帧差 1.7%
+  max 1（整数 IDCT 舍入）、P 帧漂移 max 3（MC 累积，容差口径 max|Δ|≤3）；
+  箱内 37 单测全绿。
+- h264 QEMU #UD 收敛（`resolve_accel`）：no_std 下 `have_avx2/have_sse41`
+  恒最高档，qemu64（SSE2）实锤推 ON 即 VEX `#UD`（CR4.OSXSAVE=0）——h264 只在
+  Y256/Z512（AVX 门 + AVX2 硬件位已验证）开，X128/V128 驻标量；`simd.md`
+  AVC 节 + `hevc-probe` 断言（`h264=off`）同步。
+- 矩阵：`format-*-parse` 三 case 升级为真播 case + 新增 avc/hevc-mp4/vp9-mp4
+  + `wallpaper-avc`（1080p，`preloaded 10 frames` + 禁 `menu bg skipped`）；
+  runner 加 7 个 `needs_*` 供片 flag。生产路径致命错补串口双写（`menu.rs`
+  `run_shared`，handover §3.2 铁律；vp9-mp4 全 skip 排障即靠它定位到 444 样片）。

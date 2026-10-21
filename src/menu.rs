@@ -46,8 +46,12 @@ fn run_shared(screen: &mut Screen, f: fn(&mut Screen) -> Result, fatal: bool) {
     screen.reset_cursor();
     match f(screen) {
         Ok(()) => pause_return(screen),
-        // 生产路径保持原语义：致命屏显（error.rs 原样保留）。
-        Err(e) if fatal => handle_fatal(e, screen),
+        // 生产路径保持原语义：致命屏显（error.rs 原样保留）+ 串口双写
+        //（无头 QEMU 下屏显看不见，黑盒矩阵靠串口定位；见 docs/handover.md 踩坑 §3.2）。
+        Err(e) if fatal => {
+            log::warn!("fatal: {:?}", e);
+            handle_fatal(e, screen)
+        }
         Err(e) => show_recoverable(screen, e),
     }
 }

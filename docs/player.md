@@ -6,18 +6,20 @@
 |---|---|---|
 | `qois`（默认） | `1080p/video.qois`（`u32le 帧长 + QOI 帧` 串接）→ 开机全量预解码 | 已接（三条播放路零分支） |
 | `raw` | `1080p/frameNNNN.raw`（1920x1080 BGRA 直存，与壁纸同格式）→ 零解码直读 | 已接（同下游切分） |
-| `hevc` | `1080p/video.hevc`（Annex-B，VPS/SPS/PPS 在带内）→ vendor `rusty_h265` 软解 → YUV420 转 BGRA | 已接（预解码进 `Clip`；坏帧计数跳过，全坏报错；只收 8-bit） |
-| `vp9` | `1080p/video.ivf`（32 字节头 + 帧头 12 字节 + 负载）→ vendor `vp9dec` 软解 → YUV420 转 BGRA | 已接（只要显示帧，隐藏 altref 跳过；只收 8-bit 4:2:0） |
-| `h263` | （待定） | 格式可选、解码后继：轮子已 vendor（`h263-rs` + `yuv`/`deblock` 双箱，单比特 SIMD 跟随全局），片源样片/分发未接；选中即明确报错，不硬编解码 |
-| `mpeg2v` | （待定） | 格式可选、解码后继：轮子已 vendor（`filmcraft-mpeg2v`，`simd` 下整数 SSE2 核），片源样片/分发未接；选中即明确报错，不硬编解码 |
-| `theora` | （待定） | 格式可选、解码后继：轮子已 vendor（`oxideav-theora`，`simd` 下 wide 整数核，Ogg 拆帧另立项），片源样片/分发未接；选中即明确报错，不硬编解码 |
+| `hevc` | `1080p/video.mp4`（hev 轨，石雨堂拆包 → Annex-B；无容器回 `video.hevc` Annex-B）→ vendor `rusty_h265` 软解 → YUV420 转 BGRA | 已接（预解码进 `Clip`；坏帧计数跳过，全坏报错；只收 8-bit） |
+| `avc` | `1080p/video.mp4`（avc 轨，石雨堂拆 avcC → Annex-B）→ vendor `rusty_h264_decoder` 软解 → YUV420 转 BGRA | 已接（tight 8-bit 4:2:0；MP4-only，无裸流路） |
+| `vp9` | `1080p/video.mp4`（vp09 轨，样片即裸帧；无容器回 `video.ivf`）→ vendor `vp9dec` 软解 → YUV420 转 BGRA | 已接（只要显示帧，隐藏 altref 跳过；只收 8-bit 4:2:0） |
+| `h263` | `1080p/video.h263`（裸 H.263 基线流，无容器）→ vendor `h263-rs`（标准空选项）软解 → YUV420 转 BGRA | 已接（错位/坏包截断，首帧错即报错；基线 `PictType` 上游反转已修正，见 vendor `VENDOR.md`） |
+| `mpeg2v` | `1080p/video.m2v`（裸基本流，接入单元切分）→ vendor `filmcraft-mpeg2v` 软解 → YUV420 转 BGRA | 已接（只收 4:2:0；422/444 记数跳过；AU 失败计数，`flush` 收尾帧） |
+| `theora` | `1080p/video.ogv`（OggS 磁盘原格式，手写拆包 + CRC32 校验）→ vendor `oxideav-theora` 软解 → 显示区裁剪 + 翻转 + YUV420 转 BGRA | 已接（只收 4:2:0；ident/comment/setup 三头缺一即报错） |
 
-- 七格式（除后继三家）落到同一 `Clip`（`video/decoder.rs`），三条播放路零分支；
-  后继三家在 `load_video_clip` 即返回明确错误（“selectable, decoder follows later”），
-  不进解码、不 panic，不断 boot（`video_run` 的错误走 `handle_fatal` 前的正常报错路，
-  矩阵 `format-*-parse` 只验解析/boot 不按键）。
-- `h264` 外部箱（`rusty_h264-decoder` crates.io + `rusty_h264-accel` 本地 vendor）
-  本次不动：已有 `avc_probe` 诊断项，无 `format` 档位，不在此矩阵。
+- 八格式全落到同一 `Clip`（`video/decoder.rs` + `video/demux.rs`），三条播放路零分支；
+  容器优先裸流：avc/hevc/vp9 有 `video.mp4` 即拆轨（无匹配轨直接报错，不静默换源）；
+  hevc/vp9 缺容器回裸流老路（老矩阵不断）；h263/mpeg2v/theora 只读裸流。
+- MP4 拆包（石雨堂 `Mp4FileDemuxer`，avcC/hvcC/vpcC，长度前缀→Annex-B 起始码；
+  vp09 样片即裸帧直送）与 OggS 拆包（手写：`OggS` 页头 + 段表组包 + MSB-first
+  CRC32，错页记数跳过）见 `video/demux.rs` 头注释轮子结论。
+- 壁纸同矩阵（`wall.*` 同名文件，见 `docs/wallpaper.md`）。
 
 ## `video.qois` 格式
 

@@ -241,9 +241,9 @@ mod blackbox_matrix {
         assert_eq!(cfg.r#async.executor, AsyncExecutor::All);
     }
 
-    /// 片源格式七档位回写（play/wallpaper 各 7 种，49 组合，不丢字段）。
-    /// 弹窗冻结开关同步翻转（98 组合，见 `[wallpaper] popup_freeze`）。
-    /// 新 5 档（hevc/vp9/h263/mpeg2v/theora）逐档断 `file_str` 小写串照读照写。
+    /// 片源格式八档位回写（play/wallpaper 各 8 种，64 组合，不丢字段）。
+    /// 弹窗冻结开关同步翻转（128 组合，见 `[wallpaper] popup_freeze`）。
+    /// 新 6 档（hevc/vp9/h263/mpeg2v/theora/avc）逐档断 `file_str` 小写串照读照写。
     #[test]
     fn format_roundtrip_matrix() {
         let mut n = 0;
@@ -265,7 +265,7 @@ mod blackbox_matrix {
                 }
             }
         }
-        assert_eq!(n, 7 * 7 * 2);
+        assert_eq!(n, 8 * 8 * 2);
         // 老文件缺键：play 按 qois、wallpaper 按 raw/冻结照读。
         let legacy: FileConfig = toml::from_str("version = 1\n").unwrap();
         assert_eq!(legacy.play.format, MediaFormat::Qois);

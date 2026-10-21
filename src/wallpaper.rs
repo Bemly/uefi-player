@@ -1,10 +1,10 @@
 //! 动态壁纸（P4）：播放器 `Clip` 的薄调用层，不自研解码。
 //!
-//! 片源格式（`[wallpaper] format`，默认 raw；GUI 只放行 qois/raw 双按钮）：
-//! - `raw`：`wallpaper/frameNNNN.raw`，BGRA 直存，零解码直搬；
-//! - `qois`：`wallpaper/wall.qois`（与视频同格式），开机预解码；
-//! - 手写 `hevc`/`vp9`/`h263`/`mpeg2v`/`theora` 进壁纸：暂不支持，警告后无壁纸
-//!   （播放器侧 hevc/vp9 已接，壁纸侧另立项；后继三家两边都后继）。
+//! 片源格式（`[wallpaper] format`，默认 raw，与 `[play]` 同一 `MediaFormat`
+//! 矩阵）：八格式全通——`raw`（`wallpaper/frameNNNN.raw`）、`qois`
+//! （`wallpaper/wall.qois`）、`hevc`（`wall.mp4` hev 轨或 `wall.hevc`）、
+//! `avc`（`wall.mp4` avc 轨）、`vp9`（`wall.mp4` vp09 轨或 `wall.ivf`）、
+//! `h263`（`wall.h263`）、`mpeg2v`（`wall.m2v`）、`theora`（`wall.ogv`）。
 //! 布局/循环语义不变：A 菜单背景播行区，B 引导过渡播全屏。
 //! 目录枚举/解码全部复用 `video::decoder::Clip`（`uefi-rs` 无 walker 的部分，
 //! `Clip::from_raw_dir` 内自研 20 行，与播放器同一套）。
@@ -13,6 +13,7 @@ use crate::config::{self, MediaFormat};
 use crate::error::Result;
 use crate::fs::Fs;
 use crate::video::decoder::Clip;
+use crate::video::demux::Mp4VideoKind;
 use uefi::cstr16;
 
 /// 壁纸帧几何（raw 定死，和视频同分辨率，免缩放分支；qois 以文件头为准，
@@ -53,11 +54,39 @@ pub fn load() -> Result<Option<Clip>> {
             };
             Clip::from_qois_file(file, "wallpaper")
         }
-        // 壁纸侧未接视频编解码（手写格式进来不断解析，警告后无壁纸）。
-        other => {
-            log::warn!("wallpaper: format {:?} not supported, no wallpaper", other);
-            return Ok(None);
-        }
+        // 软解格式：`wall.mp4` 优先（avc/hevc/vp9 拆轨），hevc/vp9 缺容器回
+        // 裸流（`wall.hevc`/`wall.ivf`，与播放器同优先级）；h263/mpeg2v/theora
+        // 只读裸流。缺片源静默无壁纸（装饰不断流程）。
+        MediaFormat::Avc => match fs.open_file(cstr16!("wallpaper\\wall.mp4")) {
+            Ok(f) => Clip::from_mp4_file(f, Mp4VideoKind::Avc, "wallpaper"),
+            Err(_) => return Ok(None),
+        },
+        MediaFormat::Hevc => match fs.open_file(cstr16!("wallpaper\\wall.mp4")) {
+            Ok(f) => Clip::from_mp4_file(f, Mp4VideoKind::Hevc, "wallpaper"),
+            Err(_) => match fs.open_file(cstr16!("wallpaper\\wall.hevc")) {
+                Ok(f) => Clip::from_hevc_file(f, "wallpaper"),
+                Err(_) => return Ok(None),
+            },
+        },
+        MediaFormat::Vp9 => match fs.open_file(cstr16!("wallpaper\\wall.mp4")) {
+            Ok(f) => Clip::from_mp4_file(f, Mp4VideoKind::Vp9, "wallpaper"),
+            Err(_) => match fs.open_file(cstr16!("wallpaper\\wall.ivf")) {
+                Ok(f) => Clip::from_vp9_file(f, "wallpaper"),
+                Err(_) => return Ok(None),
+            },
+        },
+        MediaFormat::H263 => match fs.open_file(cstr16!("wallpaper\\wall.h263")) {
+            Ok(f) => Clip::from_h263_file(f, "wallpaper"),
+            Err(_) => return Ok(None),
+        },
+        MediaFormat::Mpeg2v => match fs.open_file(cstr16!("wallpaper\\wall.m2v")) {
+            Ok(f) => Clip::from_mpeg2v_file(f, "wallpaper"),
+            Err(_) => return Ok(None),
+        },
+        MediaFormat::Theora => match fs.open_file(cstr16!("wallpaper\\wall.ogv")) {
+            Ok(f) => Clip::from_theora_file(f, "wallpaper"),
+            Err(_) => return Ok(None),
+        },
     };
     let mut clip = match clip {
         Ok(c) => c,

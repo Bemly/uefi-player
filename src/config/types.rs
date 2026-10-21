@@ -620,10 +620,13 @@ impl Default for WallpaperConfig {
 /// 片源格式矩阵（播放器 + 壁纸共用，`Clip` 统一解码）：
 /// - `Qois`：QOI 压缩序列（省 U 盘，费解码）；
 /// - `Raw`：BGRA 裸帧序列（零解码直搬，费显存/体积）；
-/// - `Hevc`/`Vp9`：硬件无关纯 Rust 软解（vendor 箱，`Clip` 预解码；
-///   样片见 `src/diag/data/`，分发见 `video::load_video_clip`）；
-/// - `H263`/`Mpeg2v`/`Theora`：格式可选、解码后继（轮子已 vendor 接单比特
-///   SIMD，片源样片/分发未接，选中即明确报错，不断解析；见 `docs/player.md`）。
+/// - `Hevc`：MP4（hev 轨，石雨堂拆包 → Annex-B）或 Annex-B 裸流；
+/// - `Avc`：MP4（avc 轨，石雨堂拆 avcC → Annex-B），纯 Rust 软解；
+/// - `Vp9`：MP4（vp09 轨，样片即裸帧）或 IVF 容器；
+/// - `H263`：裸 H.263 基线流（`SORENSON` 变体不在此列）；
+/// - `Mpeg2v`：裸基本流（接入单元切分，只收 4:2:0）；
+/// - `Theora`：OggS 磁盘原格式（手写拆包，只收 4:2:0）。
+///
 /// 非法值整个文件回默认 + 警告（与其它枚举档位同规则，不单独兜底）。
 /// 缺键老文件：`[play]` 按 `qois`、`[wallpaper]` 按 `raw` 照读。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -636,6 +639,7 @@ pub enum MediaFormat {
     H263,
     Mpeg2v,
     Theora,
+    Avc,
 }
 
 pub(crate) const fn default_play_format() -> MediaFormat {
@@ -656,6 +660,7 @@ impl MediaFormat {
             MediaFormat::H263 => 4,
             MediaFormat::Mpeg2v => 5,
             MediaFormat::Theora => 6,
+            MediaFormat::Avc => 7,
         }
     }
 
@@ -667,6 +672,7 @@ impl MediaFormat {
             4 => MediaFormat::H263,
             5 => MediaFormat::Mpeg2v,
             6 => MediaFormat::Theora,
+            7 => MediaFormat::Avc,
             _ => MediaFormat::Qois,
         }
     }

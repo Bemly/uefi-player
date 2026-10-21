@@ -72,6 +72,34 @@ struct Case {
     ///（`[play] format = "vp9"` 用，IVF 软解进 Clip）。
     #[serde(default)]
     needs_vp9video: bool,
+    /// 播片 avc 片源：MP4 样片拷成 `1080p/video.mp4`
+    ///（`[play] format = "avc"` 用，石雨堂拆 avc 轨进 Clip）。
+    #[serde(default)]
+    needs_avcvideo: bool,
+    /// 播片 hevc-MP4 片源：MP4 样片拷成 `1080p/video.mp4`
+    ///（`[play] format = "hevc"` 的容器路，用石雨堂拆 hev 轨进 Clip）。
+    #[serde(default)]
+    needs_hevcmp4video: bool,
+    /// 播片 vp9-MP4 片源：MP4 样片拷成 `1080p/video.mp4`
+    ///（`[play] format = "vp9"` 的容器路，用石雨堂拆 vp09 轨进 Clip）。
+    #[serde(default)]
+    needs_vp9mp4video: bool,
+    /// 播片 h263 片源：裸流样片拷成 `1080p/video.h263`
+    ///（`[play] format = "h263"` 用，直解进 Clip）。
+    #[serde(default)]
+    needs_h263video: bool,
+    /// 播片 mpeg2v 片源：裸基本流样片拷成 `1080p/video.m2v`
+    ///（`[play] format = "mpeg2v"` 用，接入单元切分进 Clip）。
+    #[serde(default)]
+    needs_mpeg2vvideo: bool,
+    /// 播片 theora 片源：Ogg 样片拷成 `1080p/video.ogv`
+    ///（`[play] format = "theora"` 用，手写拆包进 Clip）。
+    #[serde(default)]
+    needs_theoravideo: bool,
+    /// 壁纸 avc 片源：1080p MP4 样片拷成 `wallpaper/wall.mp4`
+    ///（`[wallpaper] format = "avc"` 用，验壁纸侧容器拆轨 + 预载）。
+    #[serde(default)]
+    needs_avcwallpaper: bool,
     /// chainload 自举：镜像里再放一份 efi + 一条 BLS entry（单盘场景）。
     #[serde(default)]
     needs_chainload: bool,
@@ -702,6 +730,63 @@ fn run_case(
         let src = format!("{ROOT}/src/diag/data/vp9_probe.ivf");
         match std::fs::read(&src) {
             Ok(d) => files.push(("1080p/video.ivf", d)),
+            Err(_) => return (false, format!("missing {src}")),
+        }
+    }
+    if case.needs_avcvideo {
+        // 播片 avc 片源：MP4 样片（avc 轨，160x120×10 帧，只走通路不断言画质）。
+        let src = format!("{ROOT}/src/diag/data/video-avc.mp4");
+        match std::fs::read(&src) {
+            Ok(d) => files.push(("1080p/video.mp4", d)),
+            Err(_) => return (false, format!("missing {src}")),
+        }
+    }
+    if case.needs_hevcmp4video {
+        // 播片 hevc-MP4 片源：MP4 样片（hev 轨，160x120×10 帧，只走通路不断言画质）。
+        let src = format!("{ROOT}/src/diag/data/video-hevc.mp4");
+        match std::fs::read(&src) {
+            Ok(d) => files.push(("1080p/video.mp4", d)),
+            Err(_) => return (false, format!("missing {src}")),
+        }
+    }
+    if case.needs_vp9mp4video {
+        // 播片 vp9-MP4 片源：MP4 样片（vp09 轨，160x120×10 帧，只走通路不断言画质）。
+        let src = format!("{ROOT}/src/diag/data/video-vp9.mp4");
+        match std::fs::read(&src) {
+            Ok(d) => files.push(("1080p/video.mp4", d)),
+            Err(_) => return (false, format!("missing {src}")),
+        }
+    }
+    if case.needs_h263video {
+        // 播片 h263 片源：裸流样片（QCIF 128x96×10 帧，只走通路不断言画质）。
+        let src = format!("{ROOT}/src/diag/data/video.h263");
+        match std::fs::read(&src) {
+            Ok(d) => files.push(("1080p/video.h263", d)),
+            Err(_) => return (false, format!("missing {src}")),
+        }
+    }
+    if case.needs_mpeg2vvideo {
+        // 播片 mpeg2v 片源：裸基本流样片（160x120×10 帧，只走通路不断言画质）。
+        let src = format!("{ROOT}/src/diag/data/video.m2v");
+        match std::fs::read(&src) {
+            Ok(d) => files.push(("1080p/video.m2v", d)),
+            Err(_) => return (false, format!("missing {src}")),
+        }
+    }
+    if case.needs_theoravideo {
+        // 播片 theora 片源：Ogg 样片（160x120×10 帧，只走通路不断言画质）。
+        let src = format!("{ROOT}/src/diag/data/video.ogv");
+        match std::fs::read(&src) {
+            Ok(d) => files.push(("1080p/video.ogv", d)),
+            Err(_) => return (false, format!("missing {src}")),
+        }
+    }
+    if case.needs_avcwallpaper {
+        // 壁纸 avc 片源：1080p MP4 样片拷成 `wallpaper/wall.mp4`
+        //（验壁纸侧容器拆轨 + 预载截断，不断言画质）。
+        let src = format!("{ROOT}/src/diag/data/wall-avc.mp4");
+        match std::fs::read(&src) {
+            Ok(d) => files.push(("wallpaper/wall.mp4", d)),
             Err(_) => return (false, format!("missing {src}")),
         }
     }

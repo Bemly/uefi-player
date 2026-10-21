@@ -23,6 +23,7 @@ use uefi::{CStr16, Status, boot, cstr16};
 pub mod ascii_font;
 pub mod buffer;
 pub mod decoder;
+pub mod demux;
 pub mod exec;
 
 const VIDEO_W: usize = 1920;
@@ -88,7 +89,7 @@ pub fn video_run(screen: &mut Screen) -> Result {
     let target = resolve_play_target(screen, tps)?;
 
     // 手动管线（`[play] pipeline`）：非 clip 走老实现循环（修复后），只读 qois
-    // 片源（其它六格式 warn 回落 clip，含明确报错的后继三家）；clip 走现行矩阵/执行器后端。
+    // 片源（其它七格式 warn 回落 clip）；clip 走现行矩阵/执行器后端。
     let pipeline = config::play_pipeline();
     if pipeline != PlayPipeline::Clip {
         if config::play_format() != config::MediaFormat::Qois {
@@ -147,9 +148,13 @@ pub(crate) fn manual_run(screen: &mut Screen, clip: Clip, target: Option<u32>, t
 
 /// 片源加载（`[play] format` 矩阵）：qois 读整文件预解码，raw 读序列目录，
 /// hevc 读 Annex-B 软解，vp9 读 IVF 软解；h263/mpeg2v/theora 格式可选、
-/// 解码后继（选中即明确报错，不硬编解码，见 `docs/player.md`）。
-/// 七格式（除后继三家）都落到同一 `Clip`，三条播放路零分支。
+/// 八格式全落到同一 `Clip`，三条播放路零分支。
+/// 容器优先裸流：avc/hevc/vp9 有 `video.mp4` 即拆轨（无匹配轨直接报错，
+/// 不静默换源）；hevc/vp9 缺容器回裸流老路（`video.hevc`/`video.ivf`，
+/// 老矩阵不断）；h263/mpeg2v/theora 只读裸流（`video.h263`/`video.m2v`/
+/// `video.ogv`，OggS 是 theora 磁盘原格式，非 MP4 系容器）。
 fn load_video_clip(fs: &mut Fs) -> Result<Clip> {
+    use crate::video::demux::Mp4VideoKind;
     let clip = match config::play_format() {
         MediaFormat::Qois => {
             let file = fs.open_file(cstr16!("1080p\\video.qois"))?;
@@ -158,36 +163,35 @@ fn load_video_clip(fs: &mut Fs) -> Result<Clip> {
         MediaFormat::Raw => {
             Clip::from_raw_dir(fs, "1080p", usize::MAX, VIDEO_W * VIDEO_H * 4, "video")?
         }
-        MediaFormat::Hevc => {
-            let file = fs.open_file(cstr16!("1080p\\video.hevc"))?;
-            Clip::from_hevc_file(file, "video")?
+        MediaFormat::Avc => {
+            let file = fs.open_file(cstr16!("1080p\\video.mp4"))?;
+            Clip::from_mp4_file(file, Mp4VideoKind::Avc, "video")?
         }
-        MediaFormat::Vp9 => {
-            let file = fs.open_file(cstr16!("1080p\\video.ivf"))?;
-            Clip::from_vp9_file(file, "video")?
-        }
-        // 格式可选、解码后继：轮子已 vendor（单比特 SIMD 跟随全局），
-        // 片源样片/分发未接；不断解析，播放时明确报错（见 `docs/player.md`）。
+        MediaFormat::Hevc => match fs.open_file(cstr16!("1080p\\video.mp4")) {
+            Ok(file) => Clip::from_mp4_file(file, Mp4VideoKind::Hevc, "video")?,
+            Err(_) => {
+                let file = fs.open_file(cstr16!("1080p\\video.hevc"))?;
+                Clip::from_hevc_file(file, "video")?
+            }
+        },
+        MediaFormat::Vp9 => match fs.open_file(cstr16!("1080p\\video.mp4")) {
+            Ok(file) => Clip::from_mp4_file(file, Mp4VideoKind::Vp9, "video")?,
+            Err(_) => {
+                let file = fs.open_file(cstr16!("1080p\\video.ivf"))?;
+                Clip::from_vp9_file(file, "video")?
+            }
+        },
         MediaFormat::H263 => {
-            return Err(crate::error::NyaStatus::_Debug(
-                alloc::string::String::from(
-                    "video: format h263 selectable, decoder follows later (see docs/player.md)",
-                ),
-            ));
+            let file = fs.open_file(cstr16!("1080p\\video.h263"))?;
+            Clip::from_h263_file(file, "video")?
         }
         MediaFormat::Mpeg2v => {
-            return Err(crate::error::NyaStatus::_Debug(
-                alloc::string::String::from(
-                    "video: format mpeg2v selectable, decoder follows later (see docs/player.md)",
-                ),
-            ));
+            let file = fs.open_file(cstr16!("1080p\\video.m2v"))?;
+            Clip::from_mpeg2v_file(file, "video")?
         }
         MediaFormat::Theora => {
-            return Err(crate::error::NyaStatus::_Debug(
-                alloc::string::String::from(
-                    "video: format theora selectable, decoder follows later (see docs/player.md)",
-                ),
-            ));
+            let file = fs.open_file(cstr16!("1080p\\video.ogv"))?;
+            Clip::from_theora_file(file, "video")?
         }
     };
     // 矩阵靠它断言格式分发（`video-hevc`/`video-vp9` 的 `expect` 行）。

@@ -46,9 +46,12 @@ buffers   = 0           # 后缓冲帧数（0-16；0 = 直写前台，>0 = 影�
 fps = "auto"            # auto | max | 1..240
                         # auto: 首启实测最大帧率并回写，按 min(视频帧率, 实测*3/4) 跑
 format = "qois"         # 片源格式：qois（1080p/video.qois）| raw（1080p/frameNNNN.raw）
-                        # | hevc（1080p/video.hevc，Annex-B 软解）| vp9（1080p/video.ivf 软解）
-                        # | h263 | mpeg2v | theora（格式可选、解码后继，选中即明确报错，
-                        #   不硬编解码；旧文件缺键按 qois 照读；h264 外部箱本次不动）
+                        # | hevc（video.mp4 hev 轨优先，无则 video.hevc Annex-B）
+                        # | avc（video.mp4 avc 轨，石雨堂拆 avcC → Annex-B 软解）
+                        # | vp9（video.mp4 vp09 轨优先，无则 video.ivf）
+                        # | h263（video.h263 裸流）| mpeg2v（video.m2v 裸基本流，只收 4:2:0）
+                        # | theora（video.ogv，OggS 磁盘原格式，只收 4:2:0）；
+                        #   旧文件缺键按 qois 照读
 pipeline = "clip"       # 播放管线：clip（预解码现路，默认）| staged（流式三段）
                         # | zero_copy（流式零拷贝）| stream（真文件流式）| single（单帧反复）
                         # | legacy_blt / legacy_direct / legacy_u64（Clip + 老上传循环）
@@ -64,7 +67,11 @@ dist = "auto"           # manual 后端分工：auto | static | tile | dynamic�
 
 [wallpaper]
 enable = false          # 菜单背景 + 引导过渡总开关
-format = "raw"          # 片源格式：raw（wallpaper/frameNNNN.raw，默认）| qois（wallpaper/wall.qois，开机预解码）
+format = "raw"          # 片源格式（与 [play] 同一矩阵，八格式全通）：
+                          # raw（wallpaper/frameNNNN.raw，默认）| qois（wallpaper/wall.qois）
+                          # | hevc（wall.mp4 hev 轨优先，无则 wall.hevc）
+                          # | avc（wall.mp4 avc 轨）| vp9（wall.mp4 vp09 轨优先，无则 wall.ivf）
+                          # | h263（wall.h263）| mpeg2v（wall.m2v）| theora（wall.ogv）
 popup_freeze = true     # 选项弹窗时冻结壁纸（false 则行区继续播；GUI 有开关）
 fps = "15"               # 背景帧率三态（与 [play] fps 同构）：auto（最左，跟 vsync；
                           # vsync 关则不限速）| max（最右，不限速）| 1-240（中间显式封顶）

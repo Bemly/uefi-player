@@ -373,8 +373,8 @@ pub(crate) struct RenderConfig {
 
 /// 片源格式（与固件 `MediaFormat` 同构；小写序列化）。
 /// 缺键老配置：play 按 qois、wallpaper 按 raw（见两侧 `default_*_format`）。
-/// `hevc`/`vp9` 已接 `Clip` 软解（样片见固件 `src/diag/data/`）；
-/// `h263`/`mpeg2v`/`theora` 格式可选、解码后继（选中即固件明确报错，不断解析）。
+/// `hevc`/`avc`/`vp9` 走 MP4 拆轨（石雨堂）或裸流；`h263`/`mpeg2v`/`theora`
+/// 走裸流直解（样片见固件 `src/diag/data/`，分发见固件 `video::load_video_clip`）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum MediaFormat {
@@ -385,10 +385,11 @@ pub(crate) enum MediaFormat {
     H263,
     Mpeg2v,
     Theora,
+    Avc,
 }
 
 impl MediaFormat {
-    pub(crate) const ALL: [Self; 7] = [
+    pub(crate) const ALL: [Self; 8] = [
         Self::Qois,
         Self::Raw,
         Self::Hevc,
@@ -396,6 +397,7 @@ impl MediaFormat {
         Self::H263,
         Self::Mpeg2v,
         Self::Theora,
+        Self::Avc,
     ];
     pub(crate) fn file_str(self) -> &'static str {
         match self {
@@ -406,6 +408,7 @@ impl MediaFormat {
             Self::H263 => "h263",
             Self::Mpeg2v => "mpeg2v",
             Self::Theora => "theora",
+            Self::Avc => "avc",
         }
     }
 }

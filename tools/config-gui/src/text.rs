@@ -125,6 +125,7 @@ pub(crate) fn format_name(v: MediaFormat) -> String {
         MediaFormat::H263 => t!("format.h263"),
         MediaFormat::Mpeg2v => t!("format.mpeg2v"),
         MediaFormat::Theora => t!("format.theora"),
+        MediaFormat::Avc => t!("format.avc"),
     }
     .into_owned()
 }
@@ -138,6 +139,7 @@ pub(crate) fn format_desc(v: MediaFormat) -> String {
         MediaFormat::H263 => t!("format.desc_h263"),
         MediaFormat::Mpeg2v => t!("format.desc_mpeg2v"),
         MediaFormat::Theora => t!("format.desc_theora"),
+        MediaFormat::Avc => t!("format.desc_avc"),
     }
     .into_owned()
 }
