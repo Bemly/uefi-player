@@ -6,12 +6,13 @@
 //! ```toml
 //! version = 1
 //! [accel]
-//! level = "auto"  # auto | scalar | sse | sse2 | sse3 | ssse3 | sse41 | sse42
-//!                 # | popcnt | aes | pclmulqdq | avx | f16c | fma | avx2
-//!                 # | bmi1 | bmi2 | lzcnt | movbe | rdrand | rdseed | sha | gfni
-//!                 # | avx512f | avx512cd | avx512dq | avx512bw | avx512vl | avxvnni
-//!                 # | tbm | sse4a（AMD 专有，扩展叶 8000_0001H ECX bit 21/6；
-//!                 #   qemu64 无此叶，显式配了即按 X128 钳住用，不断 boot）
+//! level = "auto"  # 性能序（滑杆档位）：auto | scalar | sse | sse2 | sse3 | ssse3
+//!                 # | sse41 | sse42 | popcnt | lzcnt | movbe | aes | pclmulqdq
+//!                 # | rdrand | rdseed | sha | gfni | tbm | sse4a（AMD 专有垫底，
+//!                 #   扩展叶 8000_0001H ECX bit 21/6；qemu64 无此叶，显式配了即
+//!                 #   按 X128 钳住用，不断 boot）| avx | f16c | fma | avx2
+//!                 # | bmi1 | bmi2 | avxvnni | avx512f | avx512cd | avx512dq
+//!                 # | avx512bw | avx512vl
 //!                 # auto = 开机探最高可用；显式超硬件警告+钳住；老 "avx512" 按 avx512f 照读
 //!                 # 解码 SIMD 无独立开关：六家（hevc/vp9/h263/h264/mpeg2v/theora）单比特跟随全局
 //!                 #（level=scalar 则关，其余开），见 `resolve_accel` 末尾
@@ -36,6 +37,8 @@
 //! [play]
 //! fps = "auto"            # "auto" | "max" | "1".."240"
 //! format = "qois"         # 片源格式："qois"（1080p/video.qois）| "raw"（1080p/frameNNNN.raw）
+//!                         # | "hevc"（1080p/video.hevc，Annex-B 软解）| "vp9"（1080p/video.ivf 软解）
+//!                         # | "h263" | "mpeg2v" | "theora"（格式可选、解码后继，选中即明确报错）
 //! pipeline = "clip"       # 播放管线："clip"（预解码现路）| "staged" | "zero_copy" | "stream"
 //!                         # | "single" | "legacy_blt" | "legacy_direct" | "legacy_u64"（老实现手动切）
 //! measured_max_fps = 0    # 固件实测后回写，GUI 只读展示

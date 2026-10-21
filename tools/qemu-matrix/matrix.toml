@@ -278,6 +278,135 @@ keys = [
 expect = ["play: path=direct_loop"]
 soak_sec = 15
 
+# 播放 hevc：Annex-B 样片软解进 Clip（needs_hevcvideo 拷探针样片），走 direct 单核整轮。
+# 七格式矩阵的 hevc 分支证明：分发 + 预解码（`video: fmt=Hevc` 行）+ 同一下游切分不断播。
+[[case]]
+name = "video-hevc"
+covers = ["src/video.rs", "src/video/", "src/diag/data/hevc_probe_main.265"]
+timeout_sec = 180
+needs_hevcvideo = true
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+workers = "bsp_only"
+dist = "static"
+vsync = "off"
+[play]
+fps = "max"
+format = "hevc"
+[wallpaper]
+enable = false
+"""
+boot_expect = ["cfg: version=1", "play.fmt=Hevc", "idle: ready"]
+keys = [
+  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
+  { send = "p", wait_after = 3 },
+  { send = "0", wait_for = ["menu: ready"], wait_after = 5 },
+]
+expect = ["play: path=direct_loop", "video: fmt=Hevc"]
+soak_sec = 10
+
+# 播放 vp9：IVF 样片软解进 Clip（needs_vp9video 拷探针样片），走 direct 单核整轮。
+# 七格式矩阵的 vp9 分支证明：分发 + 预解码（`video: fmt=Vp9` 行）+ 同一下游切分不断播。
+[[case]]
+name = "video-vp9"
+covers = ["src/video.rs", "src/video/", "src/diag/data/vp9_probe.ivf"]
+timeout_sec = 180
+needs_vp9video = true
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+workers = "bsp_only"
+dist = "static"
+vsync = "off"
+[play]
+fps = "max"
+format = "vp9"
+[wallpaper]
+enable = false
+"""
+boot_expect = ["cfg: version=1", "play.fmt=Vp9", "idle: ready"]
+keys = [
+  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
+  { send = "p", wait_after = 3 },
+  { send = "0", wait_for = ["menu: ready"], wait_after = 5 },
+]
+expect = ["play: path=direct_loop", "video: fmt=Vp9"]
+soak_sec = 10
+
+# 格式解析 h263：无样片，只验解析（boot cfg 行即格式落盘证明）+ 待机，不断言解码。
+# 解码后继（见 docs/player.md），不按键不播放。
+[[case]]
+name = "format-h263-parse"
+covers = ["src/config/", "src/video/decoder.rs"]
+timeout_sec = 180
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+workers = "bsp_only"
+dist = "static"
+vsync = "off"
+[play]
+fps = "max"
+format = "h263"
+[wallpaper]
+enable = false
+"""
+boot_expect = ["cfg: version=1", "play.fmt=H263", "idle: ready"]
+
+# 格式解析 mpeg2v：无样片，只验解析 + 待机，不断言解码（解码后继，见 docs/player.md）。
+[[case]]
+name = "format-mpeg2v-parse"
+covers = ["src/config/", "src/video/decoder.rs"]
+timeout_sec = 180
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+workers = "bsp_only"
+dist = "static"
+vsync = "off"
+[play]
+fps = "max"
+format = "mpeg2v"
+[wallpaper]
+enable = false
+"""
+boot_expect = ["cfg: version=1", "play.fmt=Mpeg2v", "idle: ready"]
+
+# 格式解析 theora：无样片，只验解析 + 待机，不断言解码（解码后继，见 docs/player.md）。
+[[case]]
+name = "format-theora-parse"
+covers = ["src/config/", "src/video/decoder.rs"]
+timeout_sec = 180
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+workers = "bsp_only"
+dist = "static"
+vsync = "off"
+[play]
+fps = "max"
+format = "theora"
+[wallpaper]
+enable = false
+"""
+boot_expect = ["cfg: version=1", "play.fmt=Theora", "idle: ready"]
+
 # 调度后端 nano：单核执行器泵走渲染路径（direct 单核），workers/dist 忽略。
 [[case]]
 name = "video-nano"

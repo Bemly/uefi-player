@@ -63,3 +63,13 @@
  （会产生数千行无关 diff，毁掉合 upstream 的能力）；移植行沿用文件局部风格。
   根门禁因此用 `cargo fmt -p uefi-player --check`（`--all` 会连带 path 依赖
   一起查；见根 AGENTS.md「双构建」注释）。
+
+## 播放器 `format` 接线状态（2026-10-21）：已接 `Clip`
+
+- `[play] format = "hevc"`：片源 `1080p/video.hevc`（Annex-B，VPS/SPS/PPS 在带内），
+  `Clip::from_hevc_bytes/file` 整流解码（`push_annexb` + `flush` + 取帧，
+  与 `diag::hevc_probe` 同路）→ YUV420 转 BGRA 进同一 `Clip`，三条播放路零分支。
+- 只收 8-bit（`bit_depth() != 8` 记数跳过）；几何不一致/短写记数跳过，
+  全坏直接报错（与 qois 路同策略）。样片即探针样片
+  （`src/diag/data/hevc_probe_main.265`，320x240×10 帧）。
+  QEMU 矩阵 `video-hevc` 播此样片断言 `video: fmt=Hevc` + 播放路径。

@@ -111,8 +111,8 @@ mod blackbox_matrix {
 
     /// 全档位笛卡尔回写：9 代表档 × 3 render × 3 workers × 4 dist × 4 vsync × 4 blt × 3 async × 3 sched，
     /// 序列化再解析必须逐字节等价（顺序/缺键都由 serde 保证，不许丢字段）。
-    /// 代表集见 `AccelLevel::REPRESENTATIVE`（旧 9 档口径，`avx512`→`avx512f` 改名后仍占一位）；
-    /// 全量 31 档另见 `accel_levels_roundtrip` 表，不进主笛卡尔，避 3 倍膨胀。
+    /// 代表集见 `AccelLevel::REPRESENTATIVE`（性能序时代仍占 9 席，不膨胀；
+    /// 全量 31 档另见 `accel_levels_roundtrip` 表，不进主笛卡尔，避 3 倍膨胀）。
     #[test]
     fn schema_roundtrip_matrix() {
         let mut n = 0;
@@ -241,33 +241,36 @@ mod blackbox_matrix {
         assert_eq!(cfg.r#async.executor, AsyncExecutor::All);
     }
 
-    /// 片源格式双档位回写（play/wallpaper 各 qois/raw 四组合，不丢字段）。
-    /// 弹窗冻结开关同步翻转（8 组合，见 `[wallpaper] popup_freeze`）。
+    /// 片源格式七档位回写（play/wallpaper 各 7 种，49 组合，不丢字段）。
+    /// 弹窗冻结开关同步翻转（98 组合，见 `[wallpaper] popup_freeze`）。
+    /// 新 5 档（hevc/vp9/h263/mpeg2v/theora）逐档断 `file_str` 小写串照读照写。
     #[test]
     fn format_roundtrip_matrix() {
-        for (pf, wf) in [
-            (MediaFormat::Qois, MediaFormat::Qois),
-            (MediaFormat::Qois, MediaFormat::Raw),
-            (MediaFormat::Raw, MediaFormat::Qois),
-            (MediaFormat::Raw, MediaFormat::Raw),
-        ] {
-            for froze in [false, true] {
-                let mut cfg = FileConfig::default();
-                cfg.play.format = pf;
-                cfg.wallpaper.format = wf;
-                cfg.wallpaper.popup_freeze = froze;
-                let back: FileConfig = toml::from_str(&toml::to_string(&cfg).unwrap()).unwrap();
-                assert_eq!(back.play.format, pf);
-                assert_eq!(back.wallpaper.format, wf);
-                assert_eq!(back.wallpaper.popup_freeze, froze);
-                assert_eq!(back, cfg);
-                // 老文件缺键：play 按 qois、wallpaper 按 raw/冻结照读。
-                let legacy: FileConfig = toml::from_str("version = 1\n").unwrap();
-                assert_eq!(legacy.play.format, MediaFormat::Qois);
-                assert_eq!(legacy.wallpaper.format, MediaFormat::Raw);
-                assert!(legacy.wallpaper.popup_freeze);
+        let mut n = 0;
+        for pf in MediaFormat::ALL {
+            for wf in MediaFormat::ALL {
+                for froze in [false, true] {
+                    let mut cfg = FileConfig::default();
+                    cfg.play.format = pf;
+                    cfg.wallpaper.format = wf;
+                    cfg.wallpaper.popup_freeze = froze;
+                    let text = toml::to_string(&cfg).unwrap();
+                    assert!(text.contains(pf.file_str()), "{pf:?} missing in {text}");
+                    let back: FileConfig = toml::from_str(&text).unwrap();
+                    assert_eq!(back.play.format, pf);
+                    assert_eq!(back.wallpaper.format, wf);
+                    assert_eq!(back.wallpaper.popup_freeze, froze);
+                    assert_eq!(back, cfg);
+                    n += 1;
+                }
             }
         }
+        assert_eq!(n, 7 * 7 * 2);
+        // 老文件缺键：play 按 qois、wallpaper 按 raw/冻结照读。
+        let legacy: FileConfig = toml::from_str("version = 1\n").unwrap();
+        assert_eq!(legacy.play.format, MediaFormat::Qois);
+        assert_eq!(legacy.wallpaper.format, MediaFormat::Raw);
+        assert!(legacy.wallpaper.popup_freeze);
     }
 
     /// 预载帧数回写（0 = 不封顶，1/8/32 照写；老文件缺键按默认 8 照读）。

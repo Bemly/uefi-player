@@ -88,7 +88,7 @@ pub fn video_run(screen: &mut Screen) -> Result {
     let target = resolve_play_target(screen, tps)?;
 
     // 手动管线（`[play] pipeline`）：非 clip 走老实现循环（修复后），只读 qois
-    // 片源（`format = "raw"` 时 warn 回落 clip）；clip 走现行矩阵/执行器后端。
+    // 片源（其它六格式 warn 回落 clip，含明确报错的后继三家）；clip 走现行矩阵/执行器后端。
     let pipeline = config::play_pipeline();
     if pipeline != PlayPipeline::Clip {
         if config::play_format() != config::MediaFormat::Qois {
@@ -145,18 +145,60 @@ pub(crate) fn manual_run(screen: &mut Screen, clip: Clip, target: Option<u32>, t
     }
 }
 
-/// 片源加载（`[play] format` 矩阵）：qois 读整文件预解码，raw 读序列目录。
-/// 两种格式都落到同一 `Clip`，三条播放路零分支。
+/// 片源加载（`[play] format` 矩阵）：qois 读整文件预解码，raw 读序列目录，
+/// hevc 读 Annex-B 软解，vp9 读 IVF 软解；h263/mpeg2v/theora 格式可选、
+/// 解码后继（选中即明确报错，不硬编解码，见 `docs/player.md`）。
+/// 七格式（除后继三家）都落到同一 `Clip`，三条播放路零分支。
 fn load_video_clip(fs: &mut Fs) -> Result<Clip> {
-    match config::play_format() {
+    let clip = match config::play_format() {
         MediaFormat::Qois => {
             let file = fs.open_file(cstr16!("1080p\\video.qois"))?;
-            Clip::from_qois_file(file, "video")
+            Clip::from_qois_file(file, "video")?
         }
         MediaFormat::Raw => {
-            Clip::from_raw_dir(fs, "1080p", usize::MAX, VIDEO_W * VIDEO_H * 4, "video")
+            Clip::from_raw_dir(fs, "1080p", usize::MAX, VIDEO_W * VIDEO_H * 4, "video")?
         }
-    }
+        MediaFormat::Hevc => {
+            let file = fs.open_file(cstr16!("1080p\\video.hevc"))?;
+            Clip::from_hevc_file(file, "video")?
+        }
+        MediaFormat::Vp9 => {
+            let file = fs.open_file(cstr16!("1080p\\video.ivf"))?;
+            Clip::from_vp9_file(file, "video")?
+        }
+        // 格式可选、解码后继：轮子已 vendor（单比特 SIMD 跟随全局），
+        // 片源样片/分发未接；不断解析，播放时明确报错（见 `docs/player.md`）。
+        MediaFormat::H263 => {
+            return Err(crate::error::NyaStatus::_Debug(
+                alloc::string::String::from(
+                    "video: format h263 selectable, decoder follows later (see docs/player.md)",
+                ),
+            ));
+        }
+        MediaFormat::Mpeg2v => {
+            return Err(crate::error::NyaStatus::_Debug(
+                alloc::string::String::from(
+                    "video: format mpeg2v selectable, decoder follows later (see docs/player.md)",
+                ),
+            ));
+        }
+        MediaFormat::Theora => {
+            return Err(crate::error::NyaStatus::_Debug(
+                alloc::string::String::from(
+                    "video: format theora selectable, decoder follows later (see docs/player.md)",
+                ),
+            ));
+        }
+    };
+    // 矩阵靠它断言格式分发（`video-hevc`/`video-vp9` 的 `expect` 行）。
+    log::info!(
+        "video: fmt={:?} frames={} {}x{}",
+        config::play_format(),
+        clip.len(),
+        clip.w,
+        clip.h
+    );
+    Ok(clip)
 }
 
 /// 播放帧率决策：max 不限速；capped 直接用；auto 无实测就现测并回写，

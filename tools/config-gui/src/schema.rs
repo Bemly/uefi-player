@@ -17,36 +17,40 @@ pub(crate) enum AccelLevel {
     Sse41,
     Sse42,
     Popcnt,
+    Lzcnt,
+    Movbe,
     Aes,
     Pclmulqdq,
+    Rdrand,
+    Rdseed,
+    Sha,
+    Gfni,
+    // AMD 扩展叶档（8000_0001H ECX：bit 21 tbm / bit 6 sse4a）：性能序垫底
+    // （X128 钳住用，`target_feature` 小写无点形 `sse4a` 先例，`tbm` 同式）。
+    Tbm,
+    Sse4a,
     Avx,
     F16c,
     Fma,
     Avx2,
     Bmi1,
     Bmi2,
-    Lzcnt,
-    Movbe,
-    Rdrand,
-    Rdseed,
-    Sha,
-    Gfni,
+    Avxvnni,
     #[serde(alias = "avx512")]
     Avx512f,
     Avx512cd,
     Avx512dq,
     Avx512bw,
     Avx512vl,
-    Avxvnni,
-    // AMD 扩展叶档（8000_0001H ECX：bit 21 tbm / bit 6 sse4a）：放末尾，
-    // 叶序上扩展叶本就排最后；`target_feature` 小写无点形（`sse4a` 先例，`tbm` 同式）。
-    Tbm,
-    Sse4a,
 }
 
 impl AccelLevel {
-    /// 全集（CPUID 叶序，`target_feature` 小写无点形；`tbm`/`sse4a` 为 AMD 专有
-    /// 扩展叶档，QEMU `qemu64` 无此叶，显式配了即按 X128 钳住用，见 `docs/simd.md`）。
+    /// 全集（性能序/加速效率序，`auto` 恒首；`ALL` 下标即滑杆档位 0-30）：
+    /// `scalar`(U64) → X128 组（`sse`→`sse42` 整组，再密码/计数类
+    /// `popcnt`/`lzcnt`/`movbe`/`aes`/`pclmulqdq`/`rdrand`/`rdseed`/`sha`/`gfni`，
+    /// 最后 AMD 专有 `tbm`/`sse4a` 垫底，QEMU `qemu64` 无此叶，显式配了即按
+    /// X128 钳住用）→ V128（`avx`/`f16c`）→ Y256（`fma`/`avx2`/`bmi1`/`bmi2`/
+    /// `avxvnni`）→ Z512（`avx512f`/`cd`/`dq`/`bw`/`vl`），见 `docs/simd.md`。
     pub(crate) const ALL: [Self; 31] = [
         Self::Auto,
         Self::Scalar,
@@ -57,31 +61,32 @@ impl AccelLevel {
         Self::Sse41,
         Self::Sse42,
         Self::Popcnt,
+        Self::Lzcnt,
+        Self::Movbe,
         Self::Aes,
         Self::Pclmulqdq,
+        Self::Rdrand,
+        Self::Rdseed,
+        Self::Sha,
+        Self::Gfni,
+        Self::Tbm,
+        Self::Sse4a,
         Self::Avx,
         Self::F16c,
         Self::Fma,
         Self::Avx2,
         Self::Bmi1,
         Self::Bmi2,
-        Self::Lzcnt,
-        Self::Movbe,
-        Self::Rdrand,
-        Self::Rdseed,
-        Self::Sha,
-        Self::Gfni,
+        Self::Avxvnni,
         Self::Avx512f,
         Self::Avx512cd,
         Self::Avx512dq,
         Self::Avx512bw,
         Self::Avx512vl,
-        Self::Avxvnni,
-        Self::Tbm,
-        Self::Sse4a,
     ];
-    /// 主笛卡尔代表集（9 档，旧全集口径：`avx512`→`avx512f` 改名后仍占一位；
-    /// 全量 31 档进 `accel_levels_roundtrip` 表，不进主笛卡尔，避 3 倍膨胀）。
+    /// 主笛卡尔代表集（9 档，不膨胀：性能序时代仍占 9 席，旧口径
+    /// `avx512`→`avx512f` 改名后仍占一位；全量 31 档进
+    /// `accel_levels_roundtrip` 表，不进主笛卡尔，避 3 倍膨胀）。
     pub(crate) const REPRESENTATIVE: [Self; 9] = [
         Self::Auto,
         Self::Scalar,
@@ -368,18 +373,39 @@ pub(crate) struct RenderConfig {
 
 /// 片源格式（与固件 `MediaFormat` 同构；小写序列化）。
 /// 缺键老配置：play 按 qois、wallpaper 按 raw（见两侧 `default_*_format`）。
+/// `hevc`/`vp9` 已接 `Clip` 软解（样片见固件 `src/diag/data/`）；
+/// `h263`/`mpeg2v`/`theora` 格式可选、解码后继（选中即固件明确报错，不断解析）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum MediaFormat {
     Qois,
     Raw,
+    Hevc,
+    Vp9,
+    H263,
+    Mpeg2v,
+    Theora,
 }
 
 impl MediaFormat {
+    pub(crate) const ALL: [Self; 7] = [
+        Self::Qois,
+        Self::Raw,
+        Self::Hevc,
+        Self::Vp9,
+        Self::H263,
+        Self::Mpeg2v,
+        Self::Theora,
+    ];
     pub(crate) fn file_str(self) -> &'static str {
         match self {
             Self::Qois => "qois",
             Self::Raw => "raw",
+            Self::Hevc => "hevc",
+            Self::Vp9 => "vp9",
+            Self::H263 => "h263",
+            Self::Mpeg2v => "mpeg2v",
+            Self::Theora => "theora",
         }
     }
 }
@@ -435,7 +461,9 @@ impl PlayPipeline {
 
 /// `[play]`：`fps` 是字符串（三态没法用纯数字表达），`measured_max_fps`
 /// 只由固件实测回写（0 = 未测），这里只读展示 + 重测清零。
-/// `format` 切片源：qois 读 `1080p/video.qois`，raw 读 `1080p/frameNNNN.raw`。
+/// `format` 切片源：qois 读 `1080p/video.qois`，raw 读 `1080p/frameNNNN.raw`，
+/// hevc 读 `1080p/video.hevc`（Annex-B 软解），vp9 读 `1080p/video.ivf`（软解），
+/// h263/mpeg2v/theora 格式可选、解码后继（固件明确报错，不断解析）。
 /// `pipeline` 切播放实现：clip 是预解码现路（默认），其余 7 档是老实现循环。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]

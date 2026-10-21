@@ -82,3 +82,16 @@
   （会产生无关 diff，毁掉合 upstream 的能力）；移植行沿用文件局部风格。
   根门禁因此用 `cargo fmt -p uefi-player --check`（`--all` 会连带 path 依赖
   一起查；见根 AGENTS.md「双构建」注释）。
+
+## 播放器 `format` 接线状态（2026-10-21）：已接 `Clip`
+
+- `[play] format = "vp9"`：片源 `1080p/video.ivf`（32 字节头 + 12 字节帧头 + 负载），
+  `Clip::from_vp9_bytes/file` 经本箱 `ivf::IvfReader` 拆帧 +
+  `Decoder::decode_frame` 逐帧解码 → YUV420 转 BGRA 进同一 `Clip`，
+  三条播放路零分支。
+- 只要显示帧（隐藏 altref 无画面，直接跳过，不记坏）；只收 8-bit 4:2:0
+  （`PlaneData::U8` + `subsampling == (1,1)`，其余记数跳过；10/12-bit
+  固件用不上，先不验，见上节回归口径）。样片
+  （`src/diag/data/vp9_probe.ivf`，testsrc 160x120×10 帧，host 已验
+  `shown=10 luma_sum=23989636`）。QEMU 矩阵 `video-vp9` 播此样片断言
+  `video: fmt=Vp9` + 播放路径。

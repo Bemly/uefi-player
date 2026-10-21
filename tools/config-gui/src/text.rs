@@ -115,3 +115,29 @@ pub(crate) fn vsync_desc(v: VsyncMode) -> String {
     }
     .into_owned()
 }
+
+pub(crate) fn format_name(v: MediaFormat) -> String {
+    match v {
+        MediaFormat::Qois => t!("format.qois"),
+        MediaFormat::Raw => t!("format.raw"),
+        MediaFormat::Hevc => t!("format.hevc"),
+        MediaFormat::Vp9 => t!("format.vp9"),
+        MediaFormat::H263 => t!("format.h263"),
+        MediaFormat::Mpeg2v => t!("format.mpeg2v"),
+        MediaFormat::Theora => t!("format.theora"),
+    }
+    .into_owned()
+}
+
+pub(crate) fn format_desc(v: MediaFormat) -> String {
+    match v {
+        MediaFormat::Qois => t!("format.desc_qois"),
+        MediaFormat::Raw => t!("format.desc_raw"),
+        MediaFormat::Hevc => t!("format.desc_hevc"),
+        MediaFormat::Vp9 => t!("format.desc_vp9"),
+        MediaFormat::H263 => t!("format.desc_h263"),
+        MediaFormat::Mpeg2v => t!("format.desc_mpeg2v"),
+        MediaFormat::Theora => t!("format.desc_theora"),
+    }
+    .into_owned()
+}

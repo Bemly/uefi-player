@@ -210,3 +210,13 @@ SIMD 核（`idct.rs::row_pass_simd` + `mc.rs::avg2/avg4/store_avg_*` +
   （毁掉合 upstream 的能力）；移植行沿用文件局部风格。
   根门禁因此用 `cargo fmt -p uefi-player --check`（`--all` 会连带 path 依赖
   一起查；见根 AGENTS.md「双构建」注释）。
+
+## 播放器 `format` 接线状态（2026-10-21）：格式可选、解码后继
+
+- `[play] format = "mpeg2v"` 已进固件/GUI 同构 schema（小写串 `mpeg2v`，旧文件缺键照读），
+  GUI 播放页可选；但 `Clip` 分发未接——选中即明确报错
+  （“selectable, decoder follows later”），不硬编解码，不断解析/boot。
+- 后继项（QEMU 矩阵 `format-mpeg2v-parse` 只验解析，不断言解码）：
+  样片（DVD/广播 TS 切段或裸 `.m2v` 小样片）→ `Clip::from_mpeg2v_*`
+  （定点 IDCT 行核 + `pavgb` 预测平均输出转 BGRA；精度口径容差制
+  max|Δ|≤4、PSNR≥58dB，非 bit-exact，校验和只取 Y 平面）→ 矩阵 case。

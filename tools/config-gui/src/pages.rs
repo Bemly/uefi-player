@@ -300,7 +300,8 @@ impl App {
                 ui.small(t!("play.hint"));
                 ui.add_space(4.0);
                 ui.label(t!("play.format"));
-                self.cfg.play.format = self.format_row(ui, self.cfg.play.format);
+                self.cfg.play.format = self.format_row_all(ui, self.cfg.play.format);
+                ui.small(format_desc(self.cfg.play.format));
                 ui.small(t!("play.format_hint"));
                 ui.add_space(4.0);
                 ui.label(t!("play.pipeline"));

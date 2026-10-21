@@ -3,21 +3,22 @@
 > P2 落点：`config::copy_width()`。bench 只出数（`HWBENCH`），矩阵做选择；
 > `auto` = CPUID/XCR0 探最高可用（`resolve_accel`，开机一次）。
 
-## 档位 → 位宽
+## 档位 → 位宽（性能序：滑杆档位即下表行序）
 
-| `accel.level` | 搬运位宽 | 实现 |
+| 档位 | 搬运位宽 | 实现 |
 |---|---|---|
+| `auto`（恒首，0） | 探最高可用 | `resolve_accel` 开机一次 |
 | `scalar` | u64 步进 | `copy_block_u64`（纯标量，最兼容） |
 | `sse`/`sse2`/`sse3`/`ssse3`/`sse41`/`sse42` | 128 位 | `copy_block_x128`（`movdqu`，同宽） |
-| `popcnt`/`aes`/`pclmulqdq`/`lzcnt`/`movbe`/`rdrand`/`rdseed`/`sha`/`gfni` | 128 位 | 同上（标量/密码类不加宽搬运，按基线下限同宽处理） |
-| `tbm`/`sse4a` | 128 位 | 同上（AMD 专有：扩展叶 8000_0001H ECX bit 21/6；qemu64 无此叶，显式配了即按 X128 钳住用，不断 boot） |
+| `popcnt`/`lzcnt`/`movbe`/`aes`/`pclmulqdq`/`rdrand`/`rdseed`/`sha`/`gfni` | 128 位 | 同上（标量/密码类不加宽搬运，按基线下限同宽处理） |
+| `tbm`/`sse4a`（垫底，AMD 专有） | 128 位 | 同上（扩展叶 8000_0001H ECX bit 21/6；qemu64 无此叶，显式配了即按 X128 钳住用，不断 boot） |
 | `avx`/`f16c` | 128 位 VEX | `copy_block_v128`（`vmovdqu` + `vzeroupper`） |
 | `fma`/`avx2`/`bmi1`/`bmi2`/`avxvnni` | 256 位 | `copy_block_y256`（`vmovdqu` + `vzeroupper`） |
 | `avx512f`/`avx512cd`/`avx512dq`/`avx512bw`/`avx512vl` | 512 位 | `copy_block_z512`（`vmovdqu8` + `vzeroupper`） |
 
-- 全集 31 档（含 `auto`，按 CPUID 叶序排，`target_feature` 小写无点形命名，
+- 全集 31 档（含 `auto`，按加速效率/性能排，`target_feature` 小写无点形命名，
   老 `"avx512"` 按 `avx512f` 照读）；`tbm`/`sse4a` 为 AMD 专有指令
-  （扩展叶 8000_0001H ECX bit 21/6），已收进滑杆（末两位）：
+  （扩展叶 8000_0001H ECX bit 21/6），已收进滑杆（性能序垫底两位，注明 AMD）：
   恒按 X128 钳住用（QEMU `qemu64` 无此叶，实测即钳住，不断 boot，矩阵不断）。
 - 标量/密码类（`popcnt`/`aes`/`pclmulqdq`/`sha`/`gfni`/`lzcnt`/`movbe`/
   `rdrand`/`rdseed`）与 BMI（`bmi1`/`bmi2`）本身不加宽向量搬运：

@@ -64,6 +64,14 @@ struct Case {
     ///（`[wallpaper] format = "qois"` 用，验开机预解码 + 循环）。
     #[serde(default)]
     needs_wallpaper_qois: bool,
+    /// 播片 hevc 片源：探针样片拷成 `1080p/video.hevc`
+    ///（`[play] format = "hevc"` 用，Annex-B 软解进 Clip）。
+    #[serde(default)]
+    needs_hevcvideo: bool,
+    /// 播片 vp9 片源：探针样片拷成 `1080p/video.ivf`
+    ///（`[play] format = "vp9"` 用，IVF 软解进 Clip）。
+    #[serde(default)]
+    needs_vp9video: bool,
     /// chainload 自举：镜像里再放一份 efi + 一条 BLS entry（单盘场景）。
     #[serde(default)]
     needs_chainload: bool,
@@ -678,6 +686,22 @@ fn run_case(
         let src = format!("{ROOT}/usb_reports/1080p/video.qois");
         match std::fs::read(&src) {
             Ok(d) => files.push(("wallpaper/wall.qois", d)),
+            Err(_) => return (false, format!("missing {src}")),
+        }
+    }
+    if case.needs_hevcvideo {
+        // 播片 hevc 片源：探针样片（Annex-B，320x240×10 帧，只走通路不断言画质）。
+        let src = format!("{ROOT}/src/diag/data/hevc_probe_main.265");
+        match std::fs::read(&src) {
+            Ok(d) => files.push(("1080p/video.hevc", d)),
+            Err(_) => return (false, format!("missing {src}")),
+        }
+    }
+    if case.needs_vp9video {
+        // 播片 vp9 片源：探针样片（IVF，160x120×10 帧，只走通路不断言画质）。
+        let src = format!("{ROOT}/src/diag/data/vp9_probe.ivf");
+        match std::fs::read(&src) {
+            Ok(d) => files.push(("1080p/video.ivf", d)),
             Err(_) => return (false, format!("missing {src}")),
         }
     }

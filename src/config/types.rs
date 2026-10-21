@@ -7,8 +7,13 @@ use alloc::string::{String, ToString};
 use serde::{Deserialize, Serialize};
 
 /// 指令集加速档位。`Auto` = 运行时探 CPUID/XCR0 取最高可用。
-/// 全集按 CPUID 叶序排（`ALL` 下标即滑杆档位）：x86 UEFI 可探的 30 档 + `auto`
-/// = 31 档；`tbm`/`sse4a` 为 AMD 专有（扩展叶 8000_0001H ECX bit 21/6，
+/// 全集按加速效率/性能排（`as_u8` 下标即滑杆档位）：`auto` 恒首（0）；
+/// 随后 `scalar`（U64），X128 组（`sse`→`sse42` 整组，再密码/计数类
+/// `popcnt`/`lzcnt`/`movbe`/`aes`/`pclmulqdq`/`rdrand`/`rdseed`/`sha`/`gfni`，
+/// 最后 AMD 专有 `tbm`/`sse4a` 垫底），V128（`avx`/`f16c`），Y256
+/// （`fma`/`avx2`/`bmi1`/`bmi2`/`avxvnni`），Z512
+/// （`avx512f`/`cd`/`dq`/`bw`/`vl`）；共 31 档。
+/// `tbm`/`sse4a` 为 AMD 专有（扩展叶 8000_0001H ECX bit 21/6，
 /// QEMU `qemu64` 无此叶，显式配了即按 X128 钳住用，见 `docs/simd.md`）。
 /// 老文件 `"avx512"` 按 `avx512f` 照读（`alias`，不断旧配置）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -24,31 +29,32 @@ pub enum AccelLevel {
     Sse41,
     Sse42,
     Popcnt,
+    Lzcnt,
+    Movbe,
     Aes,
     Pclmulqdq,
+    Rdrand,
+    Rdseed,
+    Sha,
+    Gfni,
+    // AMD 扩展叶档（8000_0001H ECX：bit 21 tbm / bit 6 sse4a，
+    // `target_feature` 小写无点形已有 `sse4a` 先例，`tbm` 同式）：
+    // 性能序垫底（X128 钳住用，见 `docs/simd.md`）。
+    Tbm,
+    Sse4a,
     Avx,
     F16c,
     Fma,
     Avx2,
     Bmi1,
     Bmi2,
-    Lzcnt,
-    Movbe,
-    Rdrand,
-    Rdseed,
-    Sha,
-    Gfni,
+    Avxvnni,
     #[serde(alias = "avx512")]
     Avx512f,
     Avx512cd,
     Avx512dq,
     Avx512bw,
     Avx512vl,
-    Avxvnni,
-    // AMD 扩展叶档（8000_0001H ECX：bit 21 tbm / bit 6 sse4a，`target_feature`
-    // 小写无点形已有 `sse4a` 先例，`tbm` 同式）：放末尾，叶序上扩展叶本就排最后。
-    Tbm,
-    Sse4a,
 }
 
 impl AccelLevel {
@@ -63,28 +69,28 @@ impl AccelLevel {
             Self::Sse41 => 6,
             Self::Sse42 => 7,
             Self::Popcnt => 8,
-            Self::Aes => 9,
-            Self::Pclmulqdq => 10,
-            Self::Avx => 11,
-            Self::F16c => 12,
-            Self::Fma => 13,
-            Self::Avx2 => 14,
-            Self::Bmi1 => 15,
-            Self::Bmi2 => 16,
-            Self::Lzcnt => 17,
-            Self::Movbe => 18,
-            Self::Rdrand => 19,
-            Self::Rdseed => 20,
-            Self::Sha => 21,
-            Self::Gfni => 22,
-            Self::Avx512f => 23,
-            Self::Avx512cd => 24,
-            Self::Avx512dq => 25,
-            Self::Avx512bw => 26,
-            Self::Avx512vl => 27,
-            Self::Avxvnni => 28,
-            Self::Tbm => 29,
-            Self::Sse4a => 30,
+            Self::Lzcnt => 9,
+            Self::Movbe => 10,
+            Self::Aes => 11,
+            Self::Pclmulqdq => 12,
+            Self::Rdrand => 13,
+            Self::Rdseed => 14,
+            Self::Sha => 15,
+            Self::Gfni => 16,
+            Self::Tbm => 17,
+            Self::Sse4a => 18,
+            Self::Avx => 19,
+            Self::F16c => 20,
+            Self::Fma => 21,
+            Self::Avx2 => 22,
+            Self::Bmi1 => 23,
+            Self::Bmi2 => 24,
+            Self::Avxvnni => 25,
+            Self::Avx512f => 26,
+            Self::Avx512cd => 27,
+            Self::Avx512dq => 28,
+            Self::Avx512bw => 29,
+            Self::Avx512vl => 30,
         }
     }
     pub(crate) fn from_u8(v: u8) -> Self {
@@ -97,28 +103,28 @@ impl AccelLevel {
             6 => Self::Sse41,
             7 => Self::Sse42,
             8 => Self::Popcnt,
-            9 => Self::Aes,
-            10 => Self::Pclmulqdq,
-            11 => Self::Avx,
-            12 => Self::F16c,
-            13 => Self::Fma,
-            14 => Self::Avx2,
-            15 => Self::Bmi1,
-            16 => Self::Bmi2,
-            17 => Self::Lzcnt,
-            18 => Self::Movbe,
-            19 => Self::Rdrand,
-            20 => Self::Rdseed,
-            21 => Self::Sha,
-            22 => Self::Gfni,
-            23 => Self::Avx512f,
-            24 => Self::Avx512cd,
-            25 => Self::Avx512dq,
-            26 => Self::Avx512bw,
-            27 => Self::Avx512vl,
-            28 => Self::Avxvnni,
-            29 => Self::Tbm,
-            30 => Self::Sse4a,
+            9 => Self::Lzcnt,
+            10 => Self::Movbe,
+            11 => Self::Aes,
+            12 => Self::Pclmulqdq,
+            13 => Self::Rdrand,
+            14 => Self::Rdseed,
+            15 => Self::Sha,
+            16 => Self::Gfni,
+            17 => Self::Tbm,
+            18 => Self::Sse4a,
+            19 => Self::Avx,
+            20 => Self::F16c,
+            21 => Self::Fma,
+            22 => Self::Avx2,
+            23 => Self::Bmi1,
+            24 => Self::Bmi2,
+            25 => Self::Avxvnni,
+            26 => Self::Avx512f,
+            27 => Self::Avx512cd,
+            28 => Self::Avx512dq,
+            29 => Self::Avx512bw,
+            30 => Self::Avx512vl,
             _ => Self::Auto,
         }
     }
@@ -613,13 +619,23 @@ impl Default for WallpaperConfig {
 
 /// 片源格式矩阵（播放器 + 壁纸共用，`Clip` 统一解码）：
 /// - `Qois`：QOI 压缩序列（省 U 盘，费解码）；
-/// - `Raw`：BGRA 裸帧序列（零解码直搬，费显存/体积）。
+/// - `Raw`：BGRA 裸帧序列（零解码直搬，费显存/体积）；
+/// - `Hevc`/`Vp9`：硬件无关纯 Rust 软解（vendor 箱，`Clip` 预解码；
+///   样片见 `src/diag/data/`，分发见 `video::load_video_clip`）；
+/// - `H263`/`Mpeg2v`/`Theora`：格式可选、解码后继（轮子已 vendor 接单比特
+///   SIMD，片源样片/分发未接，选中即明确报错，不断解析；见 `docs/player.md`）。
 /// 非法值整个文件回默认 + 警告（与其它枚举档位同规则，不单独兜底）。
+/// 缺键老文件：`[play]` 按 `qois`、`[wallpaper]` 按 `raw` 照读。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum MediaFormat {
     Qois,
     Raw,
+    Hevc,
+    Vp9,
+    H263,
+    Mpeg2v,
+    Theora,
 }
 
 pub(crate) const fn default_play_format() -> MediaFormat {
@@ -635,12 +651,22 @@ impl MediaFormat {
         match self {
             MediaFormat::Qois => 0,
             MediaFormat::Raw => 1,
+            MediaFormat::Hevc => 2,
+            MediaFormat::Vp9 => 3,
+            MediaFormat::H263 => 4,
+            MediaFormat::Mpeg2v => 5,
+            MediaFormat::Theora => 6,
         }
     }
 
     pub(crate) fn from_u8(v: u8) -> MediaFormat {
         match v {
             1 => MediaFormat::Raw,
+            2 => MediaFormat::Hevc,
+            3 => MediaFormat::Vp9,
+            4 => MediaFormat::H263,
+            5 => MediaFormat::Mpeg2v,
+            6 => MediaFormat::Theora,
             _ => MediaFormat::Qois,
         }
     }
@@ -725,8 +751,10 @@ pub fn parse_fps(s: &str) -> FpsPolicy {
 
 /// `[play]`：`fps` 是字符串（三态没法用纯数字表达），`measured_max_fps`
 /// 只由固件实测回写（0 = 未测），GUI 只读展示。`format` 切片源：
-/// `qois`（默认，`1080p/video.qois`）/ `raw`（`1080p/frameNNNN.raw` 序列）。
-/// `pipeline` 切播放实现（默认 `clip`，老文件缺键照读；非 clip 只读 qois）。
+/// `qois`（默认，`1080p/video.qois`）/ `raw`（`1080p/frameNNNN.raw` 序列）
+/// / `hevc`（`1080p/video.hevc`，Annex-B 软解）/ `vp9`（`1080p/video.ivf` 软解）
+/// / `h263`/`mpeg2v`/`theora`（格式可选、解码后继，选中即明确报错）。
+/// `pipeline` 切播放实现（默认 `clip`，老文件缺键照读；非 `clip` 只读 qois）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PlayConfig {

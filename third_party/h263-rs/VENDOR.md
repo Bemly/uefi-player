@@ -168,3 +168,13 @@
 5. `izip!` 在 `use_alloc` 下的 no_std 可用性是 itertools 0.15 的实现
    细节（本轮 host + UEFI 双编译已证）；升级 itertools 大版本时重验
    `vert` 的八行并行循环编译与双路一致单测。
+
+## 播放器 `format` 接线状态（2026-10-21）：格式可选、解码后继
+
+- `[play] format = "h263"` 已进固件/GUI 同构 schema（小写串 `h263`，旧文件缺键照读），
+  GUI 播放页可选；但 `Clip` 分发未接——选中即明确报错
+  （“selectable, decoder follows later”），不硬编解码，不断解析/boot。
+- 后继项（本箱注释 + QEMU 矩阵 `format-h263-parse` 只验解析，不断言解码）：
+  样片（无 `src/diag/data` 内嵌样片）→ `Clip::from_h263_*`（planar YUV → BGRA，
+  校验和口径 md5(Y)+md5(RGBA) 见本箱头注释）→ `diag` 探针项 → 矩阵 case。
+  届时 QEMU h263-probe + 帧率 gate（见上节已知风险第 3 条）一并落地。

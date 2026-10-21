@@ -203,3 +203,13 @@
 4. `cargo test` 在 no_std 形下全箱不可跑（test harness 要 std + 存量测试
    引用 framework/encoder/std——e5c2ddf 前即如此，非本轮引入）：no_std 双形
    只做 `check`，双路行为由默认形开关翻转覆盖。
+
+## 播放器 `format` 接线状态（2026-10-21）：格式可选、解码后继
+
+- `[play] format = "theora"` 已进固件/GUI 同构 schema（小写串 `theora`，旧文件缺键照读），
+  GUI 播放页可选；但 `Clip` 分发未接——选中即明确报错
+  （“selectable, decoder follows later”），不硬编解码，不断解析/boot。
+- 后继项（QEMU 矩阵 `format-theora-parse` 只验解析，不断言解码）：
+  样片（Ogg 页拆帧另立项，本箱只吃已拆帧 packet；需先备拆帧后小样片）
+  → `Clip::from_theora_*`（IDCT butterfly/重建加钳/环路滤波输出转 BGRA，
+  校验和口径只取 Y 平面，见上节 Ogg carriage）→ 矩阵 case。

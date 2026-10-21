@@ -2,9 +2,22 @@
 
 ## 片源格式矩阵（`[play] format`，`Clip` 统一解码）
 
-- `qois`（默认）：`1080p/video.qois`（`u32le 帧长 + QOI 帧` 串接）→ 开机全量预解码。
-- `raw`：`1080p/frameNNNN.raw`（1920x1080 BGRA 直存，与壁纸同格式）→ 零解码直读。
-- 两种格式落到同一 `Clip`（`video/decoder.rs`），三条播放路零分支。
+| `format` | 片源 | 接线状态 |
+|---|---|---|
+| `qois`（默认） | `1080p/video.qois`（`u32le 帧长 + QOI 帧` 串接）→ 开机全量预解码 | 已接（三条播放路零分支） |
+| `raw` | `1080p/frameNNNN.raw`（1920x1080 BGRA 直存，与壁纸同格式）→ 零解码直读 | 已接（同下游切分） |
+| `hevc` | `1080p/video.hevc`（Annex-B，VPS/SPS/PPS 在带内）→ vendor `rusty_h265` 软解 → YUV420 转 BGRA | 已接（预解码进 `Clip`；坏帧计数跳过，全坏报错；只收 8-bit） |
+| `vp9` | `1080p/video.ivf`（32 字节头 + 帧头 12 字节 + 负载）→ vendor `vp9dec` 软解 → YUV420 转 BGRA | 已接（只要显示帧，隐藏 altref 跳过；只收 8-bit 4:2:0） |
+| `h263` | （待定） | 格式可选、解码后继：轮子已 vendor（`h263-rs` + `yuv`/`deblock` 双箱，单比特 SIMD 跟随全局），片源样片/分发未接；选中即明确报错，不硬编解码 |
+| `mpeg2v` | （待定） | 格式可选、解码后继：轮子已 vendor（`filmcraft-mpeg2v`，`simd` 下整数 SSE2 核），片源样片/分发未接；选中即明确报错，不硬编解码 |
+| `theora` | （待定） | 格式可选、解码后继：轮子已 vendor（`oxideav-theora`，`simd` 下 wide 整数核，Ogg 拆帧另立项），片源样片/分发未接；选中即明确报错，不硬编解码 |
+
+- 七格式（除后继三家）落到同一 `Clip`（`video/decoder.rs`），三条播放路零分支；
+  后继三家在 `load_video_clip` 即返回明确错误（“selectable, decoder follows later”），
+  不进解码、不 panic，不断 boot（`video_run` 的错误走 `handle_fatal` 前的正常报错路，
+  矩阵 `format-*-parse` 只验解析/boot 不按键）。
+- `h264` 外部箱（`rusty_h264-decoder` crates.io + `rusty_h264-accel` 本地 vendor）
+  本次不动：已有 `avc_probe` 诊断项，无 `format` 档位，不在此矩阵。
 
 ## `video.qois` 格式
 
