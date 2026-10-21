@@ -84,13 +84,13 @@ impl App {
                 }
             }
         });
-        ui.small(t!(hint_key));
+        self.content_small(ui, t!(hint_key));
         next
     }
 
     /// 播放列表循环行（读 `cfg.playlist`，写回 + 镜像同步）。
     pub(crate) fn playlist_loop_row(&mut self, ui: &mut egui::Ui) {
-        ui.label(t!("playlist.loop"));
+        self.content_label(ui, t!("playlist.loop"));
         let cur = self.cfg.playlist.loop_mode;
         // 借用拆开：滑杆拿 `playlist_loop_f` 可变借，文本先算好（播放页同式）。
         let mut mirror = self.playlist_loop_f;
@@ -101,7 +101,7 @@ impl App {
 
     /// 壁纸画廊循环行（读 `cfg.wallpaper`，写回 + 镜像同步）。
     pub(crate) fn wallpaper_loop_row(&mut self, ui: &mut egui::Ui) {
-        ui.label(t!("wallpaper.loop"));
+        self.content_label(ui, t!("wallpaper.loop"));
         let cur = self.cfg.wallpaper.loop_mode;
         let mut mirror = self.wp_loop_f;
         let next = self.loop_slider_row(ui, cur, &mut mirror, "wallpaper.loop_hint");
@@ -122,9 +122,9 @@ impl App {
     ) {
         let dark = self.dark;
         let gallery_dir = gallery_dir_of(&self.path);
-        ui.small(t!(count_key, n = items.len()));
+        self.content_small(ui, t!(count_key, n = items.len()));
         if items.is_empty() {
-            ui.small(t!(empty_key));
+            self.content_small(ui, t!(empty_key));
         }
         // 拖拽主路（下标即 id，动画关零，落点才写回，重复路径不打架）。
         let mut next_sel = *sel;
@@ -143,7 +143,7 @@ impl App {
                         // 拖柄只管拖（≡ 文本，无按钮语义），点选走右侧玻璃钮，
                         // 点击与拖拽不打架。
                         handle.ui(ui, |ui| {
-                            ui.label("≡");
+                            self.content_label(ui, "≡");
                         });
                         let selected = next_sel == Some(i);
                         let mut b = egui_glass::GlassButton::new(format!(
@@ -157,7 +157,7 @@ impl App {
                         if b.show(ui).clicked() {
                             next_sel = if selected { None } else { Some(i) };
                         }
-                        ui.monospace(wrap.item.path.as_str());
+                        self.content_monospace(ui, wrap.item.path.as_str());
                     });
                 },
             );
@@ -262,8 +262,8 @@ impl App {
 
     /// 播放列表页（循环 + 画廊列表；`fps`/`feed` 全局默认见解码页顶）。
     pub(crate) fn playlist_page(&mut self, ui: &mut egui::Ui) {
-        ui.heading(t!("playlist.heading"));
-        ui.small(t!("playlist.hint"));
+        self.content_heading(ui, t!("playlist.heading"));
+        self.content_small(ui, t!("playlist.hint"));
         ui.add_space(4.0);
         self.playlist_list_editor(ui);
     }

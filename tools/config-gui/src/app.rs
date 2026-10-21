@@ -520,6 +520,87 @@ impl App {
         }
     }
 
+    /// 中央透明区描边字（轮子结论：搜过 `egui` 文本描边，`RichText`/
+    /// `TextFormat`（0.35）无原生 `stroke`，只有下划线/删除线；
+    /// 故手写 1 物理像素八方向罩底 + 主字，库内无此件，注释说明。
+    /// 只给中央静态文字用（玻璃上的按钮/滑杆不动）。
+    /// 关联函数（不借 `self`）：拖拽行等闭包里只有预拷贝的 `dark`，
+    /// 直接用它，不用再借外层 `self`。
+    pub(crate) fn outlined_ui(
+        ui: &mut egui::Ui,
+        dark: bool,
+        text: impl Into<egui::WidgetText>,
+        fallback: egui::TextStyle,
+    ) -> egui::Response {
+        let (fg, stroke) = if dark {
+            (egui::Color32::WHITE, egui::Color32::BLACK)
+        } else {
+            (egui::Color32::BLACK, egui::Color32::WHITE)
+        };
+        let wt: egui::WidgetText = text.into();
+        let galley = wt.into_galley(ui, None, ui.available_width(), fallback);
+        let size = galley.size();
+        let (rect, response) = ui.allocate_exact_size(size, egui::Sense::hover());
+        if ui.is_rect_visible(rect) {
+            // 1 物理像素：pt 按像素密度折，保证 10px 像素字不断裂。
+            let r = 1.0 / ui.ctx().pixels_per_point();
+            for dy in [-r, 0.0, r] {
+                for dx in [-r, 0.0, r] {
+                    if dx == 0.0 && dy == 0.0 {
+                        continue;
+                    }
+                    ui.painter()
+                        .galley(rect.min + egui::vec2(dx, dy), galley.clone(), stroke);
+                }
+            }
+            ui.painter().galley(rect.min, galley, fg);
+        }
+        response
+    }
+
+    fn outlined(
+        &self,
+        ui: &mut egui::Ui,
+        text: impl Into<egui::WidgetText>,
+        fallback: egui::TextStyle,
+    ) -> egui::Response {
+        Self::outlined_ui(ui, self.dark, text, fallback)
+    }
+
+    /// 中央静态文字四件套（分别对应 `heading/label/small/monospace` 的字号，
+    /// 颜色统一按主题白/黑 + 反色描边；`RichText` 的弱化/加粗等尺寸信息保留）。
+    pub(crate) fn content_heading(
+        &self,
+        ui: &mut egui::Ui,
+        text: impl Into<egui::WidgetText>,
+    ) -> egui::Response {
+        self.outlined(ui, text, egui::TextStyle::Heading)
+    }
+
+    pub(crate) fn content_label(
+        &self,
+        ui: &mut egui::Ui,
+        text: impl Into<egui::WidgetText>,
+    ) -> egui::Response {
+        self.outlined(ui, text, egui::TextStyle::Body)
+    }
+
+    pub(crate) fn content_small(
+        &self,
+        ui: &mut egui::Ui,
+        text: impl Into<egui::WidgetText>,
+    ) -> egui::Response {
+        self.outlined(ui, text, egui::TextStyle::Small)
+    }
+
+    pub(crate) fn content_monospace(
+        &self,
+        ui: &mut egui::Ui,
+        text: impl Into<egui::WidgetText>,
+    ) -> egui::Response {
+        self.outlined(ui, text, egui::TextStyle::Monospace)
+    }
+
     pub(crate) fn do_action(&mut self, ctx: &egui::Context, act: Action) {
         match act {
             Action::None => {}
@@ -690,12 +771,12 @@ impl App {
         next
     }
 
-    /// 中央薄片头的弱化提示行：普通内容，不进折射源（折射源只有根部
+    /// 中央透明区头的弱化提示行：描边字，不进折射源（折射源只有根部
     /// `live.run` 的背景图，纯绘制不占布局）。摘要行只放左侧导航卡，
     /// 不在这里重复占右侧空间。
     pub(crate) fn page_backdrop(&self, page: &mut egui::Ui) {
         page.add_space(4.0);
-        page.label(egui::RichText::new(t!("sum.hint")).weak().small());
+        self.content_small(page, egui::RichText::new(t!("sum.hint")).weak().small());
         page.add_space(4.0);
     }
 
@@ -870,30 +951,28 @@ impl eframe::App for App {
                 ui.add_space(8.0);
             });
 
-        // 中央：大号玻璃薄片（误伤恢复：之前误判薄片直边是分割线，
-        // 实为 Panel 分隔线，现已全关）。稠密表单放 panel frost 上。
+        // 中央：透明内容区（用户拍板：不要遮罩，直接透底图；其它框不动）。
+        // 稠密表单直接画在底图上，静态文字走描边（`content_*`），
+        // 里面自带的 GlassButton/GlassSlider 控件保留玻璃（件库约束）。
         // 中央最后加（Panel 之后）。折射源已在根部 `live.run` 跑完，
-        // 这里只放普通内容（摘要提示 + 表单），不再跑第二遍 `live.run`
-        // （两遍会互盖，谁后跑谁赢，且早画的玻璃已错过第一遍）。
+        // 这里不再跑第二遍 `live.run`（两遍会互盖，谁后跑谁赢，
+        // 且早画的玻璃已错过第一遍）。
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE)
             .show(ui, |ui| {
-                let sheet = if self.dark {
-                    egui_glass::Glass::panel_dark()
-                } else {
-                    egui_glass::Glass::panel()
-                };
-                sheet.inner_margin(egui::Margin::same(16)).show(ui, |ui| {
-                    ui.set_min_size(ui.available_size());
-                    self.page_backdrop(ui);
-                    // 解码 tab 条钉死在滚动区之外、卡片最上面（不随内容滚动）。
-                    // 只能放这里：根 ui 上画会把 Panel 挤下去（见上注释），
-                    // 页内画会被 ScrollArea 卷走——内容头是唯一安全位。
-                    if self.page == Page::Decode {
-                        self.decode_tab_bar(ui);
-                    }
-                    egui::ScrollArea::vertical().show(ui, |ui| self.page_content(ui));
-                });
+                egui::Frame::NONE
+                    .inner_margin(egui::Margin::same(16))
+                    .show(ui, |ui| {
+                        ui.set_min_size(ui.available_size());
+                        self.page_backdrop(ui);
+                        // 解码 tab 条钉死在滚动区之外、卡片最上面（不随内容滚动）。
+                        // 只能放这里：根 ui 上画会把 Panel 挤下去（见上注释），
+                        // 页内画会被 ScrollArea 卷走——内容头是唯一安全位。
+                        if self.page == Page::Decode {
+                            self.decode_tab_bar(ui);
+                        }
+                        egui::ScrollArea::vertical().show(ui, |ui| self.page_content(ui));
+                    });
             });
 
         self.do_action(ui.ctx(), act);

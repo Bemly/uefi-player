@@ -103,13 +103,13 @@ impl App {
     pub(crate) fn gallery_page(&mut self, ui: &mut eframe::egui::Ui) {
         use eframe::egui;
         use rust_i18n::t;
-        ui.heading(t!("gallery.heading"));
-        ui.small(t!("gallery.hint"));
+        self.content_heading(ui, t!("gallery.heading"));
+        self.content_small(ui, t!("gallery.hint"));
         ui.add_space(8.0);
         let dir = gallery_dir(&self.path);
         ui.horizontal(|ui| {
-            ui.label(t!("gallery.dir"));
-            ui.monospace(dir.as_str());
+            self.content_label(ui, t!("gallery.dir"));
+            self.content_monospace(ui, dir.as_str());
         });
         ui.add_space(4.0);
         ui.horizontal(|ui| {
@@ -143,7 +143,7 @@ impl App {
         });
         ui.add_space(8.0);
         if self.gallery.entries.is_empty() {
-            ui.small(t!("gallery.empty"));
+            self.content_small(ui, t!("gallery.empty"));
             return;
         }
         egui::ScrollArea::vertical().show(ui, |ui| {

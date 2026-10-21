@@ -525,17 +525,17 @@ impl App {
         if self.transcode.running() {
             ui.ctx().request_repaint();
         }
-        ui.heading(t!("transcode.heading"));
-        ui.small(t!("transcode.hint"));
+        self.content_heading(ui, t!("transcode.heading"));
+        self.content_small(ui, t!("transcode.hint"));
         ui.add_space(8.0);
         ui.horizontal(|ui| {
-            ui.label(t!("transcode.source"));
+            self.content_label(ui, t!("transcode.source"));
             let shown = if self.transcode.source.is_empty() {
                 t!("transcode.no_source").into_owned()
             } else {
                 self.transcode.source.clone()
             };
-            ui.monospace(shown);
+            self.content_monospace(ui, shown);
         });
         ui.add_space(4.0);
         ui.horizontal(|ui| {
@@ -568,7 +568,7 @@ impl App {
             }
         });
         ui.add_space(10.0);
-        ui.label(t!("transcode.target"));
+        self.content_label(ui, t!("transcode.target"));
         ui.horizontal_wrapped(|ui| {
             for v in TranscodeTarget::ALL {
                 if self.option_button(
@@ -580,12 +580,15 @@ impl App {
                 }
             }
         });
-        ui.small(crate::text::transcode_target_desc(self.transcode.target));
+        self.content_small(
+            ui,
+            crate::text::transcode_target_desc(self.transcode.target),
+        );
         ui.add_space(10.0);
         if !self.transcode.info.is_empty() {
             ui.horizontal(|ui| {
-                ui.label(t!("transcode.probe"));
-                ui.monospace(self.transcode.info.as_str());
+                self.content_label(ui, t!("transcode.probe"));
+                self.content_monospace(ui, self.transcode.info.as_str());
             });
             ui.add_space(4.0);
         }
@@ -595,8 +598,8 @@ impl App {
             .display()
             .to_string();
         ui.horizontal(|ui| {
-            ui.label(t!("transcode.output"));
-            ui.monospace(out_full.as_str());
+            self.content_label(ui, t!("transcode.output"));
+            self.content_monospace(ui, out_full.as_str());
         });
         ui.add_space(4.0);
         ui.horizontal(|ui| {
@@ -630,7 +633,7 @@ impl App {
         });
         if !self.transcode.status.is_empty() {
             ui.add_space(4.0);
-            ui.small(self.transcode.status.as_str());
+            self.content_small(ui, self.transcode.status.as_str());
         }
     }
 
