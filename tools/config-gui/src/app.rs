@@ -122,6 +122,9 @@ pub(crate) struct App {
     pub(crate) gallery: GalleryState,
     /// 转码状态（worker 线程跑，UI 只轮询）。
     pub(crate) transcode: TranscodeState,
+    /// 动态背景（`/Users/bemly/Movies/input.mp4` 前 40s 循环硬解，见 `video_bg`；
+    /// 缺片/非 macOS 静默回退纯色，不挡任何流程）。
+    pub(crate) video_bg: crate::video_bg::VideoBg,
 }
 
 impl App {
@@ -195,6 +198,7 @@ impl App {
             live,
             gallery: GalleryState::new(),
             transcode: TranscodeState::new(),
+            video_bg: crate::video_bg::VideoBg::new(),
         };
         // 启动时若工作目录下已有 player.toml，直接载入。
         if std::path::Path::new(&app.path).exists() {
@@ -593,19 +597,30 @@ impl App {
         b.show(ui).clicked()
     }
 
-    /// 解码页顶部固定 tab 条（滚动区之外调用，不随内容滚动；单行横滚不断尾；
-    /// 只切展示，不落盘；`Global` = 全局默认帧率 + 供片）。
+    /// 解码页顶部固定 tab 条（滚动区之外调用，不随内容滚动；`Global` = 全局默认帧率 + 供片）。
+    /// 轮子结论（搜过 `crates.io`，2026-10-21）：`egui_tabs` 锁 `egui ^0.29`（本仓 0.35，
+    /// 并存两大版本类型不通）；`facett-tabbar` 是个人小框架（总下载三位数），拖整套
+    /// `facett-core` 主题栈且非玻璃风；`egui_dock` 是 5000 行 docking 系统，
+    /// 自带动拖拽且原生渲染——三个都不用。故库内件拼：`GlassToolbar` 胶囊当条 +
+    /// 9 个 `GlassButton`（`spacing(2.0)` 连成一体，不断尾横滚）。
+    /// `id_salt` 必加：横竖两个 `ScrollArea` 的自动 ID 会撞车（曾报
+    /// `First/Second use of ScrollArea ID` 红字），显式盐隔离。
     pub(crate) fn decode_tab_bar(&mut self, ui: &mut egui::Ui) {
         ui.add_space(4.0);
-        egui::ScrollArea::horizontal().show(ui, |ui| {
-            ui.horizontal(|ui| {
-                for tab in DecodeTab::ALL {
-                    if self.option_button(ui, self.decode_tab == tab, &decode_tab_name(tab)) {
-                        self.decode_tab = tab;
-                    }
-                }
+        egui::ScrollArea::horizontal()
+            .id_salt("decode_tabs")
+            .show(ui, |ui| {
+                egui_glass::GlassToolbar::new(self.bar_style())
+                    .spacing(2.0)
+                    .show(ui, |ui| {
+                        for tab in DecodeTab::ALL {
+                            if self.option_button(ui, self.decode_tab == tab, &decode_tab_name(tab))
+                            {
+                                self.decode_tab = tab;
+                            }
+                        }
+                    });
             });
-        });
         ui.add_space(4.0);
     }
 
@@ -626,10 +641,42 @@ impl App {
 
     /// 实时背景的页面层：只留一句提示做折射燃料。`live.run` 会让它跑两遍
     /// （可见 + 离屏），所以这里禁止任何写状态、禁止放玻璃件、
-    /// 禁止放可交互控件——只许纯文本。
+    /// 禁止放可交互控件——只许纯文本 + 当前视频帧（只读）。
     /// 摘要行只放左侧导航卡，不在这里重复占右侧空间。
+    /// 动态背景（`video_bg`）：有首帧即按 aspect-fill 铺满 `max_rect`（与
+    /// `show_backdrop` 同式，居中裁边），玻璃经 Live 双遍即折射到它；
+    /// 无帧/回退即纯色底（深浅跟主题走，不挡任何流程）。
     pub(crate) fn page_backdrop(&self, page: &mut egui::Ui) {
-        // 先铺底色：窗口清屏色不可控（实测透黑），两遍（可见 + 离屏）用同一底，
+        let rect = page.max_rect();
+        if let Some(tex) = self.video_bg.texture.as_ref() {
+            let [iw, ih] = tex.size();
+            if iw > 0 && ih > 0 {
+                let scale = (rect.width() / iw as f32).max(rect.height() / ih as f32);
+                let sized = egui::vec2(iw as f32 * scale, ih as f32 * scale);
+                let image_rect = egui::Rect::from_center_size(rect.center(), sized);
+                page.painter().image(
+                    tex.id(),
+                    image_rect,
+                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                    egui::Color32::WHITE,
+                );
+                // 暗角：视频上压半透明纸，保证提示字可读（纯绘制，无状态）。
+                page.painter().rect_filled(
+                    rect,
+                    0.0,
+                    if self.dark {
+                        egui::Color32::from_black_alpha(120)
+                    } else {
+                        egui::Color32::from_white_alpha(120)
+                    },
+                );
+                page.add_space(4.0);
+                page.label(egui::RichText::new(t!("sum.hint")).weak().small());
+                page.add_space(4.0);
+                return;
+            }
+        }
+        // 回退：窗口清屏色不可控（实测透黑），两遍（可见 + 离屏）用同一底，
         // 映射才一致。深浅跟主题走。
         let bg = if self.dark {
             egui::Color32::BLACK
@@ -775,6 +822,8 @@ impl eframe::App for App {
         // 独立 Area 实测也会打乱 Panel 布局（原因未明，宁可信截屏），
         // 只有中央面板内容头是安全的：兄弟 Panel 已先占位，内部只是多滚一段。
         // 页面是弱化摘要纸（折射燃料），表单跟在后面正常滚。
+        // 动态背景推进在面板外做（`live.run` 闭包禁写状态，时钟只能在外推）。
+        self.video_bg.tick(ui.ctx());
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE)
             .show(ui, |ui| {
