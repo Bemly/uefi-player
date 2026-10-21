@@ -685,20 +685,13 @@ impl eframe::App for App {
 
         // （实时背景在中央面板内容头，见下。）
 
-        // 全窗背景图（glass 自家 `show_backdrop` + 纸罩）：必须在全部面板之前画——
-        // 同层按代码顺序出画，先画的在下（血泪：画在面板之间会盖住前面的面板，
-        // 之前全屏图盖面板就是这个原因，与层无关）。纯绘制不占布局。
+        // 全窗背景图（glass 自家 `show_backdrop`）：必须在全部面板之前画——
+        // 同层按代码顺序出画，先画的在下。注意不要在这里加全屏半透明纸罩：
+        // 实测半透明全屏矩形会吃掉顶/底/左面板（`noveil` 定位，机制未深究），
+        // 字压在图上靠玻璃 frost 保证可读。twin 遍纸罩保留（只进折射源）。
+        // 纯绘制不占布局。
         let screen = ui.ctx().viewport_rect();
         egui_glass::show_backdrop(ui, screen);
-        ui.painter().rect_filled(
-            screen,
-            0.0,
-            if self.dark {
-                egui::Color32::from_black_alpha(120)
-            } else {
-                egui::Color32::from_white_alpha(120)
-            },
-        );
 
         // 顶栏：文件动作工具条胶囊（误伤恢复：真凶是 Panel 分隔线，现已全关，
         // 胶囊本身圆角无直边）。
@@ -805,7 +798,13 @@ impl eframe::App for App {
                             egui::Color32::WHITE
                         };
                         live.run(ui, clear, |page| {
-                            // twin 遍纸罩（与可见遍同一块，保证折射与所见一致；
+                            // twin 遍图进折射源：`set_backdrop` 注册时已自动镜像到
+                            // 双胞胎渲染器（见上游 `register_native_texture_in`），
+                            // twin 里直接 `show_backdrop` 即可，无需新纹理；
+                            // 离屏画不影响可见合成，怎么画都安全。
+                            // 顺序与可见遍一致（图→纸罩→字），折射与所见一致。
+                            egui_glass::show_backdrop(page, screen);
+                            // twin 遍纸罩（与可见遍同一块；
                             // 纯色绘制，`bis3` 实测不影响面板）。
                             page.painter().rect_filled(
                                 screen,
