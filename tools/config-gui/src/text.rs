@@ -171,3 +171,33 @@ pub(crate) fn pipeline_name(v: PlayPipeline) -> String {
     }
     .into_owned()
 }
+
+/// 转码目标显示名（输出名见 `TranscodeTarget::out_path`，与固件片源名一致）。
+pub(crate) fn transcode_target_name(v: crate::transcode::TranscodeTarget) -> String {
+    use crate::transcode::TranscodeTarget;
+    match v {
+        TranscodeTarget::Avc => t!("transcode.t_avc"),
+        TranscodeTarget::Hevc => t!("transcode.t_hevc"),
+        TranscodeTarget::Vp9 => t!("transcode.t_vp9"),
+        TranscodeTarget::H263 => t!("transcode.t_h263"),
+        TranscodeTarget::Mpeg2v => t!("transcode.t_mpeg2v"),
+        TranscodeTarget::Theora => t!("transcode.t_theora"),
+        TranscodeTarget::Qois => t!("transcode.t_qois"),
+    }
+    .into_owned()
+}
+
+/// 转码目标一句话说明（编码器 + 容器去向）。
+pub(crate) fn transcode_target_desc(v: crate::transcode::TranscodeTarget) -> String {
+    use crate::transcode::TranscodeTarget;
+    match v {
+        TranscodeTarget::Avc => t!("transcode.d_avc"),
+        TranscodeTarget::Hevc => t!("transcode.d_hevc"),
+        TranscodeTarget::Vp9 => t!("transcode.d_vp9"),
+        TranscodeTarget::H263 => t!("transcode.d_h263"),
+        TranscodeTarget::Mpeg2v => t!("transcode.d_mpeg2v"),
+        TranscodeTarget::Theora => t!("transcode.d_theora"),
+        TranscodeTarget::Qois => t!("transcode.d_qois"),
+    }
+    .into_owned()
+}

@@ -50,10 +50,13 @@ use crate::app::App;
 rust_i18n::i18n!("locales", fallback = "en");
 
 mod app;
+mod codecs;
+mod gallery;
 mod pages;
 mod rules;
 mod schema;
 mod text;
+mod transcode;
 
 /// 纯色背景：白底/黑底。均匀底玻璃近乎平（官方原话），深浅色模式优先，不带资源文件。
 fn make_backdrop(dark: bool) -> egui::ColorImage {

@@ -4,9 +4,11 @@
 use eframe::egui;
 use rust_i18n::t;
 
+use crate::gallery::GalleryState;
 use crate::make_backdrop;
 use crate::rules::*;
 use crate::schema::*;
+use crate::transcode::TranscodeState;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Page {
@@ -15,6 +17,8 @@ pub(crate) enum Page {
     Player,
     Wallpaper,
     Boot,
+    Transcode,
+    Gallery,
     Summary,
 }
 
@@ -65,6 +69,10 @@ pub(crate) struct App {
     pub(crate) rs: Option<egui_wgpu::RenderState>,
     /// 实时背景：页面跑两遍（可见 + 离屏折射源），开关浮在上层。无 GPU 时为 None。
     pub(crate) live: Option<egui_glass::LiveBackdrop>,
+    /// 图库状态（目录跟 `player.toml` 路径走）。
+    pub(crate) gallery: GalleryState,
+    /// 转码状态（worker 线程跑，UI 只轮询）。
+    pub(crate) transcode: TranscodeState,
 }
 
 impl App {
@@ -128,6 +136,8 @@ impl App {
             zh: false,
             rs,
             live,
+            gallery: GalleryState::new(),
+            transcode: TranscodeState::new(),
         };
         // 启动时若工作目录下已有 player.toml，直接载入。
         if std::path::Path::new(&app.path).exists() {
@@ -551,6 +561,8 @@ impl eframe::App for App {
                     ui.selectable_value(&mut self.page, Page::Player, t!("nav.player"));
                     ui.selectable_value(&mut self.page, Page::Wallpaper, t!("nav.wallpaper"));
                     ui.selectable_value(&mut self.page, Page::Boot, t!("nav.boot"));
+                    ui.selectable_value(&mut self.page, Page::Transcode, t!("nav.transcode"));
+                    ui.selectable_value(&mut self.page, Page::Gallery, t!("nav.gallery"));
                     ui.selectable_value(&mut self.page, Page::Summary, t!("nav.summary"));
                     if ui.button(t!("toolbar.open")).clicked() {
                         act = Action::Open;
@@ -627,6 +639,8 @@ impl eframe::App for App {
                     self.nav_button(ui, Page::Player, t!("nav.player").into_owned());
                     self.nav_button(ui, Page::Wallpaper, t!("nav.wallpaper").into_owned());
                     self.nav_button(ui, Page::Boot, t!("nav.boot").into_owned());
+                    self.nav_button(ui, Page::Transcode, t!("nav.transcode").into_owned());
+                    self.nav_button(ui, Page::Gallery, t!("nav.gallery").into_owned());
                     self.nav_button(ui, Page::Summary, t!("nav.summary").into_owned());
                     ui.add_space(8.0);
                     ui.small(t!("sum.accel", v = self.cfg.accel.level.file_str()));

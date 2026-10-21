@@ -1,4 +1,5 @@
-//! 页面内容：`App::page_content`（六页开关）+ 件库约束见根 AGENTS（玻璃件/留白/无分隔线）。
+//! 页面内容：`App::page_content`（八页开关）+ 件库约束见根 AGENTS（玻璃件/留白/无分隔线）。
+//! 转码/图库两页实现在各自模块（同 `impl App`，跨文件只为守 1000 行上限）。
 
 use eframe::egui;
 use rust_i18n::t;
@@ -507,6 +508,12 @@ impl App {
                         self.switch_row(ui, self.cfg.boot.strict, &t!("boot.on"), &t!("boot.off"));
                     self.cfg.boot.strict = v;
                 }
+            }
+            Page::Transcode => {
+                self.transcode_page(ui);
+            }
+            Page::Gallery => {
+                self.gallery_page(ui);
             }
             Page::Summary => {
                 ui.heading(t!("sum.heading"));
