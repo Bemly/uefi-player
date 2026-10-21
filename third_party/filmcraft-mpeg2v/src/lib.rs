@@ -37,9 +37,47 @@ extern crate alloc;
 #[cfg(test)]
 extern crate std;
 // VENDOR(uefi-player): `threads` needs rayon, which needs std; the firmware
-// shape is scalar-only, so this combination is rejected, not silently degraded.
+// shapes are `default-features = false` (scalar twin) and
+// `default-features = false` + `simd` (integer SSE2 fast path), so only the
+// `threads` combination is rejected, not silently degraded.
 #[cfg(all(not(feature = "std"), feature = "threads"))]
-compile_error!("filmcraft-mpeg2v: `threads` requires `std` (rayon); keep default features for threads, or default-features=false for the no_std scalar firmware shape");
+compile_error!("filmcraft-mpeg2v: `threads` requires `std` (rayon); keep default features for threads, or default-features=false (+ simd) for the no_std firmware shapes");
+// VENDOR(uefi-player): firmware gate — the single-bit `[accel]` switch backer
+// (`scalar` => firmware calls `set_simd_enabled(false)`, any other level =>
+// `true` once `ensure_xsave_enabled` has run; see VENDOR.md for the wiring
+// contract — this crate never probes CPUID/XCR0 itself, it only obeys).
+// The SIMD path only ever emits SSE2-baseline integer math (x86-64 psABI
+// guaranteed; no AVX/XSAVE involvement), so the switch is config semantics,
+// not a safety gate: ON under `std` (the fixed-point fast path is the
+// default shape), OFF under no_std (fail-closed until firmware opts in).
+// `Relaxed` suffices — both paths are bit-identical by test, so a torn read
+// can at worst mix paths inside one frame, never corrupt it.
+#[cfg(feature = "simd")]
+use core::sync::atomic::AtomicBool;
+#[cfg(feature = "simd")]
+static SIMD_ENABLED: AtomicBool = AtomicBool::new(cfg!(feature = "std"));
+
+/// Enable (`true`) or disable (`false`) the integer-SSE2 fast path at runtime.
+/// No-op unless the `simd` feature is on, so callers need no `cfg`.
+pub fn set_simd_enabled(en: bool) {
+    #[cfg(feature = "simd")]
+    SIMD_ENABLED.store(en, Ordering::Relaxed);
+    #[cfg(not(feature = "simd"))]
+    let _ = en;
+}
+
+/// Runtime dispatch predicate. Without `simd`, or off x86_64, this is a
+/// constant `false` and the scalar twin below is the only kernel.
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[inline]
+pub(crate) fn simd_enabled() -> bool {
+    SIMD_ENABLED.load(Ordering::Relaxed)
+}
+#[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+#[inline]
+pub(crate) fn simd_enabled() -> bool {
+    false
+}
 
 mod bits;
 pub mod headers;

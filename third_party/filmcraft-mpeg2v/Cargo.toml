@@ -11,19 +11,29 @@ repository = "https://github.com/storytold/filmcraft"
 description = "Clean-room MPEG-2 video (ITU-T H.262 | ISO/IEC 13818-2) and MPEG-1 video (ISO/IEC 11172-2) decoder"
 
 # NOTE(uefi-player vendor): vendored from git 70f0fc7a (2026-10-20) + no_std port
-# (scalar). See VENDOR.md. `std` (default on) preserves upstream behavior exactly;
-# `default-features = false` is the firmware shape: no_std + alloc, threads off.
+# (scalar + `simd`). See VENDOR.md. `std` (default on) implies `simd` and
+# preserves upstream behavior within the pixel gate (fixed-point IDCT replaces
+# the `f32` path; see `src/idct.rs`); `default-features = false` is the
+# firmware shape: no_std + alloc, threads off, scalar twin only unless `simd`
+# is added back (the no_std + `simd` firmware SIMD shape).
 # Upstream is not on crates.io, so this is a path vendor, not a registry version.
 
 [features]
 default = ["std", "threads"]
-# Standard library. Off => `#![no_std]` + `alloc`.
-std = []
+# Standard library. Off => `#![no_std]` + `alloc`. On => `simd` (the runtime
+# `set_simd_enabled` switch stays the single-bit `[accel]` backer in both).
+std = ["simd"]
+# Integer SSE2 kernels (`asm!` explicit vector registers, no intrinsics, no
+# float vectors, no AVX): fixed-point IDCT row pass + half-pixel `pavgb`
+# averaging in `predict`. Zero dependencies; `#![no_std]`-clean. On =>
+# fast path under the runtime `simd_enabled` switch (single-bit `[accel]`
+# backer, scalar=off/else=on; defaults ON under `std`, OFF under no_std
+# fail-closed until firmware opts in). Off => scalar twin only.
+simd = []
 # Slice-row parallelism via rayon (MPEG-2 slices; MPEG-1 slices always decode in
-# order). The firmware scalar port leaves this off; `threads` without `std` is
-# rejected below by `compile_error!` (rayon needs std). There is no SIMD concept
-# in this crate (pure scalar `f32` IDCT), so `default-features = false` is
-# immediately firmware-usable.
+# order). The firmware port leaves this off; `threads` without `std` is
+# rejected below by `compile_error!` (rayon needs std). `simd` without `std`
+# is the firmware SIMD shape and is explicitly allowed.
 threads = ["dep:rayon"]
 
 [dependencies]
