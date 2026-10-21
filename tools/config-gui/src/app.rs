@@ -8,6 +8,7 @@ use crate::gallery::GalleryState;
 use crate::make_backdrop;
 use crate::rules::*;
 use crate::schema::*;
+use crate::text::*;
 use crate::transcode::TranscodeState;
 
 /// 播放列表编辑器（`playlist.rs`，同 `impl App`，跨文件只为守 1000 行上限；
@@ -27,6 +28,28 @@ pub(crate) enum Page {
     Transcode,
     Gallery,
     Summary,
+}
+
+/// 解码页顶部固定标签（只切展示，不落盘；格式位与 `DecodeTable::ORDER` 同序，
+/// 首位 `Global` 是全局默认帧率 + 供片）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DecodeTab {
+    Global,
+    Format(MediaFormat),
+}
+
+impl DecodeTab {
+    pub(crate) const ALL: [Self; 9] = [
+        Self::Global,
+        Self::Format(MediaFormat::Qois),
+        Self::Format(MediaFormat::Raw),
+        Self::Format(MediaFormat::Hevc),
+        Self::Format(MediaFormat::Vp9),
+        Self::Format(MediaFormat::H263),
+        Self::Format(MediaFormat::Mpeg2v),
+        Self::Format(MediaFormat::Theora),
+        Self::Format(MediaFormat::Avc),
+    ];
 }
 
 pub(crate) enum Action {
@@ -56,8 +79,8 @@ pub(crate) struct App {
     /// 播放列表与壁纸画廊各一（加速/供片滑杆同式，无新件）。
     pub(crate) playlist_loop_f: f32,
     pub(crate) wp_loop_f: f32,
-    /// 解码页当前 tab（8 格式单选，默认 `Qois`；只切展示，不落盘）。
-    pub(crate) decode_tab: MediaFormat,
+    /// 解码页当前 tab（全局 + 8 格式单选，默认全局；只切展示，不落盘）。
+    pub(crate) decode_tab: DecodeTab,
     /// 列表单选（`None` = 未选；GlassButton 行点选，删除/上下移消费它）。
     pub(crate) playlist_sel: Option<usize>,
     pub(crate) wallpaper_sel: Option<usize>,
@@ -150,7 +173,7 @@ impl App {
             feed_f: FeedMode::Clip.index() as f32,
             playlist_loop_f: LoopMode::LoopList.index() as f32,
             wp_loop_f: LoopMode::LoopList.index() as f32,
-            decode_tab: MediaFormat::Qois,
+            decode_tab: DecodeTab::Global,
             playlist_sel: None,
             wallpaper_sel: None,
             dec_threads_f: [0.0; 8],
@@ -570,6 +593,22 @@ impl App {
         b.show(ui).clicked()
     }
 
+    /// 解码页顶部固定 tab 条（滚动区之外调用，不随内容滚动；单行横滚不断尾；
+    /// 只切展示，不落盘；`Global` = 全局默认帧率 + 供片）。
+    pub(crate) fn decode_tab_bar(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(4.0);
+        egui::ScrollArea::horizontal().show(ui, |ui| {
+            ui.horizontal(|ui| {
+                for tab in DecodeTab::ALL {
+                    if self.option_button(ui, self.decode_tab == tab, &decode_tab_name(tab)) {
+                        self.decode_tab = tab;
+                    }
+                }
+            });
+        });
+        ui.add_space(4.0);
+    }
+
     /// 开/关行（两颗玻璃按钮）：返回用户点选后的值，调用方写回。
     /// 纯为了借用简单（直接在循环里拿 `&mut` 字段会和 `option_button` 的 `&self` 打架）。
     pub(crate) fn switch_row(&mut self, ui: &mut egui::Ui, cur: bool, on: &str, off: &str) -> bool {
@@ -632,6 +671,10 @@ impl eframe::App for App {
                     }
                 });
                 ui.separator();
+                // 解码 tab 条钉在滚动区之外（无 GPU 兜底分支同式）。
+                if self.page == Page::Decode {
+                    self.decode_tab_bar(ui);
+                }
                 egui::ScrollArea::vertical().show(ui, |ui| self.page_content(ui));
                 ui.separator();
                 ui.label(&self.status);
@@ -749,6 +792,12 @@ impl eframe::App for App {
                             egui::Color32::WHITE
                         };
                         live.run(ui, clear, |page| self.page_backdrop(page));
+                    }
+                    // 解码 tab 条钉死在滚动区之外、卡片最上面（不随内容滚动）。
+                    // 只能放这里：根 ui 上画会把 Panel 挤下去（见上注释），
+                    // 页内画会被 ScrollArea 卷走——内容头是唯一安全位。
+                    if self.page == Page::Decode {
+                        self.decode_tab_bar(ui);
                     }
                     egui::ScrollArea::vertical().show(ui, |ui| self.page_content(ui));
                 });

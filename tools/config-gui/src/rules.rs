@@ -347,6 +347,13 @@ mod blackbox_matrix {
     fn decode_tabs_matrix() {
         assert_eq!(DecodeTable::ORDER.len(), 8);
         assert_eq!(DecodeTable::ORDER, MediaFormat::ALL);
+        // 顶栏 tab 序与 ORDER 同步（首位全局 + 八格式；漂移了顶栏就错位）。
+        let tabs = crate::app::DecodeTab::ALL;
+        assert_eq!(tabs.len(), 9);
+        assert!(matches!(tabs[0], crate::app::DecodeTab::Global));
+        for (tab, fmt) in tabs[1..].iter().zip(DecodeTable::ORDER.iter()) {
+            assert!(matches!(tab, crate::app::DecodeTab::Format(f) if f == fmt));
+        }
         let mut cfg = FileConfig::default();
         for (i, fmt) in DecodeTable::ORDER.iter().copied().enumerate() {
             let d = cfg.decode.get_mut(fmt).unwrap();

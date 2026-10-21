@@ -2,6 +2,7 @@
 
 use rust_i18n::t;
 
+use crate::app::DecodeTab;
 use crate::schema::*;
 
 pub(crate) fn level_desc(v: AccelLevel) -> String {
@@ -127,6 +128,15 @@ pub(crate) fn cores_text(cores: u32) -> String {
 /// 核心上限说明（0/auto 语义 + 取值范围）。
 pub(crate) fn cores_desc() -> String {
     t!("sched.desc_cores").into_owned()
+}
+
+/// 解码页顶部 tab 短名：`Global` 走 `decode.tab_global`，格式取文件串大写
+/// （QOIS/RAW/HEVC…；tab 一行只求可扫读，不用 `format_name` 全称）。
+pub(crate) fn decode_tab_name(tab: DecodeTab) -> String {
+    match tab {
+        DecodeTab::Global => t!("decode.tab_global").into_owned(),
+        DecodeTab::Format(fmt) => fmt.file_str().to_uppercase(),
+    }
 }
 
 pub(crate) fn vsync_desc(v: VsyncMode) -> String {

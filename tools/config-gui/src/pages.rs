@@ -4,7 +4,7 @@
 use eframe::egui;
 use rust_i18n::t;
 
-use crate::app::{App, Page};
+use crate::app::{App, DecodeTab, Page};
 use crate::rules::*;
 use crate::schema::*;
 use crate::text::*;
@@ -324,198 +324,194 @@ impl App {
                 ui.heading(t!("decode.heading"));
                 ui.small(t!("decode.hint"));
                 ui.add_space(4.0);
-                // 全局默认（家在解码页顶）：播放帧率 + 供片。
-                // `[play] feed` 是全局默认，逐格式 `fetch` 覆盖它（`None` = 继承）；
-                // 壁纸恒 `clip`，忽略覆盖。
-                ui.label(t!("decode.global_heading"));
-                ui.small(t!("decode.global_hint"));
-                ui.add_space(4.0);
-                ui.label(t!("play.fps"));
-                // 三段滑杆：0 = auto，1-240 = 限速，241 = max。
-                // 文本先算好：滑杆拿 &mut play_f 时不能再借 self。
-                let play_label = self.play_text();
-                egui_glass::GlassSlider::new(&mut self.play_f, 0.0..=241.0)
-                    .text(play_label)
-                    .step_by(1.0)
-                    .style(if self.dark {
-                        egui_glass::GlassStyle::dark()
-                    } else {
-                        egui_glass::GlassStyle::regular()
-                    })
-                    .show(ui);
-                let pos = self.play_f.round().clamp(0.0, 241.0) as u32;
-                self.cfg.play.fps = match pos {
-                    0 => String::from("auto"),
-                    241 => String::from("max"),
-                    n => n.to_string(),
-                };
-                ui.small(t!("play.hint"));
-                ui.add_space(4.0);
-                ui.horizontal(|ui| {
-                    ui.label(self.measured_line());
-                    if egui_glass::GlassButton::new(t!("play.rebench"))
-                        .show(ui)
-                        .clicked()
-                    {
-                        // 清零并存盘：下次启动 auto 会重测。
-                        self.cfg.play.measured_max_fps = 0;
-                        let p = self.path.clone();
-                        self.save_to(&p);
+                // tab 条已抽到卡片顶部固定（`App::decode_tab_bar`，滚动区之外）；
+                // 这里只画选中 tab 的内容。全局默认（播放帧率 + 供片）走 `Global` tab。
+                match self.decode_tab {
+                    DecodeTab::Global => {
+                        // 全局默认（`Global` tab）：播放帧率 + 供片。
+                        // `[play] feed` 是全局默认，逐格式 `fetch` 覆盖它（`None` = 继承）；
+                        // 壁纸恒 `clip`，忽略覆盖。
+                        ui.label(t!("decode.global_heading"));
+                        ui.small(t!("decode.global_hint"));
+                        ui.add_space(4.0);
+                        ui.label(t!("play.fps"));
+                        // 三段滑杆：0 = auto，1-240 = 限速，241 = max。
+                        // 文本先算好：滑杆拿 &mut play_f 时不能再借 self。
+                        let play_label = self.play_text();
+                        egui_glass::GlassSlider::new(&mut self.play_f, 0.0..=241.0)
+                            .text(play_label)
+                            .step_by(1.0)
+                            .style(if self.dark {
+                                egui_glass::GlassStyle::dark()
+                            } else {
+                                egui_glass::GlassStyle::regular()
+                            })
+                            .show(ui);
+                        let pos = self.play_f.round().clamp(0.0, 241.0) as u32;
+                        self.cfg.play.fps = match pos {
+                            0 => String::from("auto"),
+                            241 => String::from("max"),
+                            n => n.to_string(),
+                        };
+                        ui.small(t!("play.hint"));
+                        ui.add_space(4.0);
+                        ui.horizontal(|ui| {
+                            ui.label(self.measured_line());
+                            if egui_glass::GlassButton::new(t!("play.rebench"))
+                                .show(ui)
+                                .clicked()
+                            {
+                                // 清零并存盘：下次启动 auto 会重测。
+                                self.cfg.play.measured_max_fps = 0;
+                                let p = self.path.clone();
+                                self.save_to(&p);
+                            }
+                        });
+                        ui.add_space(4.0);
+                        ui.label(t!("play.feed"));
+                        // 供片滑杆：0-4 拨 `FeedMode::ALL` 下标，文本行同步显示当前档 + 说明。
+                        let cur_feed = self.cfg.play.feed;
+                        let feed_label = format!(
+                            "{}: {}",
+                            cur_feed.file_str(),
+                            crate::text::feed_desc(cur_feed)
+                        );
+                        egui_glass::GlassSlider::new(&mut self.feed_f, 0.0..=4.0)
+                            .text(feed_label)
+                            .step_by(1.0)
+                            .style(if self.dark {
+                                egui_glass::GlassStyle::dark()
+                            } else {
+                                egui_glass::GlassStyle::regular()
+                            })
+                            .show(ui);
+                        self.cfg.play.feed =
+                            FeedMode::ALL[self.feed_f.round().clamp(0.0, 4.0) as usize];
+                        ui.small(t!("play.feed_hint"));
                     }
-                });
-                ui.add_space(4.0);
-                ui.label(t!("play.feed"));
-                // 供片滑杆：0-4 拨 `FeedMode::ALL` 下标，文本行同步显示当前档 + 说明。
-                let cur_feed = self.cfg.play.feed;
-                let feed_label = format!(
-                    "{}: {}",
-                    cur_feed.file_str(),
-                    crate::text::feed_desc(cur_feed)
-                );
-                egui_glass::GlassSlider::new(&mut self.feed_f, 0.0..=4.0)
-                    .text(feed_label)
-                    .step_by(1.0)
-                    .style(if self.dark {
-                        egui_glass::GlassStyle::dark()
-                    } else {
-                        egui_glass::GlassStyle::regular()
-                    })
-                    .show(ui);
-                self.cfg.play.feed = FeedMode::ALL[self.feed_f.round().clamp(0.0, 4.0) as usize];
-                ui.small(t!("play.feed_hint"));
-                ui.add_space(10.0);
-                // 8 格式 tabs（GlassButton 顶栏，选中描蓝 + ●；只切展示，不落盘）。
-                ui.label(t!("decode.tabs_heading"));
-                ui.small(t!("decode.tabs_hint"));
-                ui.horizontal_wrapped(|ui| {
-                    for fmt in DecodeTable::ORDER.iter().copied() {
-                        let selected = self.decode_tab == fmt;
-                        if self.option_button(ui, selected, &format_name(fmt)) {
-                            self.decode_tab = fmt;
+                    DecodeTab::Format(fmt) => {
+                        // 选中 tab 的 5 控件（线程滑杆 + 零拷开关 + 流式开关 + 缓冲滑杆 +
+                        // 供片覆盖滑杆；八格式全表，`qois` 帧级并行可兑现、`raw` 零解码占位）。
+                        {
+                            let i = DecodeTable::ORDER
+                                .iter()
+                                .position(|&f| f == fmt)
+                                .unwrap_or(0);
+                            ui.label(format_name(fmt));
+                            ui.small(format_desc(fmt));
+                            // 线程：0-1 拨 `DecodeThreads::ALL` 下标。
+                            ui.label(t!("decode.threads"));
+                            let cur_t = self
+                                .cfg
+                                .decode
+                                .get(fmt)
+                                .map(|d| d.threads)
+                                .unwrap_or_default();
+                            let threads_label =
+                                format!("{}: {}", cur_t.file_str(), decode_threads_desc(cur_t));
+                            egui_glass::GlassSlider::new(&mut self.dec_threads_f[i], 0.0..=1.0)
+                                .text(threads_label)
+                                .step_by(1.0)
+                                .style(if self.dark {
+                                    egui_glass::GlassStyle::dark()
+                                } else {
+                                    egui_glass::GlassStyle::regular()
+                                })
+                                .show(ui);
+                            if let Some(d) = self.cfg.decode.get_mut(fmt) {
+                                d.threads = DecodeThreads::ALL
+                                    [self.dec_threads_f[i].round().clamp(0.0, 1.0) as usize];
+                            }
+                            ui.small(t!("decode.threads_hint"));
+                            ui.add_space(4.0);
+                            // 零拷：两颗玻璃按钮单选开关。
+                            ui.label(t!("decode.zero_copy"));
+                            let zc = self.switch_row(
+                                ui,
+                                self.cfg
+                                    .decode
+                                    .get(fmt)
+                                    .map(|d| d.zero_copy)
+                                    .unwrap_or(false),
+                                &t!("boot.on"),
+                                &t!("boot.off"),
+                            );
+                            if let Some(d) = self.cfg.decode.get_mut(fmt) {
+                                d.zero_copy = zc;
+                            }
+                            ui.small(t!("decode.desc_zero_copy"));
+                            ui.add_space(4.0);
+                            // 流式：同上单选开关。
+                            ui.label(t!("decode.streaming"));
+                            let st = self.switch_row(
+                                ui,
+                                self.cfg
+                                    .decode
+                                    .get(fmt)
+                                    .map(|d| d.streaming)
+                                    .unwrap_or(false),
+                                &t!("boot.on"),
+                                &t!("boot.off"),
+                            );
+                            if let Some(d) = self.cfg.decode.get_mut(fmt) {
+                                d.streaming = st;
+                            }
+                            ui.small(t!("decode.desc_streaming"));
+                            ui.add_space(4.0);
+                            // 缓冲：0 = 跟随 `tune.window`，1-32 显式按格式覆盖。
+                            ui.label(t!("decode.buffers"));
+                            let cur_b = self
+                                .cfg
+                                .decode
+                                .get(fmt)
+                                .map(|d| d.buffers.min(32))
+                                .unwrap_or(0);
+                            let buffers_label = if cur_b == 0 {
+                                t!("decode.buffers_follow", v = self.cfg.render.tune.window)
+                                    .into_owned()
+                            } else {
+                                format!("{} buffers", cur_b)
+                            };
+                            egui_glass::GlassSlider::new(&mut self.dec_buffers_f[i], 0.0..=32.0)
+                                .text(buffers_label)
+                                .step_by(1.0)
+                                .style(if self.dark {
+                                    egui_glass::GlassStyle::dark()
+                                } else {
+                                    egui_glass::GlassStyle::regular()
+                                })
+                                .show(ui);
+                            if let Some(d) = self.cfg.decode.get_mut(fmt) {
+                                d.buffers = self.dec_buffers_f[i].round().clamp(0.0, 32.0) as u32;
+                            }
+                            ui.small(t!("decode.buffers_hint"));
+                            ui.add_space(4.0);
+                            // 供片覆盖：0 = 继承全局 `[play] feed`（落盘不写键），1-5 显式五档。
+                            // 行标题复用 `play.feed`，档位文案复用 `feed.desc_*`，继承文案走
+                            // `decode.fetch_inherit`（唯一新增 locale 键，中英对称）。
+                            ui.label(t!("play.feed"));
+                            let cur_fetch = self.cfg.decode.get(fmt).and_then(|d| d.fetch);
+                            let fetch_label = decode_fetch_desc(cur_fetch);
+                            egui_glass::GlassSlider::new(&mut self.dec_fetch_f[i], 0.0..=5.0)
+                                .text(fetch_label)
+                                .step_by(1.0)
+                                .style(if self.dark {
+                                    egui_glass::GlassStyle::dark()
+                                } else {
+                                    egui_glass::GlassStyle::regular()
+                                })
+                                .show(ui);
+                            let pos = self.dec_fetch_f[i].round().clamp(0.0, 5.0) as usize;
+                            if let Some(d) = self.cfg.decode.get_mut(fmt) {
+                                d.fetch = if pos == 0 {
+                                    None
+                                } else {
+                                    Some(FeedMode::ALL[pos - 1])
+                                };
+                            }
+                            ui.small(t!("play.feed_hint"));
                         }
                     }
-                });
-                ui.add_space(4.0);
-                // 选中 tab 的 5 控件（线程滑杆 + 零拷开关 + 流式开关 + 缓冲滑杆 +
-                // 供片覆盖滑杆；八格式全表，`qois` 帧级并行可兑现、`raw` 零解码占位）。
-                {
-                    let fmt = self.decode_tab;
-                    let i = DecodeTable::ORDER
-                        .iter()
-                        .position(|&f| f == fmt)
-                        .unwrap_or(0);
-                    ui.label(format_name(fmt));
-                    ui.small(format_desc(fmt));
-                    // 线程：0-1 拨 `DecodeThreads::ALL` 下标。
-                    ui.label(t!("decode.threads"));
-                    let cur_t = self
-                        .cfg
-                        .decode
-                        .get(fmt)
-                        .map(|d| d.threads)
-                        .unwrap_or_default();
-                    let threads_label =
-                        format!("{}: {}", cur_t.file_str(), decode_threads_desc(cur_t));
-                    egui_glass::GlassSlider::new(&mut self.dec_threads_f[i], 0.0..=1.0)
-                        .text(threads_label)
-                        .step_by(1.0)
-                        .style(if self.dark {
-                            egui_glass::GlassStyle::dark()
-                        } else {
-                            egui_glass::GlassStyle::regular()
-                        })
-                        .show(ui);
-                    if let Some(d) = self.cfg.decode.get_mut(fmt) {
-                        d.threads = DecodeThreads::ALL
-                            [self.dec_threads_f[i].round().clamp(0.0, 1.0) as usize];
-                    }
-                    ui.small(t!("decode.threads_hint"));
-                    ui.add_space(4.0);
-                    // 零拷：两颗玻璃按钮单选开关。
-                    ui.label(t!("decode.zero_copy"));
-                    let zc = self.switch_row(
-                        ui,
-                        self.cfg
-                            .decode
-                            .get(fmt)
-                            .map(|d| d.zero_copy)
-                            .unwrap_or(false),
-                        &t!("boot.on"),
-                        &t!("boot.off"),
-                    );
-                    if let Some(d) = self.cfg.decode.get_mut(fmt) {
-                        d.zero_copy = zc;
-                    }
-                    ui.small(t!("decode.desc_zero_copy"));
-                    ui.add_space(4.0);
-                    // 流式：同上单选开关。
-                    ui.label(t!("decode.streaming"));
-                    let st = self.switch_row(
-                        ui,
-                        self.cfg
-                            .decode
-                            .get(fmt)
-                            .map(|d| d.streaming)
-                            .unwrap_or(false),
-                        &t!("boot.on"),
-                        &t!("boot.off"),
-                    );
-                    if let Some(d) = self.cfg.decode.get_mut(fmt) {
-                        d.streaming = st;
-                    }
-                    ui.small(t!("decode.desc_streaming"));
-                    ui.add_space(4.0);
-                    // 缓冲：0 = 跟随 `tune.window`，1-32 显式按格式覆盖。
-                    ui.label(t!("decode.buffers"));
-                    let cur_b = self
-                        .cfg
-                        .decode
-                        .get(fmt)
-                        .map(|d| d.buffers.min(32))
-                        .unwrap_or(0);
-                    let buffers_label = if cur_b == 0 {
-                        t!("decode.buffers_follow", v = self.cfg.render.tune.window).into_owned()
-                    } else {
-                        format!("{} buffers", cur_b)
-                    };
-                    egui_glass::GlassSlider::new(&mut self.dec_buffers_f[i], 0.0..=32.0)
-                        .text(buffers_label)
-                        .step_by(1.0)
-                        .style(if self.dark {
-                            egui_glass::GlassStyle::dark()
-                        } else {
-                            egui_glass::GlassStyle::regular()
-                        })
-                        .show(ui);
-                    if let Some(d) = self.cfg.decode.get_mut(fmt) {
-                        d.buffers = self.dec_buffers_f[i].round().clamp(0.0, 32.0) as u32;
-                    }
-                    ui.small(t!("decode.buffers_hint"));
-                    ui.add_space(4.0);
-                    // 供片覆盖：0 = 继承全局 `[play] feed`（落盘不写键），1-5 显式五档。
-                    // 行标题复用 `play.feed`，档位文案复用 `feed.desc_*`，继承文案走
-                    // `decode.fetch_inherit`（唯一新增 locale 键，中英对称）。
-                    ui.label(t!("play.feed"));
-                    let cur_fetch = self.cfg.decode.get(fmt).and_then(|d| d.fetch);
-                    let fetch_label = decode_fetch_desc(cur_fetch);
-                    egui_glass::GlassSlider::new(&mut self.dec_fetch_f[i], 0.0..=5.0)
-                        .text(fetch_label)
-                        .step_by(1.0)
-                        .style(if self.dark {
-                            egui_glass::GlassStyle::dark()
-                        } else {
-                            egui_glass::GlassStyle::regular()
-                        })
-                        .show(ui);
-                    let pos = self.dec_fetch_f[i].round().clamp(0.0, 5.0) as usize;
-                    if let Some(d) = self.cfg.decode.get_mut(fmt) {
-                        d.fetch = if pos == 0 {
-                            None
-                        } else {
-                            Some(FeedMode::ALL[pos - 1])
-                        };
-                    }
-                    ui.small(t!("play.feed_hint"));
                 }
             }
             Page::Wallpaper => {
