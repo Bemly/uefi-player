@@ -421,6 +421,12 @@ impl MediaFormat {
             Self::Avc => "avc",
         }
     }
+
+    /// 是否走 MP4 容器（GUI 主行收拢为一颗“MP4 视频”按钮，子行再单选三轨；
+    /// 固件 schema 不变，落盘仍是 `hevc`/`avc`/`vp9` 小写串）。
+    pub(crate) fn is_mp4(self) -> bool {
+        matches!(self, Self::Hevc | Self::Avc | Self::Vp9)
+    }
 }
 
 pub(crate) fn default_play_format() -> MediaFormat {

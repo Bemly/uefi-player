@@ -177,18 +177,34 @@ impl App {
         }
     }
 
-    /// 片源格式行（播放/壁纸共用八按钮，与下同形；
-    /// 壁纸页曾只有 qois/raw 双按钮，现八格式全通故合流）。
+    /// 片源格式行（播放/壁纸共用六按钮，与下同形；
+    /// 壁纸页曾只有 qois/raw 双按钮，现八格式全通故合流，MP4 三轨收拢为一钮）。
     pub(crate) fn format_row(&mut self, ui: &mut egui::Ui, cur: MediaFormat) -> MediaFormat {
         self.format_row_all(ui, cur)
     }
 
-    /// 播放片源行（八颗玻璃按钮，横向自动换行；八格式全可用，
+    /// 播放片源行（六颗玻璃按钮，横向自动换行；走 MP4 容器的三轨收拢为一颗
+    /// “MP4 视频”钮（选中态 = 当前是三轨任一），点中才在下方子行单选三轨；
     /// 无 GlassButton 禁用态问题故不置灰——blt 行置灰是引擎对照，本行无此需求）。
     pub(crate) fn format_row_all(&mut self, ui: &mut egui::Ui, cur: MediaFormat) -> MediaFormat {
+        const MAIN: [MediaFormat; 5] = [
+            MediaFormat::Qois,
+            MediaFormat::Raw,
+            MediaFormat::H263,
+            MediaFormat::Mpeg2v,
+            MediaFormat::Theora,
+        ];
         let mut next = cur;
         ui.horizontal_wrapped(|ui| {
-            for v in MediaFormat::ALL {
+            for v in MAIN.iter().copied() {
+                // MP4 钮插在 Raw 之后（原 Hevc 槽位），保持其余五钮相对顺序不动。
+                if v == MediaFormat::H263 {
+                    let mp4_sel = cur.is_mp4();
+                    if self.option_button(ui, mp4_sel, &t!("format.mp4")) {
+                        // 已在组内则保持子选项不动，否则默认落 Hevc（子行首颗）。
+                        next = if mp4_sel { cur } else { MediaFormat::Hevc };
+                    }
+                }
                 if self.option_button(ui, cur == v, &crate::text::format_name(v)) {
                     next = v;
                 }
