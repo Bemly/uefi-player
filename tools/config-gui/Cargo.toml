@@ -53,19 +53,22 @@ description = "player.toml 跨平台可视化编辑器（host 工具，与 UEFI 
 #   `egui_extras` 表格排序器（要拖入整套表格件，与玻璃行不搭，故不用）。
 #   用法：`dnd(ui, id).with_animation_time(0.0).show(下标 id 行, …)`，
 #   落点 `update_vec` 写回（重复路径靠下标 id 区分，见 `playlist.rs` 头注释）。
-# - 动态背景硬解（host macOS；固件侧不受影响）：
-#   `gpu-video 0.4`（Vulkan Video + wgpu 29，H.264 解码帧不出显存）搜过但不可用——
-#   上游兼容表只有 Linux(NVIDIA/AMD Mesa)/Windows，macOS Metal 无 Vulkan Video，
-#   本机 `VulkanInstance::new` 即错，故不用；`egui-video 0.9`（ffmpeg6/7 + SDL2，
-#   CPU 解码，重 C 依赖，要 release opt-level）与本仓纯 Rust 转码链相悖，故不用；
-#   `egui-sharkplayer 0.5`（libmpv2，eframe 0.35 同版，但自述 wgpu 下要经内存往返，
-#   且要系统 libmpv，而本仓 renderer 已强制 Wgpu，glow 不可用）故不用。
-#   最终用同门 `shiguredo_video_toolbox 2026.1`（Apple VideoToolbox H.264/H.265/VP9/AV1
-#   硬解，与本仓 `shiguredo_mp4` 同 vendor 同用法，MSRV 1.88 < 本仓 1.92，
-#   Apache-2.0；demux 仍复用 `shiguredo_mp4`，解码帧 NV12/I420 经 BT.601 转 RGBA
-#   后走 egui 纹理上 wgpu，`LiveBackdrop` 双遍即折射到玻璃上）。
-#   macOS-only（VideoToolbox 框架），故走 `target.cfg(macos)`，Linux/Windows
-#   构建不受影响（非 macOS 静默回退纯色底）。
+# - 动态背景硬解（host 全平台，固件侧不受影响；GUI 内零软解，用户拍板）：
+#   macOS 用同门 `shiguredo_video_toolbox 2026.1`（Apple VideoToolbox H.264 硬解，
+#   与本仓 `shiguredo_mp4` 同 vendor 同用法，MSRV 1.88 < 本仓 1.92，Apache-2.0）。
+#   Win/Linux 用 `gpu-video 0.4`（Vulkan Video H.264 硬解 + `BytesDecoder` NV12 回读，
+#   MSRV 1.85，MIT；`default-features = false` 关 wgpu 纹理互操作——本仓经 egui 托管
+#   纹理上屏即可，无需直连 wgpu，也避开版本耦合；上游兼容表即 Linux(NVIDIA/AMD
+#   Mesa)/Windows，macOS Metal 无 Vulkan Video 故 mac 不用它）。
+#   搜过不用：`egui-video 0.9`（ffmpeg6/7 + SDL2，CPU 软解，重 C 依赖，要 release
+#   opt-level）；`egui-sharkplayer 0.5`（libmpv2，自述 wgpu 下经内存往返 + 要系统
+#   libmpv，而本仓 renderer 强制 Wgpu）；`ffmpeg-next 9`（系统 FFmpeg 动态库，
+#   brew 升版即断 ABI，且默认 CPU 软解，硬解要手写 hwdevice）；`moq-video`
+#   （MoQ 网络流编解码，本地循环用它属大炮打蚊子，且 render 要 wgpu 30 与本仓 29
+#   冲突）。demux 双边复用 `shiguredo_mp4`，NV12/I420 经 BT.601 转 RGBA 后走 egui
+#   纹理上 wgpu，`LiveBackdrop` 双遍即折射到玻璃上。
+#   任一端硬解不可用（无 Vulkan Video 驱动等）一律静默回退纯色底，绝不回退软解
+#   （`rusty_h264-decoder` 等纯 Rust CPU 路 GUI 内禁用）。
 [dependencies]
 egui_dnd = "0.16"
 eframe = { version = "0.35", default-features = false, features = ["accesskit", "default_fonts", "wgpu", "wayland", "x11"] }
@@ -93,3 +96,6 @@ toml = "1"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 shiguredo_video_toolbox = "2026.1"
+
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+gpu-video = { version = "0.4", default-features = false }
