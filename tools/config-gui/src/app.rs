@@ -5,7 +5,7 @@ use eframe::egui;
 use rust_i18n::t;
 
 use crate::gallery::GalleryState;
-use crate::make_backdrop;
+use crate::load_bg_image;
 use crate::rules::*;
 use crate::schema::*;
 use crate::text::*;
@@ -122,9 +122,6 @@ pub(crate) struct App {
     pub(crate) gallery: GalleryState,
     /// 转码状态（worker 线程跑，UI 只轮询）。
     pub(crate) transcode: TranscodeState,
-    /// 动态背景（`/Users/bemly/Movies/input.mp4` 前 40s 循环硬解，见 `video_bg`；
-    /// 缺片/非 macOS 静默回退纯色，不挡任何流程）。
-    pub(crate) video_bg: crate::video_bg::VideoBg,
 }
 
 impl App {
@@ -160,10 +157,9 @@ impl App {
         if let Some(r) = cc.wgpu_render_state.as_ref() {
             // MSAA 数与 NativeOptions 一致（默认不开 MSAA，传 1）。
             egui_glass::init(r, 1);
-            // 顺序按官方要求：init → live → set_backdrop（静态底只当兜底，
-            // live 每帧都跑时实际采的是离屏页面）。
+            // 顺序按官方要求：init → live → set_backdrop（背景图，见 `load_bg_image`）。
             live = Some(egui_glass::LiveBackdrop::new(r, Some(live_fonts)));
-            egui_glass::set_backdrop(&cc.egui_ctx, r, &make_backdrop(false));
+            egui_glass::set_backdrop(&cc.egui_ctx, r, &load_bg_image());
             glass = true;
             rs = Some(r.clone());
         }
@@ -198,7 +194,6 @@ impl App {
             live,
             gallery: GalleryState::new(),
             transcode: TranscodeState::new(),
-            video_bg: crate::video_bg::VideoBg::new(),
         };
         // 启动时若工作目录下已有 player.toml，直接载入。
         if std::path::Path::new(&app.path).exists() {
@@ -501,7 +496,8 @@ impl App {
                     egui::Visuals::light()
                 });
                 if let Some(rs) = self.rs.as_ref() {
-                    egui_glass::set_backdrop(ctx, rs, &make_backdrop(self.dark));
+                    // 背景图与主题无关（恒为片源第一帧），只重传同一张。
+                    egui_glass::set_backdrop(ctx, rs, &load_bg_image());
                 }
                 self.status = t!(
                     "status.theme",
@@ -510,11 +506,6 @@ impl App {
                     } else {
                         t!("theme.light")
                     },
-                    bg = if self.dark {
-                        t!("theme.bg_black")
-                    } else {
-                        t!("theme.bg_white")
-                    }
                 )
                 .into_owned();
             }
@@ -641,49 +632,11 @@ impl App {
 
     /// 实时背景的页面层：只留一句提示做折射燃料。`live.run` 会让它跑两遍
     /// （可见 + 离屏），所以这里禁止任何写状态、禁止放玻璃件、
-    /// 禁止放可交互控件——只许纯文本 + 当前视频帧（只读）。
+    /// 禁止放可交互控件——只许纯文本。
     /// 摘要行只放左侧导航卡，不在这里重复占右侧空间。
-    /// 动态背景（`video_bg`）：有首帧即按 aspect-fill 铺满 `max_rect`（与
-    /// `show_backdrop` 同式，居中裁边），玻璃经 Live 双遍即折射到它；
-    /// 无帧/回退即纯色底（深浅跟主题走，不挡任何流程）。
+    /// 背景图由 glass 自家的 `show_backdrop` 满窗画（见 `ui()`），这里只出字：
+    /// 可见遍字压在图上，twin 遍字进折射源（纸罩两遍同画，见 `ui()`）。
     pub(crate) fn page_backdrop(&self, page: &mut egui::Ui) {
-        let rect = page.max_rect();
-        if let Some(tex) = self.video_bg.texture.as_ref() {
-            let [iw, ih] = tex.size();
-            if iw > 0 && ih > 0 {
-                let scale = (rect.width() / iw as f32).max(rect.height() / ih as f32);
-                let sized = egui::vec2(iw as f32 * scale, ih as f32 * scale);
-                let image_rect = egui::Rect::from_center_size(rect.center(), sized);
-                page.painter().image(
-                    tex.id(),
-                    image_rect,
-                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                    egui::Color32::WHITE,
-                );
-                // 暗角：视频上压半透明纸，保证提示字可读（纯绘制，无状态）。
-                page.painter().rect_filled(
-                    rect,
-                    0.0,
-                    if self.dark {
-                        egui::Color32::from_black_alpha(120)
-                    } else {
-                        egui::Color32::from_white_alpha(120)
-                    },
-                );
-                page.add_space(4.0);
-                page.label(egui::RichText::new(t!("sum.hint")).weak().small());
-                page.add_space(4.0);
-                return;
-            }
-        }
-        // 回退：窗口清屏色不可控（实测透黑），两遍（可见 + 离屏）用同一底，
-        // 映射才一致。深浅跟主题走。
-        let bg = if self.dark {
-            egui::Color32::BLACK
-        } else {
-            egui::Color32::WHITE
-        };
-        page.painter().rect_filled(page.max_rect(), 0.0, bg);
         page.add_space(4.0);
         page.label(egui::RichText::new(t!("sum.hint")).weak().small());
         page.add_space(4.0);
@@ -732,6 +685,21 @@ impl eframe::App for App {
 
         // （实时背景在中央面板内容头，见下。）
 
+        // 全窗背景图（glass 自家 `show_backdrop` + 纸罩）：必须在全部面板之前画——
+        // 同层按代码顺序出画，先画的在下（血泪：画在面板之间会盖住前面的面板，
+        // 之前全屏图盖面板就是这个原因，与层无关）。纯绘制不占布局。
+        let screen = ui.ctx().viewport_rect();
+        egui_glass::show_backdrop(ui, screen);
+        ui.painter().rect_filled(
+            screen,
+            0.0,
+            if self.dark {
+                egui::Color32::from_black_alpha(120)
+            } else {
+                egui::Color32::from_white_alpha(120)
+            },
+        );
+
         // 顶栏：文件动作工具条胶囊（误伤恢复：真凶是 Panel 分隔线，现已全关，
         // 胶囊本身圆角无直边）。
         let mut act = Action::None;
@@ -749,8 +717,6 @@ impl eframe::App for App {
                 });
                 ui.add_space(8.0);
             });
-
-        // 底栏：状态胶囊（同上，误伤恢复）。
         egui::Panel::bottom("status")
             .frame(egui::Frame::NONE)
             .resizable(false)
@@ -822,8 +788,6 @@ impl eframe::App for App {
         // 独立 Area 实测也会打乱 Panel 布局（原因未明，宁可信截屏），
         // 只有中央面板内容头是安全的：兄弟 Panel 已先占位，内部只是多滚一段。
         // 页面是弱化摘要纸（折射燃料），表单跟在后面正常滚。
-        // 动态背景推进在面板外做（`live.run` 闭包禁写状态，时钟只能在外推）。
-        self.video_bg.tick(ui.ctx());
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE)
             .show(ui, |ui| {
@@ -840,7 +804,20 @@ impl eframe::App for App {
                         } else {
                             egui::Color32::WHITE
                         };
-                        live.run(ui, clear, |page| self.page_backdrop(page));
+                        live.run(ui, clear, |page| {
+                            // twin 遍纸罩（与可见遍同一块，保证折射与所见一致；
+                            // 纯色绘制，`bis3` 实测不影响面板）。
+                            page.painter().rect_filled(
+                                screen,
+                                0.0,
+                                if self.dark {
+                                    egui::Color32::from_black_alpha(120)
+                                } else {
+                                    egui::Color32::from_white_alpha(120)
+                                },
+                            );
+                            self.page_backdrop(page)
+                        });
                     }
                     // 解码 tab 条钉死在滚动区之外、卡片最上面（不随内容滚动）。
                     // 只能放这里：根 ui 上画会把 Panel 挤下去（见上注释），

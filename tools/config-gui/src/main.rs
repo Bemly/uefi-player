@@ -57,16 +57,24 @@ mod rules;
 mod schema;
 mod text;
 mod transcode;
-mod video_bg;
 
-/// 纯色背景：白底/黑底。均匀底玻璃近乎平（官方原话），深浅色模式优先，不带资源文件。
-fn make_backdrop(dark: bool) -> egui::ColorImage {
-    let c = if dark {
-        egui::Color32::BLACK
-    } else {
-        egui::Color32::WHITE
+/// 背景图：片源第一帧（构建时用 ffmpeg 从片源抽好，见 `assets/bg.png`；
+/// `ffmpeg -i input.mp4 -vframes 1 assets/bg.png`，1280x720，约 600KB）。
+/// 直接喂 glass 自家的 `set_backdrop`（不另起模块、不手写纹理管线）。
+/// 解失败就纯白 256 底（编进包断不了，不断任何流程）。
+fn load_bg_image() -> egui::ColorImage {
+    let fallback = egui::ColorImage::filled([256, 256], egui::Color32::WHITE);
+    let img = match image::load_from_memory(include_bytes!("../assets/bg.png")) {
+        Ok(i) => i.to_rgba8(),
+        Err(_) => return fallback,
     };
-    egui::ColorImage::filled([256, 256], c)
+    if img.width() == 0 || img.height() == 0 {
+        return fallback;
+    }
+    egui::ColorImage::from_rgba_unmultiplied(
+        [img.width() as usize, img.height() as usize],
+        img.as_raw(),
+    )
 }
 
 /// 窗口图标：`assets/icon-256.rgba` 预烘焙 256x256 RGBA，直编二进制零新依赖
@@ -95,4 +103,17 @@ fn main() -> eframe::Result<()> {
         opts,
         Box::new(|cc| Ok(Box::new(App::new(cc)))),
     )
+}
+
+#[cfg(test)]
+mod bg_tests {
+    #[test]
+    fn bundled_first_frame_decodes() {
+        // 打包图必须可解且几何正确（坏了构建期即知，运行时不再检查）。
+        let bytes = include_bytes!("../assets/bg.png");
+        // PNG 魔数。
+        assert_eq!(&bytes[..8], &[137, 80, 78, 71, 13, 10, 26, 10]);
+        let img = image::load_from_memory(bytes).expect("bg.png decodes");
+        assert_eq!((img.width(), img.height()), (1280, 720));
+    }
 }
