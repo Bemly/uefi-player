@@ -439,6 +439,7 @@ impl App {
 
     /// 转码页：源行 + 探针行 + 目标行 + 输出行 + 编码按钮 + 状态。
     pub(crate) fn transcode_page(&mut self, ui: &mut eframe::egui::Ui) {
+        use eframe::egui;
         use rust_i18n::t;
         // 先收 worker 进度（UI 线程只 try_recv，不阻塞）。
         self.poll_transcode_job();
@@ -530,7 +531,19 @@ impl App {
                 }
             }
             if let Some((done, total)) = self.transcode.progress {
-                ui.label(format!("{done}/{total}"));
+                // 玻璃库无进度件（egui_glass 0.1.5 只有 Glass/Button/Toolbar/Slider，
+                // 本地 registry 源码确认过），纯展示条用原语 ProgressBar（非交互件，
+                // 不在禁用之列；嵌在同一行内，不另起 Panel）。
+                let frac = if total > 0 {
+                    (done as f32 / total as f32).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                ui.add(
+                    egui::ProgressBar::new(frac)
+                        .text(format!("{done}/{total}"))
+                        .desired_width(180.0),
+                );
             }
         });
         if !self.transcode.status.is_empty() {
