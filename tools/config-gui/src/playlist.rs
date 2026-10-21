@@ -57,7 +57,7 @@ pub(crate) fn relativize(dir: &str, abs: &std::path::Path) -> String {
 }
 
 impl App {
-    /// 循环模式行（`GlassSlider` 0-2 拨 `LoopMode::ALL` 下标 + `GlassButton`
+    /// 循环模式行（`content_slider` 0-2 拨 `LoopMode::ALL` 下标 + `GlassButton`
     /// 三颗单选镜像；复用加速/供片滑杆模式，无新件）。
     fn loop_slider_row(
         &mut self,
@@ -67,15 +67,7 @@ impl App {
         hint_key: &str,
     ) -> LoopMode {
         let label = format!("{}: {}", cur.file_str(), crate::text::loop_desc(cur));
-        egui_glass::GlassSlider::new(mirror, 0.0..=2.0)
-            .text(label)
-            .step_by(1.0)
-            .style(if self.dark {
-                egui_glass::GlassStyle::dark()
-            } else {
-                egui_glass::GlassStyle::regular()
-            })
-            .show(ui);
+        Self::content_slider(ui, self.dark, mirror, 0.0..=2.0, label, Some(1.0));
         let mut next = LoopMode::ALL[mirror.round().clamp(0.0, 2.0) as usize];
         ui.horizontal_wrapped(|ui| {
             for v in LoopMode::ALL {

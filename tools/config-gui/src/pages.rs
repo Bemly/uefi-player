@@ -31,15 +31,14 @@ impl App {
                 // 档位滑杆：0-30 拨 `ALL` 下标，文本行同步显示当前档 + 说明。
                 let cur = self.cfg.accel.level;
                 let accel_label = format!("{}: {}", cur.file_str(), level_desc(cur));
-                egui_glass::GlassSlider::new(&mut self.accel_f, 0.0..=30.0)
-                    .text(accel_label)
-                    .step_by(1.0)
-                    .style(if self.dark {
-                        egui_glass::GlassStyle::dark()
-                    } else {
-                        egui_glass::GlassStyle::regular()
-                    })
-                    .show(ui);
+                Self::content_slider(
+                    ui,
+                    self.dark,
+                    &mut self.accel_f,
+                    0.0..=30.0,
+                    accel_label,
+                    Some(1.0),
+                );
                 self.cfg.accel.level =
                     AccelLevel::ALL[self.accel_f.round().clamp(0.0, 30.0) as usize];
                 self.content_small(ui, t!("accel.auto_level"));
@@ -136,15 +135,14 @@ impl App {
                                 t!("sched.cores"),
                                 cores_text(self.cfg.schedule.cores)
                             );
-                            egui_glass::GlassSlider::new(&mut self.sched_cores_f, 0.0..=64.0)
-                                .text(cores_label)
-                                .step_by(1.0)
-                                .style(if self.dark {
-                                    egui_glass::GlassStyle::dark()
-                                } else {
-                                    egui_glass::GlassStyle::regular()
-                                })
-                                .show(ui);
+                            Self::content_slider(
+                                ui,
+                                self.dark,
+                                &mut self.sched_cores_f,
+                                0.0..=64.0,
+                                cores_label,
+                                Some(1.0),
+                            );
                             self.cfg.schedule.cores =
                                 self.sched_cores_f.round().clamp(0.0, 64.0) as u32;
                             self.content_small(ui, cores_desc());
@@ -222,45 +220,42 @@ impl App {
                     if vis.frames {
                         self.content_label(ui, t!("tune.frames"));
                         let frames_label = format!("{} frames", self.cfg.render.tune.frames);
-                        egui_glass::GlassSlider::new(&mut self.tune_frames_f, 1.0..=120.0)
-                            .text(frames_label)
-                            .step_by(1.0)
-                            .style(if self.dark {
-                                egui_glass::GlassStyle::dark()
-                            } else {
-                                egui_glass::GlassStyle::regular()
-                            })
-                            .show(ui);
+                        Self::content_slider(
+                            ui,
+                            self.dark,
+                            &mut self.tune_frames_f,
+                            1.0..=120.0,
+                            frames_label,
+                            Some(1.0),
+                        );
                         self.cfg.render.tune.frames =
                             self.tune_frames_f.round().clamp(1.0, 120.0) as u32;
                     }
                     if vis.tile {
                         self.content_label(ui, t!("tune.tile_rows"));
                         let tile_label = format!("{} rows", self.cfg.render.tune.tile_rows);
-                        egui_glass::GlassSlider::new(&mut self.tune_tile_f, 8.0..=512.0)
-                            .text(tile_label)
-                            .step_by(8.0)
-                            .style(if self.dark {
-                                egui_glass::GlassStyle::dark()
-                            } else {
-                                egui_glass::GlassStyle::regular()
-                            })
-                            .show(ui);
+                        Self::content_slider(
+                            ui,
+                            self.dark,
+                            &mut self.tune_tile_f,
+                            8.0..=512.0,
+                            tile_label,
+                            Some(8.0),
+                        );
                         self.cfg.render.tune.tile_rows =
                             self.tune_tile_f.round().clamp(8.0, 512.0) as u32;
                     }
                     if vis.vfps {
                         self.content_label(ui, t!("tune.vsync_fps"));
                         let vsync_fps_label = format!("{} fps", self.cfg.render.tune.vsync_fps);
-                        egui_glass::GlassSlider::new(&mut self.tune_vsync_fps_f, 15.0..=240.0)
-                            .text(vsync_fps_label)
-                            .step_by(1.0)
-                            .style(if self.dark {
-                                egui_glass::GlassStyle::dark()
-                            } else {
-                                egui_glass::GlassStyle::regular()
-                            })
-                            .show(ui);
+                        Self::content_slider(
+                            ui,
+                            self.dark,
+                            &mut self.tune_vsync_fps_f,
+                            15.0..=240.0,
+                            vsync_fps_label,
+                            Some(1.0),
+                        );
                         self.cfg.render.tune.vsync_fps =
                             self.tune_vsync_fps_f.round().clamp(15.0, 240.0) as u32;
                     }
@@ -271,15 +266,14 @@ impl App {
                         } else {
                             format!("{} buffers", self.cfg.render.tune.buffers)
                         };
-                        egui_glass::GlassSlider::new(&mut self.tune_buffers_f, 0.0..=16.0)
-                            .text(buffers_label)
-                            .step_by(1.0)
-                            .style(if self.dark {
-                                egui_glass::GlassStyle::dark()
-                            } else {
-                                egui_glass::GlassStyle::regular()
-                            })
-                            .show(ui);
+                        Self::content_slider(
+                            ui,
+                            self.dark,
+                            &mut self.tune_buffers_f,
+                            0.0..=16.0,
+                            buffers_label,
+                            Some(1.0),
+                        );
                         self.cfg.render.tune.buffers =
                             self.tune_buffers_f.round().clamp(0.0, 16.0) as u32;
                     }
@@ -338,15 +332,14 @@ impl App {
                         // 三段滑杆：0 = auto，1-240 = 限速，241 = max。
                         // 文本先算好：滑杆拿 &mut play_f 时不能再借 self。
                         let play_label = self.play_text();
-                        egui_glass::GlassSlider::new(&mut self.play_f, 0.0..=241.0)
-                            .text(play_label)
-                            .step_by(1.0)
-                            .style(if self.dark {
-                                egui_glass::GlassStyle::dark()
-                            } else {
-                                egui_glass::GlassStyle::regular()
-                            })
-                            .show(ui);
+                        Self::content_slider(
+                            ui,
+                            self.dark,
+                            &mut self.play_f,
+                            0.0..=241.0,
+                            play_label,
+                            Some(1.0),
+                        );
                         let pos = self.play_f.round().clamp(0.0, 241.0) as u32;
                         self.cfg.play.fps = match pos {
                             0 => String::from("auto"),
@@ -376,15 +369,14 @@ impl App {
                             cur_feed.file_str(),
                             crate::text::feed_desc(cur_feed)
                         );
-                        egui_glass::GlassSlider::new(&mut self.feed_f, 0.0..=4.0)
-                            .text(feed_label)
-                            .step_by(1.0)
-                            .style(if self.dark {
-                                egui_glass::GlassStyle::dark()
-                            } else {
-                                egui_glass::GlassStyle::regular()
-                            })
-                            .show(ui);
+                        Self::content_slider(
+                            ui,
+                            self.dark,
+                            &mut self.feed_f,
+                            0.0..=4.0,
+                            feed_label,
+                            Some(1.0),
+                        );
                         self.cfg.play.feed =
                             FeedMode::ALL[self.feed_f.round().clamp(0.0, 4.0) as usize];
                         self.content_small(ui, t!("play.feed_hint"));
@@ -409,15 +401,14 @@ impl App {
                                 .unwrap_or_default();
                             let threads_label =
                                 format!("{}: {}", cur_t.file_str(), decode_threads_desc(cur_t));
-                            egui_glass::GlassSlider::new(&mut self.dec_threads_f[i], 0.0..=1.0)
-                                .text(threads_label)
-                                .step_by(1.0)
-                                .style(if self.dark {
-                                    egui_glass::GlassStyle::dark()
-                                } else {
-                                    egui_glass::GlassStyle::regular()
-                                })
-                                .show(ui);
+                            Self::content_slider(
+                                ui,
+                                self.dark,
+                                &mut self.dec_threads_f[i],
+                                0.0..=1.0,
+                                threads_label,
+                                Some(1.0),
+                            );
                             if let Some(d) = self.cfg.decode.get_mut(fmt) {
                                 d.threads = DecodeThreads::ALL
                                     [self.dec_threads_f[i].round().clamp(0.0, 1.0) as usize];
@@ -472,15 +463,14 @@ impl App {
                             } else {
                                 format!("{} buffers", cur_b)
                             };
-                            egui_glass::GlassSlider::new(&mut self.dec_buffers_f[i], 0.0..=32.0)
-                                .text(buffers_label)
-                                .step_by(1.0)
-                                .style(if self.dark {
-                                    egui_glass::GlassStyle::dark()
-                                } else {
-                                    egui_glass::GlassStyle::regular()
-                                })
-                                .show(ui);
+                            Self::content_slider(
+                                ui,
+                                self.dark,
+                                &mut self.dec_buffers_f[i],
+                                0.0..=32.0,
+                                buffers_label,
+                                Some(1.0),
+                            );
                             if let Some(d) = self.cfg.decode.get_mut(fmt) {
                                 d.buffers = self.dec_buffers_f[i].round().clamp(0.0, 32.0) as u32;
                             }
@@ -492,15 +482,14 @@ impl App {
                             self.content_label(ui, t!("play.feed"));
                             let cur_fetch = self.cfg.decode.get(fmt).and_then(|d| d.fetch);
                             let fetch_label = decode_fetch_desc(cur_fetch);
-                            egui_glass::GlassSlider::new(&mut self.dec_fetch_f[i], 0.0..=5.0)
-                                .text(fetch_label)
-                                .step_by(1.0)
-                                .style(if self.dark {
-                                    egui_glass::GlassStyle::dark()
-                                } else {
-                                    egui_glass::GlassStyle::regular()
-                                })
-                                .show(ui);
+                            Self::content_slider(
+                                ui,
+                                self.dark,
+                                &mut self.dec_fetch_f[i],
+                                0.0..=5.0,
+                                fetch_label,
+                                Some(1.0),
+                            );
                             let pos = self.dec_fetch_f[i].round().clamp(0.0, 5.0) as usize;
                             if let Some(d) = self.cfg.decode.get_mut(fmt) {
                                 d.fetch = if pos == 0 {
@@ -538,15 +527,14 @@ impl App {
                     self.content_label(ui, t!("wallpaper.fps"));
                     // 三段滑杆（与播放帧率同构）：0 = auto（跟 vsync），1-240 = 限速，241 = max。
                     let fps_label = self.wp_fps_text();
-                    egui_glass::GlassSlider::new(&mut self.wp_fps_f, 0.0..=241.0)
-                        .text(fps_label)
-                        .step_by(1.0)
-                        .style(if self.dark {
-                            egui_glass::GlassStyle::dark()
-                        } else {
-                            egui_glass::GlassStyle::regular()
-                        })
-                        .show(ui);
+                    Self::content_slider(
+                        ui,
+                        self.dark,
+                        &mut self.wp_fps_f,
+                        0.0..=241.0,
+                        fps_label,
+                        Some(1.0),
+                    );
                     let pos = self.wp_fps_f.round().clamp(0.0, 241.0) as u32;
                     self.cfg.wallpaper.fps = match pos {
                         0 => String::from("auto"),
@@ -562,15 +550,14 @@ impl App {
                     } else {
                         format!("{} frames", self.cfg.wallpaper.preload)
                     };
-                    egui_glass::GlassSlider::new(&mut self.wp_preload_f, 0.0..=32.0)
-                        .text(preload_label)
-                        .step_by(1.0)
-                        .style(if self.dark {
-                            egui_glass::GlassStyle::dark()
-                        } else {
-                            egui_glass::GlassStyle::regular()
-                        })
-                        .show(ui);
+                    Self::content_slider(
+                        ui,
+                        self.dark,
+                        &mut self.wp_preload_f,
+                        0.0..=32.0,
+                        preload_label,
+                        Some(1.0),
+                    );
                     self.cfg.wallpaper.preload = self.wp_preload_f.round().clamp(0.0, 32.0) as u32;
                     self.content_small(ui, t!("wallpaper.preload_hint"));
                     ui.add_space(10.0);

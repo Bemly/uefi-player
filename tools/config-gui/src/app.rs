@@ -661,8 +661,23 @@ impl App {
         } else {
             (egui::Color32::BLACK, egui::Color32::WHITE)
         };
+        // 剥掉显式颜色再排版：整段走占位色，绘制色才能全覆盖——
+        // 否则 `weak` 灰的描边也会被烤成灰色（2026-10-21 故障）。
+        // 字号/换行保留（`fallback` 只管无样式段）。
         let wt: egui::WidgetText = text.into();
-        let galley = wt.into_galley(ui, None, ui.available_width(), fallback);
+        let mut job = std::sync::Arc::unwrap_or_clone(wt.into_layout_job(
+            ui.style(),
+            fallback.into(),
+            ui.text_valign(),
+        ));
+        for s in &mut job.sections {
+            s.format.color = egui::Color32::PLACEHOLDER;
+        }
+        job.wrap = egui::text::TextWrapping::from_wrap_mode_and_width(
+            ui.wrap_mode(),
+            ui.available_width(),
+        );
+        let galley = ui.ctx().fonts_mut(|f| f.layout_job(job));
         let size = galley.size();
         let (rect, response) = ui.allocate_exact_size(size, egui::Sense::hover());
         if ui.is_rect_visible(rect) {
@@ -728,6 +743,162 @@ impl App {
         text: impl Into<egui::WidgetText>,
     ) -> egui::Response {
         self.outlined(ui, text, egui::TextStyle::Monospace)
+    }
+
+    /// 中央滑杆（描边表头版）：复刻 `GlassSlider::show` 的布局/交互/绘制
+    /// （头行左文 + 右值编辑 + 40 高玻璃滑块，`step` 同语义），
+    /// 唯一差别是表头左文走描边——库内 `ui.label` 无描边可挂，
+    /// 表头直接画在透明底图上，不描根本看不清（2026-10-21 故障）。
+    /// 常数与库内同值（`CONTROL_HEIGHT 40 / THUMB 16 / ASPECT 0.625`），
+    /// 库 pin 死（见根 `Cargo.toml`），变了这里同步跟。
+    /// 关联函数（不借 `self`）：调用点多为 `&mut self` 方法内，
+    /// 直接传 `self.dark` + `&mut self.x_f`，字段借用不打架。
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn content_slider(
+        ui: &mut egui::Ui,
+        dark: bool,
+        value: &mut f32,
+        range: std::ops::RangeInclusive<f32>,
+        header: String,
+        step: Option<f64>,
+    ) -> egui::Response {
+        let style = if dark {
+            egui_glass::GlassStyle::dark()
+        } else {
+            egui_glass::GlassStyle::regular()
+        };
+        let old_value = *value;
+        let width = ui.available_width().max(64.0);
+        let mut response = ui
+            .vertical(|ui| {
+                ui.set_width(width);
+                let header_resp = ui.horizontal(|ui| {
+                    let label = Self::outlined_ui(ui, dark, header.clone(), egui::TextStyle::Body);
+                    let v = ui
+                        .with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let span = (f64::from(*range.end()) - f64::from(*range.start())).abs();
+                            ui.add(
+                                egui::DragValue::new(value)
+                                    .range(range.clone())
+                                    .speed(step.unwrap_or(span / 200.0))
+                                    .max_decimals(3),
+                            )
+                        })
+                        .inner;
+                    v.labelled_by(label.id)
+                });
+                let mut response = ui
+                    .scope(|ui| {
+                        ui.set_opacity(0.0);
+                        ui.spacing_mut().slider_width = width;
+                        ui.spacing_mut().interact_size.y = 40.0;
+                        let mut slider = egui::Slider::new(value, range.clone())
+                            .show_value(false)
+                            .handle_shape(egui::style::HandleShape::Rect {
+                                aspect_ratio: 0.625,
+                            });
+                        if let Some(st) = step {
+                            slider = slider.step_by(st);
+                        }
+                        ui.add(slider)
+                    })
+                    .inner;
+                response.widget_info(|| {
+                    egui::WidgetInfo::slider(ui.is_enabled(), f64::from(*value), &header)
+                });
+                if ui.is_rect_visible(response.rect) {
+                    Self::paint_slider_bar(ui, *value, &response, &range, style);
+                }
+                if header_resp.inner.changed() {
+                    response.mark_changed();
+                }
+                response
+            })
+            .inner;
+        if *value != old_value {
+            response.mark_changed();
+        }
+        response
+    }
+
+    /// 滑块条绘制（库内 `paint` 同式，见上注释）。
+    fn paint_slider_bar(
+        ui: &egui::Ui,
+        value: f32,
+        response: &egui::Response,
+        range: &std::ops::RangeInclusive<f32>,
+        style: egui_glass::GlassStyle,
+    ) {
+        let rect = response.rect;
+        let dark = ui.visuals().dark_mode;
+        let accent = egui::Color32::from_rgb(0, 136, 255);
+        let track_color = if dark {
+            egui::Color32::from_white_alpha(45)
+        } else {
+            egui::Color32::from_black_alpha(26)
+        };
+        let track = egui::Rect::from_center_size(rect.center(), egui::vec2(rect.width(), 6.0));
+        ui.painter().rect_filled(track, 3.0, track_color);
+        let span = f64::from(*range.end()) - f64::from(*range.start());
+        let fraction = if span == 0.0 {
+            0.0
+        } else {
+            ((f64::from(value) - f64::from(*range.start())) / span).clamp(0.0, 1.0) as f32
+        };
+        let half_width = rect.height() / 2.5 * 0.625;
+        let x = egui::lerp(
+            (rect.left() + half_width)..=(rect.right() - half_width),
+            fraction,
+        );
+        let thumb = egui::Rect::from_center_size(
+            egui::pos2(x, rect.center().y),
+            egui::vec2(half_width * 2.0, 16.0),
+        );
+        let fill = egui::Rect::from_min_max(track.min, egui::pos2(x, track.bottom()));
+        ui.painter().rect_filled(
+            fill,
+            3.0,
+            if ui.is_enabled() { accent } else { track_color },
+        );
+        if ui.is_enabled() {
+            let style = if response.dragged() {
+                style.pressed()
+            } else if response.hovered() {
+                style.hovered()
+            } else {
+                style
+            };
+            egui_glass::paint_glass(
+                ui,
+                thumb,
+                &egui_glass::GlassStyle {
+                    tint: egui::Color32::from_rgba_unmultiplied(255, 255, 255, 245),
+                    specular: style.specular.min(0.12),
+                    border: style.border.min(0.08),
+                    shadow: style.shadow.max(0.10),
+                    shadow_radius: 6.0,
+                    shadow_offset: 2.0,
+                    ..style.capsule()
+                },
+            );
+            ui.painter().rect_stroke(
+                thumb,
+                255.0,
+                egui::Stroke::new(0.5, egui::Color32::from_white_alpha(180)),
+                egui::StrokeKind::Inside,
+            );
+        } else {
+            ui.painter()
+                .rect_filled(thumb, 255.0, ui.visuals().widgets.noninteractive.bg_fill);
+        }
+        if response.has_focus() {
+            ui.painter().rect_stroke(
+                thumb.expand(2.0),
+                255.0,
+                egui::Stroke::new(2.0, accent),
+                egui::StrokeKind::Outside,
+            );
+        }
     }
 
     pub(crate) fn do_action(&mut self, ctx: &egui::Context, act: Action) {
@@ -804,34 +975,47 @@ impl App {
         };
         ui.horizontal(|ui| {
             egui_glass::GlassToolbar::new(self.bar_style()).show(ui, |ui| {
-                // 连体胶囊：打开 → 保存 → 另存为 → 重置 → 语言。
-                if Self::icon_btn(ui, t!("toolbar.open").into_owned(), icon_folder, col).clicked() {
+                // 连体胶囊：打开 → 保存 → 另存为 → 重置 → 语言（44 圆）。
+                if Self::icon_btn(ui, t!("toolbar.open").into_owned(), icon_folder, col, 44.0)
+                    .clicked()
+                {
                     act = Action::Open;
                 }
-                if Self::icon_btn(ui, t!("toolbar.save").into_owned(), icon_save, col).clicked() {
+                if Self::icon_btn(ui, t!("toolbar.save").into_owned(), icon_save, col, 44.0)
+                    .clicked()
+                {
                     act = Action::Save;
                 }
-                if Self::icon_btn(ui, t!("toolbar.save_as").into_owned(), icon_save_as, col)
-                    .clicked()
+                if Self::icon_btn(
+                    ui,
+                    t!("toolbar.save_as").into_owned(),
+                    icon_save_as,
+                    col,
+                    44.0,
+                )
+                .clicked()
                 {
                     act = Action::SaveAs;
                 }
-                if Self::icon_btn(ui, t!("toolbar.reset").into_owned(), icon_reset, col).clicked() {
+                if Self::icon_btn(ui, t!("toolbar.reset").into_owned(), icon_reset, col, 44.0)
+                    .clicked()
+                {
                     act = Action::Reset;
                 }
                 let lang = if self.zh { "EN" } else { "中文" }.to_owned();
-                if Self::icon_btn(ui, lang, icon_globe, col).clicked() {
+                if Self::icon_btn(ui, lang, icon_globe, col, 44.0).clicked() {
                     act = Action::ToggleLang;
                 }
             });
             ui.add_space(8.0);
-            // 明暗开关单独成圆：深色下给太阳（切浅色），浅色下给月亮（切深色）。
+            // 明暗开关单独成圆（56 圆与胶囊等高）：深色下给太阳（切浅色），
+            // 浅色下给月亮（切深色）。
             let (theme_tip, theme_icon) = if self.dark {
                 (t!("toolbar.to_light").into_owned(), icon_sun as IconPaint)
             } else {
                 (t!("toolbar.to_dark").into_owned(), icon_moon as IconPaint)
             };
-            if Self::icon_btn(ui, theme_tip, theme_icon, col).clicked() {
+            if Self::icon_btn(ui, theme_tip, theme_icon, col, 56.0).clicked() {
                 act = Action::ToggleTheme;
             }
         });
@@ -839,14 +1023,18 @@ impl App {
     }
 
     /// 空文本圆形图标钮：`GlassButton::icon` 玻璃圆底 + 自绘线条图标。
+    /// `diam` 是圆直径：胶囊里用 44（库内件默认最小边），独立圆用 56
+    /// （= 44 按钮 + 工具条上下内边距 6×2，与连体胶囊等高，用户拍板）。
     fn icon_btn(
         ui: &mut egui::Ui,
         label: String,
         paint: IconPaint,
         col: egui::Color32,
+        diam: f32,
     ) -> egui::Response {
         let r = egui_glass::GlassButton::new("")
             .icon()
+            .min_size(egui::vec2(diam, diam))
             .accessible_name(label.clone())
             .show(ui)
             .on_hover_text(label);
