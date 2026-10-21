@@ -215,28 +215,6 @@ pub(crate) fn length_prefixed_to_annexb(sample: &[u8], length_size: usize) -> Ve
     out
 }
 
-/// IVF 封装（vp9 裸流 → `video.ivf`；固件读 32 字节头 + 帧头 + 负载）。
-/// tag `VP90`，版本 0，时基 1/30。
-pub(crate) fn mux_ivf(frames: &[Vec<u8>], w: u16, h: u16) -> Vec<u8> {
-    let mut out = Vec::new();
-    out.extend_from_slice(b"DKIF");
-    out.extend_from_slice(&0u16.to_le_bytes());
-    out.extend_from_slice(&32u16.to_le_bytes());
-    out.extend_from_slice(b"VP90");
-    out.extend_from_slice(&w.to_le_bytes());
-    out.extend_from_slice(&h.to_le_bytes());
-    out.extend_from_slice(&30u32.to_le_bytes());
-    out.extend_from_slice(&1u32.to_le_bytes());
-    out.extend_from_slice(&(frames.len() as u32).to_le_bytes());
-    out.extend_from_slice(&0u32.to_le_bytes());
-    for (i, f) in frames.iter().enumerate() {
-        out.extend_from_slice(&(f.len() as u32).to_le_bytes());
-        out.extend_from_slice(&(i as u64).to_le_bytes());
-        out.extend_from_slice(f);
-    }
-    out
-}
-
 #[cfg(test)]
 mod codecs_tests {
     use super::*;
@@ -279,17 +257,6 @@ mod codecs_tests {
         let units = split_annexb(&annexb);
         assert_eq!(units.len(), 2);
         assert_eq!(units[0], &[0x65, 0x88]);
-    }
-
-    #[test]
-    fn ivf_header_shape() {
-        let out = mux_ivf(&[vec![1, 2, 3]], 64, 48);
-        assert_eq!(&out[..4], b"DKIF");
-        assert_eq!(&out[8..12], b"VP90");
-        assert_eq!(u16::from_le_bytes([out[12], out[13]]), 64);
-        assert_eq!(u16::from_le_bytes([out[14], out[15]]), 48);
-        assert_eq!(u32::from_le_bytes([out[24], out[25], out[26], out[27]]), 1);
-        assert_eq!(u32::from_le_bytes([out[32], out[33], out[34], out[35]]), 3);
     }
 
     #[test]
@@ -391,8 +358,19 @@ mod codecs_tests {
             solid_yuv(64, 48, 16, 128, 128),
             solid_yuv(64, 48, 235, 128, 128),
         ];
-        let annexb = encode_hevc(&frames).expect("hevc encode");
-        assert!(!annexb.is_empty());
+        let st = encode_hevc(&frames).expect("hevc encode");
+        assert_eq!(st.samples.len(), 2);
+        let mut annexb = Vec::new();
+        for nalu in [&st.vps, &st.sps, &st.pps] {
+            annexb.extend_from_slice(&[0, 0, 0, 1]);
+            annexb.extend_from_slice(nalu);
+        }
+        for s in &st.samples {
+            for nalu in &s.nalus {
+                annexb.extend_from_slice(&[0, 0, 0, 1]);
+                annexb.extend_from_slice(nalu);
+            }
+        }
         let mut dec = rusty_h265::Decoder::new();
         dec.push_annexb(&annexb, None).expect("hevc push");
         dec.flush();
@@ -580,9 +558,10 @@ pub(crate) fn encode_avc(frames: &[Yuv420]) -> Result<AvcStream, String> {
     Ok(AvcStream { sps, pps, samples })
 }
 
-/// VP9 包（裸帧负载；IVF 封装另做）。
+/// VP9 包（裸帧负载 + 关键帧标记；MP4 stss 用）。
 pub(crate) struct Vp9PacketData {
     pub(crate) data: Vec<u8>,
+    pub(crate) keyframe: bool,
 }
 
 /// VP9 编码（`rusty_vp9`，恒质量 crf32 + lookahead 8 + speed 3；
@@ -609,7 +588,10 @@ pub(crate) fn encode_vp9(frames: &[Yuv420]) -> Result<Vec<Vp9PacketData>, String
     let mut out = Vec::new();
     loop {
         match enc.next_packet() {
-            Ok(p) => out.push(Vp9PacketData { data: p.data }),
+            Ok(p) => out.push(Vp9PacketData {
+                data: p.data,
+                keyframe: p.keyframe,
+            }),
             Err(rusty_vp9::Error::Eof) => break,
             Err(e) => return Err(format!("vp9 packet: {e:?}")),
         }
@@ -676,9 +658,23 @@ pub(crate) fn encode_theora(frames: &[Yuv420]) -> Result<TheoraStream, String> {
     })
 }
 
-/// H.265 编码（`oxideav-h265` registry；包负载拼接即 Annex-B，
-/// 解码端 `push_annexb` 照收，见测试）。
-pub(crate) fn encode_hevc(frames: &[Yuv420]) -> Result<Vec<u8>, String> {
+/// H.265 样片（长度前缀包装前形态；MP4 stss 用 keyframe）。
+pub(crate) struct HevcSample {
+    pub(crate) keyframe: bool,
+    pub(crate) nalus: Vec<Vec<u8>>,
+}
+
+/// H.265 整流（VPS/SPS/PPS + 样片；MP4 hvc1 包装另做）。
+pub(crate) struct HevcStream {
+    pub(crate) vps: Vec<u8>,
+    pub(crate) sps: Vec<u8>,
+    pub(crate) pps: Vec<u8>,
+    pub(crate) samples: Vec<HevcSample>,
+}
+
+/// H.265 编码（`oxideav-h265` registry；包负载按 Annex-B 拼，
+/// NAL 类型 32/33/34 收进参数集，19/20/21 判关键帧）。
+pub(crate) fn encode_hevc(frames: &[Yuv420]) -> Result<HevcStream, String> {
     if frames.is_empty() {
         return Err(String::from("hevc: no frames"));
     }
@@ -687,14 +683,41 @@ pub(crate) fn encode_hevc(frames: &[Yuv420]) -> Result<Vec<u8>, String> {
     params.height = Some(frames[0].h);
     let enc = oxideav_h265::make_encoder(&params).map_err(|e| e.to_string())?;
     let packets = drive_encoder(enc, frames)?;
-    let mut out = Vec::new();
+    let (mut vps, mut sps, mut pps) = (Vec::new(), Vec::new(), Vec::new());
+    let mut samples = Vec::new();
     for p in packets {
-        out.extend_from_slice(&p.data);
+        let mut nalus = Vec::new();
+        let mut keyframe = false;
+        for u in split_annexb(&p.data) {
+            if u.is_empty() {
+                continue;
+            }
+            match (u[0] >> 1) & 0x3F {
+                32 if vps.is_empty() => vps = u.to_vec(),
+                33 if sps.is_empty() => sps = u.to_vec(),
+                34 if pps.is_empty() => pps = u.to_vec(),
+                19..=21 => {
+                    keyframe = true;
+                    nalus.push(u.to_vec());
+                }
+                _ => nalus.push(u.to_vec()),
+            }
+        }
+        // 纯参数集包（若有）不计样片。
+        if !nalus.is_empty() {
+            samples.push(HevcSample { keyframe, nalus });
+        }
     }
-    if out.is_empty() {
-        return Err(String::from("hevc: no packets"));
+    if vps.is_empty() || sps.is_empty() || pps.is_empty() || samples.is_empty() {
+        return Err(String::from("hevc: missing param sets or samples"));
     }
-    Ok(out)
+    samples[0].keyframe = true;
+    Ok(HevcStream {
+        vps,
+        sps,
+        pps,
+        samples,
+    })
 }
 
 /// H.263 编码（`oxideav-h263` registry；裸流 PSC 分隔，固件认这个）。
@@ -771,9 +794,20 @@ mod codecs_readback_tests {
     /// HEVC：`oxideav-h265` 编 → `rusty_h265`（固件同系）Annex-B 解。
     #[test]
     fn hevc_firmware_readback() {
-        let bytes = encode_hevc(&[frame(64, 48), frame(64, 48)]).expect("hevc encode");
+        let st = encode_hevc(&[frame(64, 48), frame(64, 48)]).expect("hevc encode");
+        let mut annexb = Vec::new();
+        for nalu in [&st.vps, &st.sps, &st.pps] {
+            annexb.extend_from_slice(&[0, 0, 0, 1]);
+            annexb.extend_from_slice(nalu);
+        }
+        for s in &st.samples {
+            for nalu in &s.nalus {
+                annexb.extend_from_slice(&[0, 0, 0, 1]);
+                annexb.extend_from_slice(nalu);
+            }
+        }
         let mut dec = rusty_h265::Decoder::new();
-        dec.push_annexb(&bytes, None).expect("hevc push");
+        dec.push_annexb(&annexb, None).expect("hevc push");
         dec.flush();
         let mut got = 0;
         while dec.next_frame().is_ok() {

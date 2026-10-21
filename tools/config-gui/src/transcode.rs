@@ -1,15 +1,18 @@
 //! 转换编码页：片源 → 固件可播格式，落在图库（`player.toml` 同目录）。
 //!
-//! 流程：选源（图库文件/`rfd`/示例片）→ 取[start, start+take) → 解码 →
-//! 缩到 1920x1080 → 七目标编码 → 固件布局落盘（`1080p/video.*`）。
+//! 流程：选源（图库文件/`rfd`/示例片）→ 整轨解码 → 缩到 1920x1080 →
+//! 七目标编码 → 固件布局落盘（`1080p/video.*`；avc/hevc/vp9 全进 MP4）。
 //! 编码在 worker 线程跑（`mpsc` 进度回传），UI 只轮询不阻塞；取消用
-//! 原子旗标按组检查。内存纪律见 `codecs.rs` 头注释（关键帧分组+组内 30 帧段）。
-//! 件库约束同其它页（GlassButton/GlassSlider/留白，无 TextEdit/ComboBox；
+//! 原子旗标按组检查。内存纪律见 `codecs.rs` 头注释（关键帧分组 GROUP_CAP=60）。
+//! 件库约束同其它页（GlassButton/留白，无 TextEdit/ComboBox/滑杆；
 //! 路径显示只用 monospace 文本）。
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::Arc;
+
+use shiguredo_mp4::boxes::{SampleEntry, VisualSampleEntryFields};
+use shiguredo_mp4::Uint;
 
 use crate::app::App;
 use crate::codecs::*;
@@ -37,12 +40,13 @@ impl TranscodeTarget {
         Self::Theora,
         Self::Qois,
     ];
-    /// 图库相对路径（固件布局）。
+    /// 图库相对路径（固件布局；avc/hevc/vp9 同名 video.mp4，
+    /// 播哪个由 [play] format 开关决定）。
     pub(crate) fn out_path(self) -> &'static str {
         match self {
             Self::Avc => "1080p/video.mp4",
-            Self::Hevc => "1080p/video.hevc",
-            Self::Vp9 => "1080p/video.ivf",
+            Self::Hevc => "1080p/video.mp4",
+            Self::Vp9 => "1080p/video.mp4",
             Self::H263 => "1080p/video.h263",
             Self::Mpeg2v => "1080p/video.m2v",
             Self::Theora => "1080p/video.ogv",
@@ -65,7 +69,16 @@ pub(crate) fn source_accepted(name: &str) -> bool {
 /// 进度消息（worker → UI）。
 pub(crate) enum JobMsg {
     Progress { done: usize, total: usize },
+    Stage(JobStage),
     Finished(Result<JobOut, String>),
+}
+
+/// 转码阶段（进度行前缀，UI 侧配文案）。
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum JobStage {
+    Decode,
+    Encode,
+    Mux,
 }
 
 pub(crate) struct JobOut {
@@ -79,12 +92,11 @@ pub(crate) struct TranscodeJob {
     pub(crate) handle: Option<std::thread::JoinHandle<()>>,
 }
 
-/// 转码状态（`App` 持有；`start_s`/`take_s` 是滑杆镜像，`f32`）。
+/// 转码状态（`App` 持有；整文件转码，无时间窗）。
 pub(crate) struct TranscodeState {
     pub(crate) source: String,
-    pub(crate) start_s: f32,
-    pub(crate) take_s: f32,
     pub(crate) target: TranscodeTarget,
+    pub(crate) info: String,
     pub(crate) status: String,
     pub(crate) job: Option<TranscodeJob>,
     pub(crate) progress: Option<(usize, usize)>,
@@ -94,9 +106,8 @@ impl TranscodeState {
     pub(crate) fn new() -> Self {
         Self {
             source: String::new(),
-            start_s: 0.0,
-            take_s: 40.0,
             target: TranscodeTarget::Avc,
+            info: String::new(),
             status: String::new(),
             job: None,
             progress: None,
@@ -129,19 +140,15 @@ struct RawSample {
     payload: Vec<u8>,
 }
 
-/// MP4 源解码（want 三轨 + 时间窗；返回 YUV420 帧 + 实测 fps）。
-pub(crate) fn decode_mp4_range(
-    data: &[u8],
-    want: MediaFormat,
-    start_s: f64,
-    take_s: f64,
-) -> Result<DecodedClip, String> {
+/// MP4 源解码（want 三轨整轨；返回 YUV420 帧 + 实测 fps）。
+pub(crate) fn decode_mp4_track(data: &[u8], want: MediaFormat) -> Result<DecodedClip, String> {
     use shiguredo_mp4::boxes::SampleEntry;
     use shiguredo_mp4::demux::{Input, Mp4FileDemuxer};
     use shiguredo_mp4::TrackKind;
     let mut dx = Mp4FileDemuxer::new();
     dx.handle_input(Input { position: 0, data });
     let mut meta: Option<TrackMeta> = None;
+    let mut kinds: Vec<(u32, MediaFormat)> = Vec::new();
     let mut raws: Vec<RawSample> = Vec::new();
     loop {
         let s = dx.next_sample().map_err(|e| format!("mp4 demux: {e:?}"))?;
@@ -149,16 +156,24 @@ pub(crate) fn decode_mp4_range(
         if s.track.kind != TrackKind::Video {
             continue;
         }
+        // 首样片 entry 定轨类型；entry 缺省沿用同轨结论（与固件同式）。
         let kind = match s.sample_entry {
-            Some(SampleEntry::Avc1(_)) => MediaFormat::Avc,
-            Some(SampleEntry::Hev1(_)) | Some(SampleEntry::Hvc1(_)) => MediaFormat::Hevc,
-            Some(SampleEntry::Vp09(_)) | Some(SampleEntry::Vp08(_)) => MediaFormat::Vp9,
-            _ => continue,
+            Some(SampleEntry::Avc1(_)) => Some(MediaFormat::Avc),
+            Some(SampleEntry::Hev1(_)) | Some(SampleEntry::Hvc1(_)) => Some(MediaFormat::Hevc),
+            Some(SampleEntry::Vp09(_)) | Some(SampleEntry::Vp08(_)) => Some(MediaFormat::Vp9),
+            Some(_) => None,
+            None => kinds
+                .iter()
+                .find(|(id, _)| *id == s.track.track_id)
+                .map(|(_, k)| *k),
         };
+        let Some(kind) = kind else { continue };
+        if !kinds.iter().any(|(id, _)| *id == s.track.track_id) {
+            kinds.push((s.track.track_id, kind));
+        }
         if kind != want {
             continue;
         }
-        let ts = s.timestamp as f64 / s.track.timescale.get() as f64;
         if meta.is_none() {
             let (length_size, annexb_prefix) = match s.sample_entry {
                 Some(SampleEntry::Avc1(b)) => {
@@ -206,9 +221,6 @@ pub(crate) fn decode_mp4_range(
         if s.track.track_id != m.id {
             continue;
         }
-        if ts < start_s || ts >= start_s + take_s {
-            continue;
-        }
         let end = (s.data_offset as usize).saturating_add(s.data_size);
         if end > data.len() {
             continue;
@@ -221,35 +233,20 @@ pub(crate) fn decode_mp4_range(
     }
     let m = meta.ok_or_else(|| String::from("mp4: no wanted video track"))?;
     if raws.is_empty() {
-        return Err(String::from("mp4: no samples in range"));
+        return Err(String::from("mp4: no samples in track"));
     }
-    // fps：窗内平均样片间隔。
+    // fps：全轨平均样片间隔。
     let total_dur: f64 = raws.iter().map(|r| r.dur).sum();
     let fps = if total_dur > 0.0 {
         (raws.len() as f64 / total_dur).round().clamp(1.0, 120.0) as u32
     } else {
         30
     };
-    // 关键帧分组（硬切封顶，超了后面警告）。
-    let mut groups: Vec<Vec<RawSample>> = Vec::new();
-    let mut capped = false;
+    // 关键帧分组（硬切封顶）。
+    let mut groups: Vec<Vec<RawSample>> = vec![Vec::new()];
     for r in raws {
-        let fresh = r.keyframe
-            || groups
-                .last()
-                .map(|g: &Vec<RawSample>| g.len() >= GROUP_CAP)
-                .unwrap_or(true);
-        if fresh {
-            if groups
-                .last()
-                .map(|g: &Vec<RawSample>| g.len() >= GROUP_CAP)
-                .unwrap_or(false)
-            {
-                capped = true;
-            }
-            groups.push(Vec::new());
-        }
-        if groups.is_empty() {
+        let g = groups.last().unwrap();
+        if !g.is_empty() && (r.keyframe || g.len() >= GROUP_CAP) {
             groups.push(Vec::new());
         }
         groups.last_mut().unwrap().push(r);
@@ -270,9 +267,6 @@ pub(crate) fn decode_mp4_range(
     }
     if frames.is_empty() {
         return Err(String::from("mp4: no decodable frames"));
-    }
-    if capped {
-        // 调用方把警告进 status（此处只保行为）。
     }
     Ok(DecodedClip {
         w: gw,
@@ -425,7 +419,25 @@ fn decode_group(m: &TrackMeta, g: &[RawSample], want: MediaFormat) -> Result<Dec
 }
 
 impl App {
-    /// 转码页：源行 + 时间窗滑杆 + 目标行 + 输出行 + 编码按钮 + 状态。
+    /// 选源后立即探针（同步，快）：行内直接看到“是什么片子”，不抽象。
+    pub(crate) fn refresh_probe(&mut self) {
+        if self.transcode.source.is_empty() {
+            self.transcode.info.clear();
+            return;
+        }
+        match probe_source(&self.transcode.source) {
+            Ok(info) => {
+                self.transcode.info = info.summary();
+                self.transcode.status.clear();
+            }
+            Err(e) => {
+                self.transcode.info.clear();
+                self.transcode.status = format!("probe: {e}");
+            }
+        }
+    }
+
+    /// 转码页：源行 + 探针行 + 目标行 + 输出行 + 编码按钮 + 状态。
     pub(crate) fn transcode_page(&mut self, ui: &mut eframe::egui::Ui) {
         use rust_i18n::t;
         // 先收 worker 进度（UI 线程只 try_recv，不阻塞）。
@@ -455,7 +467,7 @@ impl App {
                     .pick_file()
                 {
                     self.transcode.source = f.display().to_string();
-                    self.transcode.status.clear();
+                    self.refresh_probe();
                 }
             }
             if egui_glass::GlassButton::new(t!("transcode.example"))
@@ -463,7 +475,7 @@ impl App {
                 .clicked()
             {
                 self.transcode.source = String::from("/Users/bemly/Movies/input.mp4");
-                self.transcode.status.clear();
+                self.refresh_probe();
             }
             if egui_glass::GlassButton::new(t!("transcode.from_gallery"))
                 .show(ui)
@@ -472,31 +484,6 @@ impl App {
                 self.page = crate::app::Page::Gallery;
             }
         });
-        ui.add_space(10.0);
-        ui.label(t!("transcode.range"));
-        let start_label = format!("start {}s", self.transcode.start_s as u32);
-        egui_glass::GlassSlider::new(&mut self.transcode.start_s, 0.0..=600.0)
-            .text(start_label)
-            .step_by(1.0)
-            .style(if self.dark {
-                egui_glass::GlassStyle::dark()
-            } else {
-                egui_glass::GlassStyle::regular()
-            })
-            .show(ui);
-        self.transcode.start_s = self.transcode.start_s.clamp(0.0, 600.0);
-        let take_label = format!("take {}s", self.transcode.take_s as u32);
-        egui_glass::GlassSlider::new(&mut self.transcode.take_s, 1.0..=120.0)
-            .text(take_label)
-            .step_by(1.0)
-            .style(if self.dark {
-                egui_glass::GlassStyle::dark()
-            } else {
-                egui_glass::GlassStyle::regular()
-            })
-            .show(ui);
-        self.transcode.take_s = self.transcode.take_s.clamp(1.0, 120.0);
-        ui.small(t!("transcode.range_hint"));
         ui.add_space(10.0);
         ui.label(t!("transcode.target"));
         ui.horizontal_wrapped(|ui| {
@@ -512,6 +499,13 @@ impl App {
         });
         ui.small(crate::text::transcode_target_desc(self.transcode.target));
         ui.add_space(10.0);
+        if !self.transcode.info.is_empty() {
+            ui.horizontal(|ui| {
+                ui.label(t!("transcode.probe"));
+                ui.monospace(self.transcode.info.as_str());
+            });
+            ui.add_space(4.0);
+        }
         let out_rel = self.transcode.target.out_path();
         let out_full = std::path::Path::new(&crate::gallery::gallery_dir(&self.path))
             .join(out_rel)
@@ -547,12 +541,20 @@ impl App {
 
     /// worker 进度轮询 + 收尾（worker 线程落盘，UI 只报状态）。
     pub(crate) fn poll_transcode_job(&mut self) {
+        use rust_i18n::t;
         let mut finished: Option<Result<JobOut, String>> = None;
         let mut progress = None;
         if let Some(job) = self.transcode.job.as_mut() {
             while let Ok(msg) = job.rx.try_recv() {
                 match msg {
                     JobMsg::Progress { done, total } => progress = Some((done, total)),
+                    JobMsg::Stage(s) => {
+                        self.transcode.status = match s {
+                            JobStage::Decode => t!("transcode.stage_decode").into_owned(),
+                            JobStage::Encode => t!("transcode.stage_encode").into_owned(),
+                            JobStage::Mux => t!("transcode.stage_mux").into_owned(),
+                        };
+                    }
                     JobMsg::Finished(r) => {
                         finished = Some(r);
                         break;
@@ -603,6 +605,15 @@ impl App {
             );
             return;
         }
+        // 先探片源（同步，快：只扫容器头 + 样片表）：行内直接报具体规格。
+        match probe_source(&self.transcode.source) {
+            Ok(info) => self.transcode.info = info.summary(),
+            Err(e) => {
+                self.transcode.status = format!("probe: {e}");
+                self.transcode.info.clear();
+                return;
+            }
+        }
         let source = self.transcode.source.clone();
         let out_rel = self.transcode.target.out_path().to_string();
         let out_full = std::path::Path::new(&crate::gallery::gallery_dir(&self.path))
@@ -610,23 +621,16 @@ impl App {
             .display()
             .to_string();
         let target = self.transcode.target;
-        let start_s = self.transcode.start_s as f64;
-        let take_s = self.transcode.take_s as f64;
         let (tx, rx): (Sender<JobMsg>, Receiver<JobMsg>) = std::sync::mpsc::channel();
         let cancel = Arc::new(AtomicBool::new(false));
         let cancel_w = cancel.clone();
         let handle = std::thread::spawn(move || {
-            let r = run_transcode_job(
-                &source,
-                start_s,
-                take_s,
-                target,
-                &out_full,
-                &cancel_w,
-                |d, t| {
-                    let _ = tx.send(JobMsg::Progress { done: d, total: t });
-                },
-            );
+            let stage = |s: JobStage| {
+                let _ = tx.send(JobMsg::Stage(s));
+            };
+            let r = run_transcode_job(&source, target, &out_full, &cancel_w, stage, |d, t| {
+                let _ = tx.send(JobMsg::Progress { done: d, total: t });
+            });
             let _ = tx.send(JobMsg::Finished(r));
         });
         self.transcode.job = Some(TranscodeJob {
@@ -639,22 +643,22 @@ impl App {
     }
 }
 
-/// 后台转码主流程（worker 线程内跑；`progress` 回调报帧进度）。
+/// 后台转码主流程（worker 线程内跑；`stage` 报阶段，`progress` 报帧进度）。
 pub(crate) fn run_transcode_job(
     source: &str,
-    start_s: f64,
-    take_s: f64,
     target: TranscodeTarget,
     out_path: &str,
     cancel: &AtomicBool,
+    stage: impl Fn(JobStage),
     progress: impl Fn(usize, usize),
 ) -> Result<JobOut, String> {
     let bytes = std::fs::read(source).map_err(|e| format!("read source: {e}"))?;
     let lower = source.to_ascii_lowercase();
+    stage(JobStage::Decode);
     // 解码到 YUV420（源尺寸）+ fps。
     let clip = if lower.ends_with(".mp4") {
         // 源轨按容器头选：avc/hevc/vp9 首个视频轨（与固件 `demux_mp4_track` 同顺序）。
-        decode_mp4_auto(&bytes, start_s, take_s)?
+        decode_mp4_auto(&bytes)?
     } else if lower.ends_with(".png")
         || lower.ends_with(".jpg")
         || lower.ends_with(".jpeg")
@@ -720,11 +724,13 @@ pub(crate) fn run_transcode_job(
     }
     drop(clip);
     let mut avc_stream: Option<AvcStream> = None;
-    let mut vp9_packets: Vec<Vp9PacketData> = Vec::new();
+    let mut hevc_stream: Option<HevcStream> = None;
+    let mut vp9_samples: Vec<Vp9PacketData> = Vec::new();
     let mut theora_packets: Vec<Vec<u8>> = Vec::new();
     let mut theora_headers: Vec<Vec<u8>> = Vec::new();
     let mut bare: Vec<u8> = Vec::new();
     let mut qois: Vec<u8> = Vec::new();
+    stage(JobStage::Encode);
     for g in &groups {
         if cancel.load(Ordering::Relaxed) {
             return Err(String::from("cancelled"));
@@ -741,7 +747,19 @@ pub(crate) fn run_transcode_job(
                 }
                 avc_stream.as_mut().unwrap().samples.extend(s.samples);
             }
-            TranscodeTarget::Vp9 => vp9_packets.extend(encode_vp9(g)?),
+            TranscodeTarget::Hevc => {
+                let s = encode_hevc(g)?;
+                if hevc_stream.is_none() {
+                    hevc_stream = Some(HevcStream {
+                        vps: s.vps.clone(),
+                        sps: s.sps.clone(),
+                        pps: s.pps.clone(),
+                        samples: Vec::new(),
+                    });
+                }
+                hevc_stream.as_mut().unwrap().samples.extend(s.samples);
+            }
+            TranscodeTarget::Vp9 => vp9_samples.extend(encode_vp9(g)?),
             TranscodeTarget::Theora => {
                 let t = encode_theora(g)?;
                 if theora_headers.is_empty() {
@@ -749,7 +767,6 @@ pub(crate) fn run_transcode_job(
                 }
                 theora_packets.extend(t.data_packets);
             }
-            TranscodeTarget::Hevc => bare.extend(encode_hevc(g)?),
             TranscodeTarget::H263 => bare.extend(encode_h263(g)?),
             TranscodeTarget::Mpeg2v => bare.extend(encode_mpeg2v(g)?),
             TranscodeTarget::Qois => {
@@ -766,17 +783,47 @@ pub(crate) fn run_transcode_job(
         progress(done, total);
     }
     // 容器包装 + 落盘。
+    stage(JobStage::Mux);
     let bytes = match target {
         TranscodeTarget::Avc => {
             let s = avc_stream.ok_or_else(|| String::from("avc: no stream"))?;
-            mux_mp4_avc(&s, OUT_W, OUT_H, fps)?
+            let entry = avc_entry(&s.sps, &s.pps, OUT_W, OUT_H);
+            let samples: Vec<Mp4OutSample> = s
+                .samples
+                .iter()
+                .map(|x| Mp4OutSample {
+                    keyframe: x.keyframe,
+                    payload: length_prefixed_nals(&x.nalus),
+                })
+                .collect();
+            mux_mp4_video(entry, &samples, OUT_W, OUT_H, fps)?
+        }
+        TranscodeTarget::Hevc => {
+            let s = hevc_stream.ok_or_else(|| String::from("hevc: no stream"))?;
+            let entry = hevc_entry(&s.vps, &s.sps, &s.pps, OUT_W, OUT_H, fps);
+            let samples: Vec<Mp4OutSample> = s
+                .samples
+                .iter()
+                .map(|x| Mp4OutSample {
+                    keyframe: x.keyframe,
+                    payload: length_prefixed_nals(&x.nalus),
+                })
+                .collect();
+            mux_mp4_video(entry, &samples, OUT_W, OUT_H, fps)?
         }
         TranscodeTarget::Vp9 => {
-            let raws: Vec<Vec<u8>> = vp9_packets.into_iter().map(|p| p.data).collect();
-            mux_ivf(&raws, OUT_W as u16, OUT_H as u16)
+            let entry = vp9_entry(OUT_W, OUT_H);
+            let samples: Vec<Mp4OutSample> = vp9_samples
+                .iter()
+                .map(|x| Mp4OutSample {
+                    keyframe: x.keyframe,
+                    payload: x.data.clone(),
+                })
+                .collect();
+            mux_mp4_video(entry, &samples, OUT_W, OUT_H, fps)?
         }
         TranscodeTarget::Theora => mux_ogg_theora(&theora_headers, &theora_packets)?,
-        TranscodeTarget::Hevc | TranscodeTarget::H263 | TranscodeTarget::Mpeg2v => bare,
+        TranscodeTarget::H263 | TranscodeTarget::Mpeg2v => bare,
         TranscodeTarget::Qois => qois,
     };
     if let Some(parent) = std::path::Path::new(out_path).parent() {
@@ -791,68 +838,292 @@ pub(crate) fn run_transcode_job(
     })
 }
 
+/// 片源探针结果（选源时同步快探：只扫容器头 + 样片表，不解码）。
+pub(crate) struct ProbeInfo {
+    pub(crate) container: &'static str,
+    pub(crate) codec: &'static str,
+    pub(crate) w: u32,
+    pub(crate) h: u32,
+    pub(crate) fps: u32,
+    pub(crate) n: usize,
+    pub(crate) dur_s: u64,
+}
+
+impl ProbeInfo {
+    pub(crate) fn summary(&self) -> String {
+        format!(
+            "{} {} {}x{} {}fps {}帧 ~{}s",
+            self.container, self.codec, self.w, self.h, self.fps, self.n, self.dur_s
+        )
+    }
+}
+
+/// 探片源（mp4 看首个视频轨 + 样片计数；静帧看尺寸；raw 定死 1080p）。
+pub(crate) fn probe_source(path: &str) -> Result<ProbeInfo, String> {
+    let lower = path.to_ascii_lowercase();
+    if lower.ends_with(".mp4") {
+        let data = std::fs::read(path).map_err(|e| format!("read: {e}"))?;
+        return probe_mp4(&data);
+    }
+    if lower.ends_with(".png")
+        || lower.ends_with(".jpg")
+        || lower.ends_with(".jpeg")
+        || lower.ends_with(".bmp")
+    {
+        let (w, h) = image::image_dimensions(path).map_err(|e| format!("image: {e}"))?;
+        return Ok(ProbeInfo {
+            container: "image",
+            codec: "rgba",
+            w,
+            h,
+            fps: 30,
+            n: 1,
+            dur_s: 0,
+        });
+    }
+    if lower.ends_with(".raw") {
+        let len = std::fs::metadata(path)
+            .map_err(|e| format!("stat: {e}"))?
+            .len();
+        if len != (1920 * 1080 * 4) as u64 {
+            return Err(format!("raw: want 1920x1080 BGRA, got {len} bytes"));
+        }
+        return Ok(ProbeInfo {
+            container: "raw",
+            codec: "bgra",
+            w: 1920,
+            h: 1080,
+            fps: 30,
+            n: 1,
+            dur_s: 0,
+        });
+    }
+    Err(format!("unsupported source: {path}"))
+}
+
+/// MP4 探针（首个 avc/hevc/vp9 视频轨 + 样片计数；负载不拷贝）。
+fn probe_mp4(data: &[u8]) -> Result<ProbeInfo, String> {
+    use shiguredo_mp4::boxes::SampleEntry;
+    use shiguredo_mp4::demux::{Input, Mp4FileDemuxer};
+    use shiguredo_mp4::TrackKind;
+    let mut dx = Mp4FileDemuxer::new();
+    dx.handle_input(Input { position: 0, data });
+    let mut found: Option<(MediaFormat, u32, u32)> = None;
+    let mut target_id = 0u32;
+    let mut kinds: Vec<(u32, MediaFormat)> = Vec::new();
+    let mut n = 0usize;
+    let mut total_dur = 0f64;
+    let mut timescale = 1f64;
+    loop {
+        let s = dx.next_sample().map_err(|e| format!("mp4 demux: {e:?}"))?;
+        let Some(s) = s else { break };
+        if s.track.kind != TrackKind::Video {
+            continue;
+        }
+        // 首样片 entry 定轨类型；entry 缺省沿用同轨结论（mux 只在首样片带 entry）。
+        let kind = match s.sample_entry {
+            Some(SampleEntry::Avc1(_)) => Some(MediaFormat::Avc),
+            Some(SampleEntry::Hev1(_)) | Some(SampleEntry::Hvc1(_)) => Some(MediaFormat::Hevc),
+            Some(SampleEntry::Vp09(_)) | Some(SampleEntry::Vp08(_)) => Some(MediaFormat::Vp9),
+            Some(_) => None,
+            None => kinds
+                .iter()
+                .find(|(id, _)| *id == s.track.track_id)
+                .map(|(_, k)| *k),
+        };
+        let Some(kind) = kind else { continue };
+        if !kinds.iter().any(|(id, _)| *id == s.track.track_id) {
+            kinds.push((s.track.track_id, kind));
+        }
+        if found.is_none() {
+            let (w, h) = match s.sample_entry {
+                Some(SampleEntry::Avc1(b)) => (b.visual.width as u32, b.visual.height as u32),
+                Some(SampleEntry::Hev1(b)) => (b.visual.width as u32, b.visual.height as u32),
+                Some(SampleEntry::Hvc1(b)) => (b.visual.width as u32, b.visual.height as u32),
+                Some(SampleEntry::Vp09(b)) => (b.visual.width as u32, b.visual.height as u32),
+                Some(SampleEntry::Vp08(b)) => (b.visual.width as u32, b.visual.height as u32),
+                _ => (0, 0),
+            };
+            found = Some((kind, w, h));
+            target_id = s.track.track_id;
+            timescale = s.track.timescale.get() as f64;
+        }
+        if s.track.track_id != target_id {
+            continue;
+        }
+        n += 1;
+        total_dur += s.duration as f64 / timescale;
+    }
+    let (kind, w, h) = found.ok_or_else(|| String::from("mp4: no avc/hevc/vp9 video track"))?;
+    let fps = if total_dur > 0.0 {
+        (n as f64 / total_dur).round().clamp(1.0, 120.0) as u32
+    } else {
+        30
+    };
+    let codec = match kind {
+        MediaFormat::Avc => "avc",
+        MediaFormat::Hevc => "hevc",
+        MediaFormat::Vp9 => "vp9",
+        _ => "?",
+    };
+    Ok(ProbeInfo {
+        container: "mp4",
+        codec,
+        w,
+        h,
+        fps,
+        n,
+        dur_s: total_dur.round() as u64,
+    })
+}
+
 /// MP4 自动选轨解码（avc → hevc → vp9 顺序，首个命中轨；与固件同顺序）。
-fn decode_mp4_auto(data: &[u8], start_s: f64, take_s: f64) -> Result<DecodedClip, String> {
+fn decode_mp4_auto(data: &[u8]) -> Result<DecodedClip, String> {
     for want in [MediaFormat::Avc, MediaFormat::Hevc, MediaFormat::Vp9] {
-        match decode_mp4_range(data, want, start_s, take_s) {
+        match decode_mp4_track(data, want) {
             Ok(clip) => return Ok(clip),
             Err(_) => continue,
         }
     }
-    Err(String::from("mp4: no avc/hevc/vp9 track in range"))
+    Err(String::from("mp4: no avc/hevc/vp9 track"))
 }
 
-/// AVC → MP4 打包（shiguredo 同轮子；`avc1/avcC` + 长度前缀样片）。
-pub(crate) fn mux_mp4_avc(stream: &AvcStream, w: u32, h: u32, fps: u32) -> Result<Vec<u8>, String> {
-    use shiguredo_mp4::boxes::{Avc1Box, AvccBox, SampleEntry, VisualSampleEntryFields};
-    use shiguredo_mp4::mux::{Mp4FileMuxer, Sample};
-    use shiguredo_mp4::{TrackKind, Uint};
-    use std::num::NonZeroU32;
-    if stream.samples.is_empty() {
-        return Err(String::from("mp4: no samples"));
+/// MP4 输出样片（负载形态按编码定：avc/hevc 长度前缀，vp9 裸帧）。
+pub(crate) struct Mp4OutSample {
+    pub(crate) keyframe: bool,
+    pub(crate) payload: Vec<u8>,
+}
+
+/// NAL 串 → 长度前缀样片负载（MP4 样片标准形态）。
+pub(crate) fn length_prefixed_nals(nalus: &[Vec<u8>]) -> Vec<u8> {
+    let mut pl = Vec::new();
+    for nalu in nalus {
+        pl.extend_from_slice(&(nalu.len() as u32).to_be_bytes());
+        pl.extend_from_slice(nalu);
     }
-    let sps = stream.sps.clone();
-    let pps = stream.pps.clone();
-    let entry = SampleEntry::Avc1(Avc1Box {
-        visual: VisualSampleEntryFields {
-            data_reference_index: VisualSampleEntryFields::DEFAULT_DATA_REFERENCE_INDEX,
-            width: w as u16,
-            height: h as u16,
-            horizresolution: VisualSampleEntryFields::DEFAULT_HORIZRESOLUTION,
-            vertresolution: VisualSampleEntryFields::DEFAULT_VERTRESOLUTION,
-            frame_count: VisualSampleEntryFields::DEFAULT_FRAME_COUNT,
-            compressorname: VisualSampleEntryFields::NULL_COMPRESSORNAME,
-            depth: VisualSampleEntryFields::DEFAULT_DEPTH,
-        },
+    pl
+}
+
+fn visual_fields(w: u32, h: u32) -> VisualSampleEntryFields {
+    use shiguredo_mp4::boxes::VisualSampleEntryFields;
+    VisualSampleEntryFields {
+        data_reference_index: VisualSampleEntryFields::DEFAULT_DATA_REFERENCE_INDEX,
+        width: w as u16,
+        height: h as u16,
+        horizresolution: VisualSampleEntryFields::DEFAULT_HORIZRESOLUTION,
+        vertresolution: VisualSampleEntryFields::DEFAULT_VERTRESOLUTION,
+        frame_count: VisualSampleEntryFields::DEFAULT_FRAME_COUNT,
+        compressorname: VisualSampleEntryFields::NULL_COMPRESSORNAME,
+        depth: VisualSampleEntryFields::DEFAULT_DEPTH,
+    }
+}
+
+/// AVC entry（`avc1/avcC`，profile/level 从 SPS 读）。
+pub(crate) fn avc_entry(sps: &[u8], pps: &[u8], w: u32, h: u32) -> SampleEntry {
+    use shiguredo_mp4::boxes::{Avc1Box, AvccBox};
+    SampleEntry::Avc1(Avc1Box {
+        visual: visual_fields(w, h),
         avcc_box: AvccBox {
             avc_profile_indication: sps.get(1).copied().unwrap_or(66),
             profile_compatibility: sps.get(2).copied().unwrap_or(0),
             avc_level_indication: sps.get(3).copied().unwrap_or(30),
             length_size_minus_one: Uint::new(3),
-            sps_list: vec![sps],
-            pps_list: vec![pps],
+            sps_list: vec![sps.to_vec()],
+            pps_list: vec![pps.to_vec()],
             chroma_format: None,
             bit_depth_luma_minus8: None,
             bit_depth_chroma_minus8: None,
             sps_ext_list: vec![],
         },
         unknown_boxes: vec![],
-    });
+    })
+}
+
+/// HEVC entry（`hvc1/hvcC`；固件 demux 不校验 profile 字段，
+/// 此处按 Main 8-bit 420 填保守值，level 随帧率取 4.0/4.1）。
+pub(crate) fn hevc_entry(
+    vps: &[u8],
+    sps: &[u8],
+    pps: &[u8],
+    w: u32,
+    h: u32,
+    fps: u32,
+) -> SampleEntry {
+    use shiguredo_mp4::boxes::{Hvc1Box, HvccBox, HvccNalUintArray};
+    let array = |t: u8, nalus: Vec<Vec<u8>>| HvccNalUintArray {
+        array_completeness: Uint::new(1),
+        nal_unit_type: Uint::new(t),
+        nalus,
+    };
+    SampleEntry::Hvc1(Hvc1Box {
+        visual: visual_fields(w, h),
+        hvcc_box: HvccBox {
+            general_profile_space: Uint::new(0),
+            general_tier_flag: Uint::new(0),
+            general_profile_idc: Uint::new(1),
+            general_profile_compatibility_flags: 0x6000_0000,
+            general_constraint_indicator_flags: Uint::new(0),
+            general_level_idc: if fps > 30 { 123 } else { 120 },
+            min_spatial_segmentation_idc: Uint::new(0),
+            parallelism_type: Uint::new(0),
+            chroma_format_idc: Uint::new(1),
+            bit_depth_luma_minus8: Uint::new(0),
+            bit_depth_chroma_minus8: Uint::new(0),
+            avg_frame_rate: (fps.saturating_mul(256)) as u16,
+            constant_frame_rate: Uint::new(0),
+            num_temporal_layers: Uint::new(1),
+            temporal_id_nested: Uint::new(1),
+            length_size_minus_one: Uint::new(3),
+            nalu_arrays: vec![
+                array(32, vec![vps.to_vec()]),
+                array(33, vec![sps.to_vec()]),
+                array(34, vec![pps.to_vec()]),
+            ],
+        },
+        unknown_boxes: vec![],
+    })
+}
+
+/// VP9 entry（`vp09/vpcC`；裸帧样片，固件直送解码器）。
+pub(crate) fn vp9_entry(w: u32, h: u32) -> SampleEntry {
+    use shiguredo_mp4::boxes::{Vp09Box, VpccBox};
+    SampleEntry::Vp09(Vp09Box {
+        visual: visual_fields(w, h),
+        vpcc_box: VpccBox {
+            profile: 0,
+            level: 41,
+            bit_depth: Uint::new(8),
+            chroma_subsampling: Uint::new(1),
+            video_full_range_flag: Uint::new(1),
+            colour_primaries: 2,
+            transfer_characteristics: 2,
+            matrix_coefficients: 2,
+            codec_initialization_data: Vec::new(),
+        },
+        unknown_boxes: vec![],
+    })
+}
+
+/// MP4 打包通用路（`Mp4FileMuxer`；entry 决定 avc1/hvc1/vp09）。
+pub(crate) fn mux_mp4_video(
+    entry: SampleEntry,
+    samples: &[Mp4OutSample],
+    w: u32,
+    h: u32,
+    fps: u32,
+) -> Result<Vec<u8>, String> {
+    use shiguredo_mp4::mux::{Mp4FileMuxer, Sample};
+    use shiguredo_mp4::TrackKind;
+    use std::num::NonZeroU32;
+    let _ = (w, h);
+    if samples.is_empty() {
+        return Err(String::from("mp4: no samples"));
+    }
     let mut muxer = Mp4FileMuxer::new().map_err(|e| format!("mux init: {e:?}"))?;
     let timescale = NonZeroU32::new(90000).unwrap();
     let dur = 90000u32 / fps.max(1);
-    // 样片负载先拼好（长度前缀），offset 按顺序排。
-    let mut payloads: Vec<Vec<u8>> = Vec::new();
-    for s in &stream.samples {
-        let mut pl = Vec::new();
-        for nalu in &s.nalus {
-            pl.extend_from_slice(&(nalu.len() as u32).to_be_bytes());
-            pl.extend_from_slice(nalu);
-        }
-        payloads.push(pl);
-    }
     let mut data_offset = muxer.initial_boxes_bytes().len() as u64;
-    for (i, (s, pl)) in stream.samples.iter().zip(payloads.iter()).enumerate() {
+    for (i, s) in samples.iter().enumerate() {
         muxer
             .append_sample(&Sample {
                 track_kind: TrackKind::Video,
@@ -862,10 +1133,10 @@ pub(crate) fn mux_mp4_avc(stream: &AvcStream, w: u32, h: u32, fps: u32) -> Resul
                 duration: dur,
                 composition_time_offset: None,
                 data_offset,
-                data_size: pl.len(),
+                data_size: s.payload.len(),
             })
             .map_err(|e| format!("mux append: {e:?}"))?;
-        data_offset += pl.len() as u64;
+        data_offset += s.payload.len() as u64;
     }
     let initial = muxer.initial_boxes_bytes().to_vec();
     let finalized = muxer
@@ -873,7 +1144,7 @@ pub(crate) fn mux_mp4_avc(stream: &AvcStream, w: u32, h: u32, fps: u32) -> Resul
         .map_err(|e| format!("mux finalize: {e:?}"))?;
     // 组装：head（pairs 改写）+ mdat 头（initial 尾部 16B，pairs 改写终值）+
     // 样片负载（紧跟 initial）+ moov（pairs 偏移）。
-    let mut max_end = initial.len() + payloads.iter().map(|p| p.len()).sum::<usize>();
+    let mut max_end = initial.len() + samples.iter().map(|s| s.payload.len()).sum::<usize>();
     for (off, b) in finalized.offset_and_bytes_pairs() {
         max_end = max_end.max(off as usize + b.len());
     }
@@ -884,9 +1155,9 @@ pub(crate) fn mux_mp4_avc(stream: &AvcStream, w: u32, h: u32, fps: u32) -> Resul
         file[o..o + b.len()].copy_from_slice(b);
     }
     let mut pos = initial.len();
-    for pl in &payloads {
-        file[pos..pos + pl.len()].copy_from_slice(pl);
-        pos += pl.len();
+    for s in samples {
+        file[pos..pos + s.payload.len()].copy_from_slice(&s.payload);
+        pos += s.payload.len();
     }
     Ok(file)
 }
@@ -935,10 +1206,11 @@ mod transcode_tests {
 
     #[test]
     fn target_output_paths_match_firmware_layout() {
+        // avc/hevc/vp9 同名 video.mp4（播哪个由 [play] format 开关决定）。
         for (t, path) in [
             (TranscodeTarget::Avc, "1080p/video.mp4"),
-            (TranscodeTarget::Hevc, "1080p/video.hevc"),
-            (TranscodeTarget::Vp9, "1080p/video.ivf"),
+            (TranscodeTarget::Hevc, "1080p/video.mp4"),
+            (TranscodeTarget::Vp9, "1080p/video.mp4"),
             (TranscodeTarget::H263, "1080p/video.h263"),
             (TranscodeTarget::Mpeg2v, "1080p/video.m2v"),
             (TranscodeTarget::Theora, "1080p/video.ogv"),
@@ -948,11 +1220,8 @@ mod transcode_tests {
         }
     }
 
-    #[test]
-    fn mp4_roundtrip_through_same_muxer() {
-        // 编码→打包→同轮子解回：固件 demux 就是这个 parser，零口径差。
-        use shiguredo_mp4::demux::{Input, Mp4FileDemuxer};
-        let frames = vec![
+    fn two_frames() -> Vec<Yuv420> {
+        vec![
             Yuv420 {
                 w: 64,
                 h: 48,
@@ -967,23 +1236,119 @@ mod transcode_tests {
                 u: vec![128u8; 32 * 24],
                 v: vec![128u8; 32 * 24],
             },
-        ];
-        let stream = encode_avc(&frames).expect("avc");
-        let mp4 = mux_mp4_avc(&stream, 64, 48, 30).expect("mux");
-        assert!(&mp4[4..8] == b"ftyp");
+        ]
+    }
+
+    /// 解回 MP4：样片数 + 关键帧数 + 首样片 entry 種別（固件 demux 同 parser）。
+    fn demux_check(mp4: &[u8], want_entry: &str) -> (usize, usize) {
+        use shiguredo_mp4::boxes::SampleEntry;
+        use shiguredo_mp4::demux::{Input, Mp4FileDemuxer};
+        assert_eq!(&mp4[4..8], b"ftyp");
         let mut dx = Mp4FileDemuxer::new();
         dx.handle_input(Input {
             position: 0,
-            data: &mp4,
+            data: mp4,
         });
         let mut n = 0;
+        let mut keys = 0;
+        let mut entry = String::new();
         loop {
             let s = dx.next_sample().expect("demux").clone();
             let Some(s) = s else { break };
-            if matches!(s.track.kind, shiguredo_mp4::TrackKind::Video) {
-                n += 1;
+            if !matches!(s.track.kind, shiguredo_mp4::TrackKind::Video) {
+                continue;
+            }
+            n += 1;
+            if s.keyframe {
+                keys += 1;
+            }
+            if entry.is_empty() {
+                entry = match s.sample_entry {
+                    Some(SampleEntry::Avc1(_)) => "avc1",
+                    Some(SampleEntry::Hvc1(_)) => "hvc1",
+                    Some(SampleEntry::Hev1(_)) => "hev1",
+                    Some(SampleEntry::Vp09(_)) => "vp09",
+                    _ => "other",
+                }
+                .to_string();
             }
         }
+        assert_eq!(entry, want_entry);
+        (n, keys)
+    }
+
+    #[test]
+    fn mp4_avc_roundtrip() {
+        // less-avc 编 → avc1/avcC 打包 → 同轮子解回。
+        let st = encode_avc(&two_frames()).expect("avc");
+        let entry = avc_entry(&st.sps, &st.pps, 64, 48);
+        let samples: Vec<Mp4OutSample> = st
+            .samples
+            .iter()
+            .map(|x| Mp4OutSample {
+                keyframe: x.keyframe,
+                payload: length_prefixed_nals(&x.nalus),
+            })
+            .collect();
+        let mp4 = mux_mp4_video(entry, &samples, 64, 48, 30).expect("mux");
+        let (n, keys) = demux_check(&mp4, "avc1");
         assert_eq!(n, 2);
+        assert!(keys >= 1);
+    }
+
+    #[test]
+    fn mp4_hevc_roundtrip() {
+        // oxideav-h265 编 → hvc1/hvcC 打包 → 同轮子解回。
+        let st = encode_hevc(&two_frames()).expect("hevc");
+        let entry = hevc_entry(&st.vps, &st.sps, &st.pps, 64, 48, 30);
+        let samples: Vec<Mp4OutSample> = st
+            .samples
+            .iter()
+            .map(|x| Mp4OutSample {
+                keyframe: x.keyframe,
+                payload: length_prefixed_nals(&x.nalus),
+            })
+            .collect();
+        let mp4 = mux_mp4_video(entry, &samples, 64, 48, 30).expect("mux");
+        let (n, keys) = demux_check(&mp4, "hvc1");
+        assert_eq!(n, st.samples.len());
+        assert!(keys >= 1);
+    }
+
+    #[test]
+    fn mp4_vp9_roundtrip() {
+        // rusty_vp9 编 → vp09/vpcC 打包（裸帧样片）→ 同轮子解回。
+        let pkts = encode_vp9(&two_frames()).expect("vp9");
+        let entry = vp9_entry(64, 48);
+        let samples: Vec<Mp4OutSample> = pkts
+            .iter()
+            .map(|x| Mp4OutSample {
+                keyframe: x.keyframe,
+                payload: x.data.clone(),
+            })
+            .collect();
+        let mp4 = mux_mp4_video(entry, &samples, 64, 48, 30).expect("mux");
+        let (n, _keys) = demux_check(&mp4, "vp09");
+        assert_eq!(n, pkts.len());
+    }
+
+    #[test]
+    fn probe_reports_mp4_track() {
+        // 上面 avc 产出的 mp4 再探：轨种/几何/样片数对得上。
+        let st = encode_avc(&two_frames()).expect("avc");
+        let entry = avc_entry(&st.sps, &st.pps, 64, 48);
+        let samples: Vec<Mp4OutSample> = st
+            .samples
+            .iter()
+            .map(|x| Mp4OutSample {
+                keyframe: x.keyframe,
+                payload: length_prefixed_nals(&x.nalus),
+            })
+            .collect();
+        let mp4 = mux_mp4_video(entry, &samples, 64, 48, 30).expect("mux");
+        let info = probe_mp4(&mp4).expect("probe");
+        assert_eq!(info.codec, "avc");
+        assert_eq!((info.w, info.h), (64, 48));
+        assert_eq!(info.n, 2);
     }
 }

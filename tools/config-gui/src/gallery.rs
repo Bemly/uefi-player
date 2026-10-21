@@ -135,6 +135,7 @@ impl App {
                             .display()
                             .to_string();
                         self.transcode.source = src;
+                        self.refresh_probe();
                         self.page = crate::app::Page::Transcode;
                     }
                 }
