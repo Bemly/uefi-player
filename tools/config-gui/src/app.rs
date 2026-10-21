@@ -127,6 +127,60 @@ pub(crate) struct App {
     pub(crate) gallery: GalleryState,
     /// 转码状态（worker 线程跑，UI 只轮询）。
     pub(crate) transcode: TranscodeState,
+    /// 右上 toast：`status` 一变就弹，`TOAST_SECS` 后自动收。
+    toast: Option<Toast>,
+    /// toast 已播记忆：播过的 status 不再续弹（否则过期即重建变循环播放）。
+    toast_seen: String,
+    /// 右下动作条像素图标（CC0 位图，见 `assets/icons/README.md`；
+    /// `App::new` 一次载入，`TextureHandle` 保活）。
+    icons: Icons,
+}
+
+/// 动作条六图标（16x16 原色 PNG，`NEAREST` 直显）。
+pub(crate) struct Icons {
+    pub(crate) open: egui::TextureHandle,
+    pub(crate) save: egui::TextureHandle,
+    pub(crate) save_as: egui::TextureHandle,
+    pub(crate) reset: egui::TextureHandle,
+    pub(crate) theme: egui::TextureHandle,
+    pub(crate) lang: egui::TextureHandle,
+}
+
+impl Icons {
+    fn load(ctx: &egui::Context) -> Self {
+        fn one(ctx: &egui::Context, name: &str, bytes: &[u8]) -> egui::TextureHandle {
+            let img = image::load_from_memory(bytes)
+                .expect("bundled icon decodes")
+                .to_rgba8();
+            let (w, h) = (img.width() as usize, img.height() as usize);
+            let px = img.into_raw();
+            ctx.load_texture(
+                name,
+                egui::ColorImage::from_rgba_unmultiplied([w, h], &px),
+                egui::TextureOptions::NEAREST,
+            )
+        }
+        Self {
+            open: one(ctx, "icon-open", include_bytes!("../assets/icons/open.png")),
+            save: one(ctx, "icon-save", include_bytes!("../assets/icons/save.png")),
+            save_as: one(
+                ctx,
+                "icon-save-as",
+                include_bytes!("../assets/icons/save_as.png"),
+            ),
+            reset: one(
+                ctx,
+                "icon-reset",
+                include_bytes!("../assets/icons/reset.png"),
+            ),
+            theme: one(
+                ctx,
+                "icon-theme",
+                include_bytes!("../assets/icons/theme.png"),
+            ),
+            lang: one(ctx, "icon-lang", include_bytes!("../assets/icons/lang.png")),
+        }
+    }
 }
 
 /// twin 用背景图（纹理本体 + 视图保活 + 几何，随 id 一起存）。
@@ -140,129 +194,14 @@ pub(crate) struct TwinPhoto {
     view: egui_wgpu::wgpu::TextureView,
 }
 
-/// 像素线条图标画法签名：画笔 + 中心 + 主色。
-type IconPaint = fn(&egui::Painter, egui::Pos2, egui::Color32);
-
-/// 图标统一线宽（2px，10px 像素字不断裂）。
-fn icon_stroke(col: egui::Color32) -> egui::Stroke {
-    egui::Stroke::new(2.0, col)
+/// 右上 toast 一次弹出的内容 + 起始时刻（`status` 文本一变就续一次）。
+struct Toast {
+    text: String,
+    since: std::time::Instant,
 }
 
-/// 文件夹（打开）：框体 + 左上标签。
-fn icon_folder(p: &egui::Painter, c: egui::Pos2, col: egui::Color32) {
-    let s = icon_stroke(col);
-    let v = |x: f32, y: f32| c + egui::vec2(x, y);
-    p.rect_stroke(
-        egui::Rect::from_min_max(v(-9.0, -3.0), v(9.0, 7.0)),
-        2.0,
-        s,
-        egui::StrokeKind::Middle,
-    );
-    p.line_segment([v(-9.0, -3.0), v(-9.0, -7.0)], s);
-    p.line_segment([v(-9.0, -7.0), v(-3.0, -7.0)], s);
-    p.line_segment([v(-3.0, -7.0), v(-1.0, -3.0)], s);
-}
-
-/// 软盘（保存）：外框 + 顶部滑块 + 底部标签。
-fn icon_save(p: &egui::Painter, c: egui::Pos2, col: egui::Color32) {
-    let s = icon_stroke(col);
-    let v = |x: f32, y: f32| c + egui::vec2(x, y);
-    p.rect_stroke(
-        egui::Rect::from_min_max(v(-8.0, -8.0), v(8.0, 8.0)),
-        1.0,
-        s,
-        egui::StrokeKind::Middle,
-    );
-    p.rect_stroke(
-        egui::Rect::from_min_max(v(-4.0, -8.0), v(4.0, -2.0)),
-        0.0,
-        s,
-        egui::StrokeKind::Middle,
-    );
-    p.rect_stroke(
-        egui::Rect::from_min_max(v(-4.0, 2.0), v(4.0, 8.0)),
-        0.0,
-        s,
-        egui::StrokeKind::Middle,
-    );
-}
-
-/// 双页（另存为）：前后错开的两个方框。
-fn icon_save_as(p: &egui::Painter, c: egui::Pos2, col: egui::Color32) {
-    let s = icon_stroke(col);
-    let v = |x: f32, y: f32| c + egui::vec2(x, y);
-    p.rect_stroke(
-        egui::Rect::from_min_max(v(-1.0, -8.0), v(9.0, 2.0)),
-        1.0,
-        s,
-        egui::StrokeKind::Middle,
-    );
-    p.rect_stroke(
-        egui::Rect::from_min_max(v(-9.0, -2.0), v(1.0, 8.0)),
-        1.0,
-        s,
-        egui::StrokeKind::Middle,
-    );
-}
-
-/// 环形箭头（重置）：300° 圆弧 + 顺时针箭头（东侧缺口，头朝下）。
-fn icon_reset(p: &egui::Painter, c: egui::Pos2, col: egui::Color32) {
-    let s = icon_stroke(col);
-    let mut pts = Vec::with_capacity(26);
-    for i in 0..=25 {
-        let a = 0.5_f32 + (std::f32::consts::TAU - 1.0) * i as f32 / 25.0;
-        pts.push(c + egui::vec2(a.cos(), a.sin()) * 8.0);
-    }
-    p.line(pts, s);
-    // 箭头落在弧尾（上侧缺口端），顺切线方向。
-    let a1 = 0.5_f32;
-    let tip = c + egui::vec2(a1.cos(), a1.sin()) * 8.0;
-    let dir = egui::vec2(-a1.sin(), a1.cos());
-    p.arrow(tip - dir * 9.0, dir * 9.0, s);
-}
-
-/// 太阳（深色下显示，切浅色用）：圆 + 十字四射线。
-fn icon_sun(p: &egui::Painter, c: egui::Pos2, col: egui::Color32) {
-    let s = icon_stroke(col);
-    p.circle_stroke(c, 4.5, s);
-    for d in [
-        egui::vec2(1.0, 0.0),
-        egui::vec2(-1.0, 0.0),
-        egui::vec2(0.0, 1.0),
-        egui::vec2(0.0, -1.0),
-    ] {
-        p.line_segment([c + d * 7.0, c + d * 9.5], s);
-    }
-}
-
-/// 月牙（浅色下显示，切深色用）：左鼓外弧 + 右鼓内弧闭合描边，角朝右。
-fn icon_moon(p: &egui::Painter, c: egui::Pos2, col: egui::Color32) {
-    let s = icon_stroke(col);
-    let mut pts = Vec::with_capacity(27);
-    for i in 0..=12 {
-        let a = (80.0 + 200.0 * i as f32 / 12.0).to_radians();
-        pts.push(c + egui::vec2(a.cos(), a.sin()) * 7.0);
-    }
-    for j in 0..=12 {
-        let a = (280.0 + 160.0 * j as f32 / 12.0).to_radians();
-        pts.push(c + egui::vec2(2.0, 0.0) + egui::vec2(a.cos(), a.sin()) * 4.5);
-    }
-    pts.push(pts[0]);
-    p.line(pts, s);
-}
-
-/// 地球（语言切换）：圆 + 赤道 + 子午椭圆。
-fn icon_globe(p: &egui::Painter, c: egui::Pos2, col: egui::Color32) {
-    let s = icon_stroke(col);
-    p.circle_stroke(c, 8.0, s);
-    p.line_segment([c + egui::vec2(-8.0, 0.0), c + egui::vec2(8.0, 0.0)], s);
-    let mut m = Vec::with_capacity(13);
-    for i in 0..=12 {
-        let a = i as f32 / 12.0 * std::f32::consts::TAU;
-        m.push(c + egui::vec2(a.cos() * 3.5, a.sin() * 8.0));
-    }
-    p.line(m, s);
-}
+/// toast 存活秒数：进度条走完自动收（用户拍板：常驻底栏改右上倒计时弹窗）。
+const TOAST_SECS: f32 = 3.0;
 
 impl App {
     pub(crate) fn new(cc: &eframe::CreationContext<'_>) -> Self {
@@ -351,6 +290,7 @@ impl App {
             }
             glass = true;
         }
+        let icons = Icons::load(&cc.egui_ctx);
         let mut app = Self {
             path: "player.toml".to_owned(),
             cfg: FileConfig::default(),
@@ -382,6 +322,9 @@ impl App {
             twin_photo,
             gallery: GalleryState::new(),
             transcode: TranscodeState::new(),
+            toast: None,
+            toast_seen: String::new(),
+            icons,
         };
         // 启动时若工作目录下已有 player.toml，直接载入。
         if std::path::Path::new(&app.path).exists() {
@@ -633,6 +576,64 @@ impl App {
         } else {
             "○"
         }
+    }
+
+    /// 右上 toast：`status` 文本一变就弹一次液态玻璃胶囊，底下细条是
+    /// 消失进度条（`TOAST_SECS` 走完自动收）。库内无 toast/进度件，
+    /// 玻璃胶囊 + 原语细条（注释说明）；一直有 toast 就一直要重绘。
+    #[allow(clippy::too_many_lines)]
+    pub(crate) fn show_toast(&mut self, ctx: &egui::Context) {
+        if self.status != self.toast_seen {
+            self.toast_seen = self.status.clone();
+            self.toast = Some(Toast {
+                text: self.status.clone(),
+                since: std::time::Instant::now(),
+            });
+        }
+        let expired = self
+            .toast
+            .as_ref()
+            .is_some_and(|t| t.since.elapsed().as_secs_f32() >= TOAST_SECS);
+        if expired {
+            self.toast = None;
+            return;
+        }
+        let Some(t) = self.toast.as_ref() else {
+            return;
+        };
+        ctx.request_repaint();
+        let frac = 1.0 - t.since.elapsed().as_secs_f32() / TOAST_SECS;
+        let accent = Self::accent(self.dark);
+        let track = if self.dark {
+            egui::Color32::from_white_alpha(28)
+        } else {
+            egui::Color32::from_black_alpha(28)
+        };
+        egui::Area::new("toast".into())
+            .order(egui::Order::Foreground)
+            .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-16.0, 16.0))
+            .show(ctx, |ui| {
+                egui_glass::Glass::new(self.bar_style())
+                    .inner_margin(egui::Margin::same(12))
+                    .show(ui, |ui| {
+                        // 纯白/纯黑字（用户拍板：不要主题灰）：暗色白字，浅色黑字。
+                        let fg = if self.dark {
+                            egui::Color32::WHITE
+                        } else {
+                            egui::Color32::BLACK
+                        };
+                        ui.label(egui::RichText::new(&t.text).color(fg));
+                        let w = ui.min_rect().width().max(120.0);
+                        let (rect, _) =
+                            ui.allocate_exact_size(egui::vec2(w, 4.0), egui::Sense::hover());
+                        ui.painter().rect_filled(rect, 2.0, track);
+                        let fill = egui::Rect::from_min_size(
+                            rect.min,
+                            egui::vec2(w * frac.clamp(0.0, 1.0), 4.0),
+                        );
+                        ui.painter().rect_filled(fill, 2.0, accent);
+                    });
+            });
     }
 
     /// 工具栏/状态条的玻璃材质：深色配深色预设，浅色配默认。
@@ -962,26 +963,21 @@ impl App {
 
     /// 右下悬浮动作条：圆形像素图标按钮（用户拍板：文字改图标）。
     /// 轮子结论：`GlassButton` 只吃文本，库内无图标件；故空文本圆钮（`icon()`
-    /// 方垫 + `accessible_name` + 悬停提示保可访问性）+ 原语线条图标，
-    /// 图标色取描边字同色（暗白/亮黑），注释说明。
+    /// 方垫 + `accessible_name` + 悬停提示保可访问性）+ CC0 16x16 像素位图
+    /// （`assets/icons/`，`NEAREST` 20pt 直显，原色不 tint，见该目录 README）。
     /// 布局（用户拍板，像图二）：5 图标连体胶囊（打开→保存→另存为→重置→语言），
     /// 明暗开关单独成圆、隔 8px 摆最边上。
     pub(crate) fn action_buttons(&mut self, ui: &mut egui::Ui) -> Action {
         let mut act = Action::None;
-        let col = if self.dark {
-            egui::Color32::WHITE
-        } else {
-            egui::Color32::BLACK
-        };
         ui.horizontal(|ui| {
             egui_glass::GlassToolbar::new(self.bar_style()).show(ui, |ui| {
                 // 连体胶囊：打开 → 保存 → 另存为 → 重置 → 语言（44 圆）。
-                if Self::icon_btn(ui, t!("toolbar.open").into_owned(), icon_folder, col, 44.0)
+                if Self::icon_btn(ui, t!("toolbar.open").into_owned(), &self.icons.open, 44.0)
                     .clicked()
                 {
                     act = Action::Open;
                 }
-                if Self::icon_btn(ui, t!("toolbar.save").into_owned(), icon_save, col, 44.0)
+                if Self::icon_btn(ui, t!("toolbar.save").into_owned(), &self.icons.save, 44.0)
                     .clicked()
                 {
                     act = Action::Save;
@@ -989,47 +985,51 @@ impl App {
                 if Self::icon_btn(
                     ui,
                     t!("toolbar.save_as").into_owned(),
-                    icon_save_as,
-                    col,
+                    &self.icons.save_as,
                     44.0,
                 )
                 .clicked()
                 {
                     act = Action::SaveAs;
                 }
-                if Self::icon_btn(ui, t!("toolbar.reset").into_owned(), icon_reset, col, 44.0)
-                    .clicked()
+                if Self::icon_btn(
+                    ui,
+                    t!("toolbar.reset").into_owned(),
+                    &self.icons.reset,
+                    44.0,
+                )
+                .clicked()
                 {
                     act = Action::Reset;
                 }
                 let lang = if self.zh { "EN" } else { "中文" }.to_owned();
-                if Self::icon_btn(ui, lang, icon_globe, col, 44.0).clicked() {
+                if Self::icon_btn(ui, lang, &self.icons.lang, 44.0).clicked() {
                     act = Action::ToggleLang;
                 }
             });
             ui.add_space(8.0);
-            // 明暗开关单独成圆（56 圆与胶囊等高）：深色下给太阳（切浅色），
-            // 浅色下给月亮（切深色）。
-            let (theme_tip, theme_icon) = if self.dark {
-                (t!("toolbar.to_light").into_owned(), icon_sun as IconPaint)
+            // 明暗开关单独成圆（56 圆与胶囊等高）：两态共用阴阳鱼
+            // （上游像素集无日月，阴阳表暗黑/浅色二象，见 icons README）。
+            let theme_tip = if self.dark {
+                t!("toolbar.to_light").into_owned()
             } else {
-                (t!("toolbar.to_dark").into_owned(), icon_moon as IconPaint)
+                t!("toolbar.to_dark").into_owned()
             };
-            if Self::icon_btn(ui, theme_tip, theme_icon, col, 56.0).clicked() {
+            if Self::icon_btn(ui, theme_tip, &self.icons.theme, 56.0).clicked() {
                 act = Action::ToggleTheme;
             }
         });
         act
     }
 
-    /// 空文本圆形图标钮：`GlassButton::icon` 玻璃圆底 + 自绘线条图标。
+    /// 空文本圆形图标钮：`GlassButton::icon` 玻璃圆底 + 像素贴图。
     /// `diam` 是圆直径：胶囊里用 44（库内件默认最小边），独立圆用 56
     /// （= 44 按钮 + 工具条上下内边距 6×2，与连体胶囊等高，用户拍板）。
+    /// 贴图 20pt `NEAREST` 居中直显（硬边缘，不模糊）。
     fn icon_btn(
         ui: &mut egui::Ui,
         label: String,
-        paint: IconPaint,
-        col: egui::Color32,
+        icon: &egui::TextureHandle,
         diam: f32,
     ) -> egui::Response {
         let r = egui_glass::GlassButton::new("")
@@ -1039,7 +1039,13 @@ impl App {
             .show(ui)
             .on_hover_text(label);
         if ui.is_rect_visible(r.rect) {
-            paint(ui.painter(), r.rect.center(), col);
+            let side = 20.0;
+            ui.painter().image(
+                icon.id(),
+                egui::Rect::from_center_size(r.rect.center(), egui::vec2(side, side)),
+                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                egui::Color32::WHITE,
+            );
         }
         r
     }
@@ -1211,22 +1217,9 @@ impl eframe::App for App {
 
         // 动作条：右下角悬浮胶囊（用户拍板：顶部常驻改悬浮，像图二右下角）。
         // `Area` 前景层锚右下，不占 Panel 布局；里面仍是玻璃工具条 +
-        // 玻璃按钮（件库约束不变）。偏移留出底栏状态条的高度。
+        // 玻璃按钮（件库约束不变）。底栏常驻状态条已摘除，改右上 toast。
         // 顶栏不放标题（窗口标题栏 + 导航/文件页已有，不重复）。
         let mut act = Action::None;
-        egui::Panel::bottom("status")
-            .frame(egui::Frame::NONE)
-            .resizable(false)
-            .show_separator_line(false)
-            .show(ui, |ui| {
-                ui.add_space(4.0);
-                ui.vertical_centered(|ui| {
-                    egui_glass::GlassToolbar::new(self.bar_style()).show(ui, |ui| {
-                        ui.label(&self.status);
-                    });
-                });
-                ui.add_space(8.0);
-            });
 
         // 左侧：玻璃导航卡。
         egui::Panel::left("nav")
@@ -1313,10 +1306,12 @@ impl eframe::App for App {
         // 悬浮动作条最后画（前景层，盖在中央内容右下角，不挤任何布局）。
         egui::Area::new("float_actions".into())
             .order(egui::Order::Foreground)
-            .anchor(egui::Align2::RIGHT_BOTTOM, egui::vec2(-16.0, -64.0))
+            .anchor(egui::Align2::RIGHT_BOTTOM, egui::vec2(-16.0, -16.0))
             .show(ui.ctx(), |ui| {
                 act = self.action_buttons(ui);
             });
+
+        self.show_toast(ui.ctx());
 
         self.do_action(ui.ctx(), act);
     }
