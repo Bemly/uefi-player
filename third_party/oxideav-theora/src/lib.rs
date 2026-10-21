@@ -366,6 +366,12 @@ use alloc::{
 #[cfg(test)]
 mod fixture_data;
 
+// VENDOR(uefi-player): `simd` feature — SSE2 twins of the §7.9/§7.10 hot
+// paths (`wide`, runtime-gated by `simd::set_simd_enabled`). Always compiled
+// (the switch + dispatchers exist in every shape); the kernels themselves
+// are `simd`-gated inside. See `simd.rs` + VENDOR.md.
+pub mod simd;
+
 // VENDOR(uefi-player): encoder-gated — the VP3 default codebooks are only needed
 // to synthesize setup headers on encode; the decoder parses tables off the wire.
 #[cfg(feature = "encoder")]
@@ -9733,6 +9739,23 @@ pub fn inverse_dct_1d(y: &[i16; 8]) -> [i16; 8] {
 // internal — exposed for tests/fuzz; not part of the stable API
 #[doc(hidden)]
 pub fn inverse_dct_2d(dqc: &[i16; 64]) -> [[i16; 8]; 8] {
+    // VENDOR(uefi-player): runtime dispatch — SIMD fast path (8-wide row /
+    // column passes sharing one butterfly, single transpose-out) when
+    // firmware (or tests) opted in, scalar twin otherwise. The 1D kernel
+    // itself stays scalar: one transform has no lane parallelism (the
+    // parallelism is across the 8 rows — see `simd.rs`).
+    #[cfg(feature = "simd")]
+    if simd::simd_enabled() {
+        return simd::inverse_dct_2d_simd(dqc);
+    }
+    inverse_dct_2d_scalar(dqc)
+}
+
+/// Scalar twin of [`inverse_dct_2d`] (upstream verbatim): pass 1 row-by-row
+/// 1D inverse DCT, pass 2 column-by-column with the `(X + 8) >> 4` tail.
+/// Always compiled — the `simd`-off fallback, the no-`simd` build, and the
+/// bit-exact reference for the interlock tests all run this.
+fn inverse_dct_2d_scalar(dqc: &[i16; 64]) -> [[i16; 8]; 8] {
     // Pass 1: row-by-row 1D inverse DCT. Intermediate stored in
     // `res` as i16, matching the §7.9.3.2 "RES" output type
     // declaration (the 16-bit signed array variable).
@@ -10427,7 +10450,18 @@ pub fn reconstruct_block(
     };
 
     // §7.9.4 step 2(f): for each (by, bx), P = PRED + RES, clamp
-    // to 0..=255, store.
+    // to 0..=255, store (VENDOR(uefi-player): `simd` runs the fused
+    // 8-wide add+packuswb kernel; other shapes keep the loop verbatim).
+    let samples = crate::simd::add_pred_res_clamp(&pred, &res);
+    Ok(ReconstructedBlock { samples })
+}
+
+/// Scalar twin of the §7.9.4 step 2(f) add-and-clamp (upstream verbatim).
+/// Always compiled — the `simd`-off fallback and the no-`simd` build run this.
+fn add_pred_res_clamp_scalar(
+    pred: &[[u8; 8]; 8],
+    res: &[[i16; 8]; 8],
+) -> [[u8; 8]; 8] {
     let mut samples = [[0u8; 8]; 8];
     for by in 0..8 {
         for bx in 0..8 {
@@ -10443,7 +10477,7 @@ pub fn reconstruct_block(
             samples[by][bx] = clamped as u8;
         }
     }
-    Ok(ReconstructedBlock { samples })
+    samples
 }
 
 /// Internal alias for the `(PRED, RES)` pair returned by the
@@ -10558,6 +10592,11 @@ fn coded_block_pred_res(
         // Step 2(d)viii.B: DQC = §7.9.2 dequantize(coeffs, qti,
         // pli, qi0, qi). Both matrices come from §6.4.3 — the DC
         // matrix uses `qi0`, the AC matrix uses `qi`.
+        // (VENDOR(uefi-player): measured — an 8-wide `pmullw` dequant
+        // twin runs 2.4× *slower* than this scalar loop (SSE2 has no
+        // gather; both `pinsrw` chains and store-forwarding staging
+        // lose to the imul loop), so dequant stays scalar; the vector
+        // 2D below loads its output with `movdqu` rows.)
         let qmat_dc = compute_quantization_matrix(params, qti, pli, qi0)?;
         let qmat_ac = compute_quantization_matrix(params, qti, pli, qi)?;
         let dqc = dequantize_block(&inputs.coeffs_zz, &qmat_dc, &qmat_ac);
@@ -11411,6 +11450,24 @@ pub fn horizontal_loop_filter_edge(
     let stride = plane_w as usize;
     let fx = fx as usize;
     let fy = fy as usize;
+    // VENDOR(uefi-player): runtime dispatch — `simd` runs the 8-wide
+    // branchless core (one `lflim` tent + `packuswb` clamp for all rows);
+    // other shapes keep the per-row loop verbatim below.
+    #[cfg(feature = "simd")]
+    if simd::simd_enabled() {
+        let mut rows = [[0u8; 4]; 8];
+        for (by, slot) in rows.iter_mut().enumerate() {
+            let base = (fy + by) * stride;
+            slot.copy_from_slice(&recp[base + fx..base + fx + 4]);
+        }
+        let out = simd::h_filter_rows(&rows, l);
+        for (by, pair) in out.iter().enumerate() {
+            let base = (fy + by) * stride;
+            recp[base + fx + 1] = pair[0];
+            recp[base + fx + 2] = pair[1];
+        }
+        return Ok(());
+    }
     for by in 0..8usize {
         let row = fy + by;
         let base = row * stride;
@@ -11478,6 +11535,21 @@ pub fn vertical_loop_filter_edge(
     let stride = plane_w as usize;
     let fx = fx as usize;
     let fy = fy as usize;
+    // VENDOR(uefi-player): runtime dispatch — `simd` runs the 8-wide
+    // branchless core (columns are lanes natively; packed result is two
+    // contiguous rows); other shapes keep the per-column loop verbatim.
+    #[cfg(feature = "simd")]
+    if simd::simd_enabled() {
+        let mut cols = [[0u8; 8]; 4];
+        for (j, slot) in cols.iter_mut().enumerate() {
+            let base = (fy + j) * stride;
+            slot.copy_from_slice(&recp[base + fx..base + fx + 8]);
+        }
+        let out = simd::v_filter_cols(&cols, l);
+        recp[(fy + 1) * stride + fx..(fy + 1) * stride + fx + 8].copy_from_slice(&out[0]);
+        recp[(fy + 2) * stride + fx..(fy + 2) * stride + fx + 8].copy_from_slice(&out[1]);
+        return Ok(());
+    }
     for bx in 0..8usize {
         let col = fx + bx;
         let p0 = recp[fy * stride + col] as i32;
@@ -44358,4 +44430,442 @@ mod tests {
             "coded {data_bytes} B vs budget {budget_bytes} B"
         );
     }
+
+    // =====================================================================
+    // VENDOR(uefi-player): `simd` dual-path interlock tests. Every test
+    // below runs under the `simd` feature and flips the runtime switch so
+    // both kernels render in one binary and must agree byte for byte.
+    // Switch state is saved/restored per test (parallel-test safe: the two
+    // paths are interchangeable by construction).
+    // =====================================================================
+
+    /// Deterministic xorshift32 (test-only RNG; no dependency surface).
+    #[cfg(feature = "simd")]
+    fn xorshift32(state: &mut u32) -> u32 {
+        let mut x = *state;
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        *state = x;
+        x
+    }
+
+    #[cfg(feature = "simd")]
+    fn simd_on() -> bool {
+        let prev = crate::simd::simd_enabled();
+        crate::simd::set_simd_enabled(true);
+        prev
+    }
+
+    #[cfg(feature = "simd")]
+    fn simd_restore(prev: bool) {
+        crate::simd::set_simd_enabled(prev);
+    }
+
+    /// The 8-wide butterfly in isolation: broadcast one scalar input across
+    /// all 8 lanes, run [`crate::simd::idct_8wide`], every lane must equal
+    /// the scalar [`inverse_dct_1d`]. Covers impulses per position, wrapping
+    /// edges (±32768 mixes), and 3000 randomized blocks.
+    #[cfg(feature = "simd")]
+    #[test]
+    fn simd_idct_8wide_broadcast_matches_scalar_1d() {
+        use wide::i16x8;
+        let prev = simd_on();
+        let edges: [i16; 19] = [
+            0, 1, -1, 127, -128, 255, -256, 1024, -1024, 4096, -4096, 16384, -16384, 32767,
+            -32768, 12345, -12345, 30000, -30000,
+        ];
+        let mut cases: Vec<[i16; 8]> = Vec::new();
+        for &v in edges.iter() {
+            cases.push([v; 8]);
+            for pos in 0..8 {
+                let mut y = [0i16; 8];
+                y[pos] = v;
+                cases.push(y);
+            }
+        }
+        let mut rng: u32 = 0x243F_6A88;
+        for _ in 0..3000 {
+            let mut y = [0i16; 8];
+            for v in y.iter_mut() {
+                *v = xorshift32(&mut rng) as i16;
+            }
+            cases.push(y);
+        }
+        for y in cases.iter() {
+            let mut yv = [i16x8::ZERO; 8];
+            for (slot, &v) in yv.iter_mut().zip(y.iter()) {
+                *slot = i16x8::splat(v);
+            }
+            let out = crate::simd::idct_8wide(&yv);
+            let expected = inverse_dct_1d(y);
+            for (k, lane) in out.iter().enumerate() {
+                assert_eq!(lane.to_array(), [expected[k]; 8], "input {y:?} lane {k}");
+            }
+        }
+        simd_restore(prev);
+    }
+
+    /// The 8×8 unpack transpose on a known asymmetric pattern, plus the
+    /// involution (twice = identity) the 2D pipeline relies on.
+    #[cfg(feature = "simd")]
+    #[test]
+    fn simd_transpose_8x8_known_pattern_and_involution() {
+        use wide::i16x8;
+        let prev = simd_on();
+        let mut rows = [i16x8::ZERO; 8];
+        for (r, slot) in rows.iter_mut().enumerate() {
+            let mut a = [0i16; 8];
+            for (c, v) in a.iter_mut().enumerate() {
+                *v = (r * 8 + c) as i16;
+            }
+            *slot = i16x8::new(a);
+        }
+        let t = crate::simd::transpose_8x8(rows);
+        for (c, col) in t.iter().enumerate() {
+            let a = col.to_array();
+            for (r, &v) in a.iter().enumerate() {
+                assert_eq!(v, (r * 8 + c) as i16, "t[{c}][{r}]");
+            }
+        }
+        let back = crate::simd::transpose_8x8(t);
+        for (r, row) in back.iter().enumerate() {
+            assert_eq!(row.to_array()[r], (r * 8 + r) as i16);
+            for (c, &v) in row.to_array().iter().enumerate() {
+                assert_eq!(v, (r * 8 + c) as i16, "back[{r}][{c}]");
+            }
+        }
+        simd_restore(prev);
+    }
+
+    /// `inverse_dct_2d` with the switch on vs off: spec vectors (DC flat /
+    /// negative / small-DC-rounds-to-zero / row-vs-column orientation),
+    /// 2000 randomized dense blocks, 500 sparse (video-typical) blocks, and
+    /// per-position impulses at wrapping extremes.
+    #[cfg(feature = "simd")]
+    #[test]
+    fn simd_idct_2d_agrees_sweep() {
+        let prev = simd_on();
+        let mut cases: Vec<[i16; 64]> = Vec::new();
+        let mut dc = [0i16; 64];
+        dc[0] = 1024;
+        cases.push(dc);
+        let mut dcneg = [0i16; 64];
+        dcneg[0] = -1024;
+        cases.push(dcneg);
+        let mut small = [0i16; 64];
+        small[0] = 1;
+        cases.push(small);
+        let mut row = [0i16; 64];
+        row[1] = 4096;
+        cases.push(row);
+        let mut col = [0i16; 64];
+        col[8] = 4096;
+        cases.push(col);
+        let mut rng: u32 = 0xB7E1_5163;
+        for _ in 0..2000 {
+            let mut dqc = [0i16; 64];
+            for v in dqc.iter_mut() {
+                *v = xorshift32(&mut rng) as i16;
+            }
+            cases.push(dqc);
+        }
+        for _ in 0..500 {
+            let mut dqc = [0i16; 64];
+            dqc[0] = xorshift32(&mut rng) as i16;
+            for _ in 0..(xorshift32(&mut rng) % 5) {
+                let i = (xorshift32(&mut rng) % 64) as usize;
+                dqc[i] = (xorshift32(&mut rng) % 513) as i16 - 256;
+            }
+            cases.push(dqc);
+        }
+        for pos in 0..64 {
+            for &v in [1i16, -1, 32767, -32768].iter() {
+                let mut dqc = [0i16; 64];
+                dqc[pos] = v;
+                cases.push(dqc);
+            }
+        }
+        cases.push([32767i16; 64]);
+        cases.push([-32768i16; 64]);
+        for dqc in cases.iter() {
+            simd::set_simd_enabled(true);
+            let via_simd = inverse_dct_2d(dqc);
+            simd::set_simd_enabled(false);
+            let via_scalar = inverse_dct_2d(dqc);
+            assert_eq!(via_simd, via_scalar, "dqc[0..8] = {:?}", &dqc[..8]);
+        }
+        simd_restore(prev);
+    }
+
+    /// Step 2(f) add-and-clamp on vs off: predictor corners × residual
+    /// corners (full 6×8 product on uniform blocks — every saturation arm)
+    /// plus 300 randomized blocks.
+    #[cfg(feature = "simd")]
+    #[test]
+    fn simd_add_pred_res_clamp_agrees() {
+        let prev = simd_on();
+        let preds = [0u8, 1, 127, 128, 254, 255];
+        let ress = [-32768i16, -256, -1, 0, 1, 255, 256, 32767];
+        for &p in preds.iter() {
+            for &r in ress.iter() {
+                let pred = [[p; 8]; 8];
+                let res = [[r; 8]; 8];
+                simd::set_simd_enabled(true);
+                let via_simd = crate::simd::add_pred_res_clamp(&pred, &res);
+                simd::set_simd_enabled(false);
+                let via_scalar = crate::simd::add_pred_res_clamp(&pred, &res);
+                assert_eq!(via_simd, via_scalar, "pred={p} res={r}");
+            }
+        }
+        let mut rng: u32 = 0xBF71_5E20;
+        for _ in 0..300 {
+            let mut pred = [[0u8; 8]; 8];
+            let mut res = [[0i16; 8]; 8];
+            for row in pred.iter_mut() {
+                for v in row.iter_mut() {
+                    *v = (xorshift32(&mut rng) % 256) as u8;
+                }
+            }
+            for row in res.iter_mut() {
+                for v in row.iter_mut() {
+                    *v = xorshift32(&mut rng) as i16;
+                }
+            }
+            simd::set_simd_enabled(true);
+            let via_simd = crate::simd::add_pred_res_clamp(&pred, &res);
+            simd::set_simd_enabled(false);
+            let via_scalar = crate::simd::add_pred_res_clamp(&pred, &res);
+            assert_eq!(via_simd, via_scalar);
+        }
+        simd_restore(prev);
+    }
+
+    /// `lflim_8wide` vs scalar `lflim`, exhaustive at every breakpoint ±2
+    /// for every limit 0..=255 (4352 lanes): the five-way piecewise shape,
+    /// the `|R| >= 2L → 0` genuine-edge arm, and `L = 0`.
+    #[cfg(feature = "simd")]
+    #[test]
+    fn simd_lflim_8wide_agrees_exhaustive_breakpoints() {
+        use wide::i16x8;
+        let prev = simd_on();
+        for l in 0..=255u8 {
+            let li = l as i32;
+            let rs = [
+                -2 * li - 2,
+                -2 * li - 1,
+                -2 * li,
+                -2 * li + 1,
+                -li - 1,
+                -li,
+                -li + 1,
+                -1,
+                0,
+                1,
+                li - 1,
+                li,
+                li + 1,
+                2 * li - 1,
+                2 * li,
+                2 * li + 1,
+                2 * li + 2,
+            ];
+            for chunk in rs.chunks(8) {
+                let mut r = [0i16; 8];
+                for (slot, &v) in r.iter_mut().zip(chunk.iter()) {
+                    *slot = v as i16;
+                }
+                let got = crate::simd::lflim_8wide(i16x8::new(r), l as i16).to_array();
+                for (i, &v) in chunk.iter().enumerate() {
+                    assert_eq!(got[i], lflim(v, l) as i16, "l={l} r={v}");
+                }
+            }
+        }
+        simd_restore(prev);
+    }
+
+    /// `horizontal_loop_filter_edge` on vs off over whole planes: constant
+    /// / step / gradient / checkerboard / 200 randomized planes × limits
+    /// {0, 1, 5, 16, 63, 127, 255} × anchor positions. Compares full planes.
+    #[cfg(feature = "simd")]
+    #[test]
+    fn simd_h_edge_agrees_sweep() {
+        let prev = simd_on();
+        let mut rng: u32 = 0xC2B2_8093;
+        let mut planes: Vec<Vec<u8>> = vec![
+            vec![0u8; 256],
+            vec![128u8; 256],
+            vec![255u8; 256],
+            (0..256).map(|i| if i % 16 < 8 { 0u8 } else { 255u8 }).collect(),
+            (0..256).map(|i| (i % 256) as u8).collect(),
+            (0..256).map(|i| if (i / 16 + i) % 2 == 0 { 0u8 } else { 255u8 }).collect(),
+        ];
+        for _ in 0..200 {
+            planes.push((0..256).map(|_| (xorshift32(&mut rng) % 256) as u8).collect());
+        }
+        for plane in planes.iter() {
+            for &l in [0u8, 1, 5, 16, 63, 127, 255].iter() {
+                for &(fx, fy) in [(0u32, 0u32), (4, 0), (8, 8), (12, 8)].iter() {
+                    let mut a = plane.clone();
+                    let mut b = plane.clone();
+                    simd::set_simd_enabled(true);
+                    horizontal_loop_filter_edge(&mut a, 16, 16, fx, fy, l).unwrap();
+                    simd::set_simd_enabled(false);
+                    horizontal_loop_filter_edge(&mut b, 16, 16, fx, fy, l).unwrap();
+                    assert_eq!(a, b, "l={l} fx={fx} fy={fy}");
+                }
+            }
+        }
+        // Footprint guards behave identically in both shapes.
+        for en in [true, false] {
+            simd::set_simd_enabled(en);
+            let mut p = vec![0u8; 256];
+            assert!(horizontal_loop_filter_edge(&mut p, 16, 16, 13, 0, 5).is_err());
+            assert!(horizontal_loop_filter_edge(&mut [0u8; 10], 16, 16, 0, 0, 5).is_err());
+        }
+        simd_restore(prev);
+    }
+
+    /// `vertical_loop_filter_edge` on vs off: same sweep shape as the
+    /// horizontal edge (columns are lanes; packed result is contiguous).
+    #[cfg(feature = "simd")]
+    #[test]
+    fn simd_v_edge_agrees_sweep() {
+        let prev = simd_on();
+        let mut rng: u32 = 0xDAB8_1000;
+        let mut planes: Vec<Vec<u8>> = vec![
+            vec![0u8; 256],
+            vec![128u8; 256],
+            vec![255u8; 256],
+            (0..256).map(|i| if i / 16 < 8 { 0u8 } else { 255u8 }).collect(),
+            (0..256).map(|i| (i % 256) as u8).collect(),
+            (0..256).map(|i| if (i / 16 + i) % 2 == 0 { 0u8 } else { 255u8 }).collect(),
+        ];
+        for _ in 0..200 {
+            planes.push((0..256).map(|_| (xorshift32(&mut rng) % 256) as u8).collect());
+        }
+        for plane in planes.iter() {
+            for &l in [0u8, 1, 5, 16, 63, 127, 255].iter() {
+                for &(fx, fy) in [(0u32, 0u32), (0, 4), (8, 8), (8, 12)].iter() {
+                    let mut a = plane.clone();
+                    let mut b = plane.clone();
+                    simd::set_simd_enabled(true);
+                    vertical_loop_filter_edge(&mut a, 16, 16, fx, fy, l).unwrap();
+                    simd::set_simd_enabled(false);
+                    vertical_loop_filter_edge(&mut b, 16, 16, fx, fy, l).unwrap();
+                    assert_eq!(a, b, "l={l} fx={fx} fy={fy}");
+                }
+            }
+        }
+        for en in [true, false] {
+            simd::set_simd_enabled(en);
+            let mut p = vec![0u8; 256];
+            assert!(vertical_loop_filter_edge(&mut p, 16, 16, 0, 13, 5).is_err());
+            assert!(vertical_loop_filter_edge(&mut [0u8; 10], 16, 16, 0, 0, 5).is_err());
+        }
+        simd_restore(prev);
+    }
+
+    /// `reconstruct_block` on vs off over the coded paths that run the
+    /// fused kernel: intra DC-only (ncoeffs < 2), intra full-DCT with
+    /// randomized coefficients × qi corners, and uncoded copy. The
+    /// predictor/MV serial machinery is untouched — only the dequant →
+    /// IDCT → add+clamp pipeline switches.
+    #[cfg(feature = "simd")]
+    #[test]
+    fn simd_reconstruct_block_coded_agrees() {
+        let prev = simd_on();
+        let params = make_recon_params();
+        let planes = [
+            ramp_plane(16, 16, 0),
+            ramp_plane(16, 16, 10),
+            ramp_plane(16, 16, 20),
+            ramp_plane(16, 16, 30),
+            ramp_plane(16, 16, 40),
+            ramp_plane(16, 16, 50),
+        ];
+        let refs = make_refs(&planes, 16, 16);
+        let mut rng: u32 = 0x1656_67B1;
+        // DC-only shortcut path.
+        for &c0 in [0i16, 5, -40, 1000, -1000].iter() {
+            let mut coeffs = [0i16; 64];
+            coeffs[0] = c0;
+            let inputs = ReconstructBlockInputs {
+                bcoded: true,
+                mb_mode: MacroBlockMode::Intra,
+                mvect: MotionVector::ZERO,
+                coeffs_zz: coeffs,
+                ncoeffs: 0,
+                qii: 0,
+                hsub: false,
+                vsub: false,
+            };
+            for &qi in [0u8, 10, 63].iter() {
+                let qis = [qi];
+                simd::set_simd_enabled(true);
+                let a = reconstruct_block(&inputs, 0, 0, 0, &qis, &params, &refs).unwrap();
+                simd::set_simd_enabled(false);
+                let b = reconstruct_block(&inputs, 0, 0, 0, &qis, &params, &refs).unwrap();
+                assert_eq!(a, b, "dc c0={c0} qi={qi}");
+            }
+        }
+        // Full-DCT fused path, randomized coefficients × qi corners.
+        for _ in 0..60 {
+            let mut coeffs = [0i16; 64];
+            for v in coeffs.iter_mut() {
+                *v = (xorshift32(&mut rng) % 513) as i16 - 256;
+            }
+            let inputs = ReconstructBlockInputs {
+                bcoded: true,
+                mb_mode: MacroBlockMode::Intra,
+                mvect: MotionVector::ZERO,
+                coeffs_zz: coeffs,
+                ncoeffs: 64,
+                qii: 0,
+                hsub: false,
+                vsub: false,
+            };
+            for &qi in [0u8, 10, 44, 63].iter() {
+                let qis = [qi];
+                simd::set_simd_enabled(true);
+                let a = reconstruct_block(&inputs, 0, 0, 0, &qis, &params, &refs).unwrap();
+                simd::set_simd_enabled(false);
+                let b = reconstruct_block(&inputs, 0, 0, 0, &qis, &params, &refs).unwrap();
+                assert_eq!(a, b, "qi={qi}");
+            }
+        }
+        // Uncoded path (shares the add+clamp kernel with zero residual).
+        let inputs = ReconstructBlockInputs {
+            bcoded: false,
+            mb_mode: MacroBlockMode::Intra,
+            mvect: MotionVector::ZERO,
+            coeffs_zz: [0i16; 64],
+            ncoeffs: 0,
+            qii: 0,
+            hsub: false,
+            vsub: false,
+        };
+        let qis = [10u8];
+        simd::set_simd_enabled(true);
+        let a = reconstruct_block(&inputs, 0, 4, 4, &qis, &params, &refs).unwrap();
+        simd::set_simd_enabled(false);
+        let b = reconstruct_block(&inputs, 0, 4, 4, &qis, &params, &refs).unwrap();
+        assert_eq!(a, b);
+        simd_restore(prev);
+    }
+
+    /// Switch hygiene: nested save/restore round-trips, so parallel test
+    /// threads flipping the switch cannot disturb each other.
+    #[cfg(feature = "simd")]
+    #[test]
+    fn simd_switch_restores_prior_state() {
+        let prev = crate::simd::simd_enabled();
+        crate::simd::set_simd_enabled(true);
+        assert!(crate::simd::simd_enabled());
+        crate::simd::set_simd_enabled(false);
+        assert!(!crate::simd::simd_enabled());
+        simd_restore(prev);
+        assert_eq!(crate::simd::simd_enabled(), prev);
+    }
 }
+

@@ -54,45 +54,152 @@
   根门禁因此用 `cargo fmt -p uefi-player --check`
   （`--all` 会连带 path 依赖一起查；见根 AGENTS.md「双构建」注释）。
 
-## SIMD 评估（2026-10-21）：标量已够，不做向量化
+## SIMD 卷土重来（2026-10-21）：用户拍板必须上，e5c2ddf  verdict 作废
 
 - 热路（`src/lib.rs` 全整数；`f64` 仅 `granule_position_seconds` 一处除法，
-  无向量化对象；encoder 区 44k 行单文件中的前向/RD/码率机器属 `encoder`
-  门之后，decoder-only 构建已排除）：`inverse_dct_1d/2d`（§7.9.3.1 55 步
-  定点 butterfly，`wrapping` + `>>16` 语义逐字对照规范）→
-  `dequantize_block`（64 乘，zig-zag 查表串行）→ `reconstruct_block`
-  （PRED+RES 逐点加钳，8×8）→ `lflim` + `horizontal/vertical_loop_filter_edge`
- （4-tap 响应 + 分段钳制，逐边 8 次分支；分支密集即 SIMD-hostile）；
-  熵解码/运动矢量分裂/帧内预测是串行分支，Amdahl 上不可向量化。
-- 轮子（与 mpeg2v 同一批实搜，结论相同：都不用）：
-  `wide 1.7.1`（83.8M 下载，Zlib OR Apache-2.0 OR MIT，MSRV 1.89，
-  `default-features=false` 可 no_std）——不用（h263“永不进固件”前例 +
-  内在函数 + 自带分发）。
-  `safe_arch 1.2.0`（82.6M 下载，同 license，MSRV 1.89，no-std 原生）——
-  不用（`core::arch` 薄包装 = 内在函数，违反 `asm!` 优先；无 XSAVE 集成）。
-  `pulp 0.22.3`（31.8M 下载，MIT，默认 `x86-v3` 基线）——不用
-  （AVX2 基线假设撞 UEFI SSE2 基线 + XSAVE 门控；自带分发禁）。
-- 自研同样不做：实测标量代价（host release，仓外 Rust harness 直测本箱
-  公开整数核，视频典型稀疏输入）：`inverse_dct_1d` 10ns/次，
-  `inverse_dct_2d` 90ns/块，`dequantize_block` 38ns/块，`lflim` 2ns/次；
-  外推 1080p 4:2:0 **全块 coded 最坏**：IDCT 4.4ms + 反量化 1.8ms +
-  环路滤波 2.6ms ≈ 8.8ms/帧（典型 30~50% coded + 跳边 ≈ 2~4ms），
-  相对 33ms 预算 headroom 充足；手写 55 步 butterfly 的 `asm!` 版本省
-  最多 ~2ms（6% 预算），但要逐位复刻 wrapping/截断语义，风险收益比为负。
-  `copy_block` 矩阵搬 BGRA 帧缓冲，与 i16 系数/u8 参考平面通路无关，无复用点。
-- 正确性证据：箱内嵌入式单测（规范逐字 IDCT 向量、zig-zag、dequant、
-  环路滤波足迹）双配置通过；整帧 ffmpeg 双解比对本次**未做**——被 OggS
-  拆帧卡住（本箱吃 packet，固件侧 Ogg 拆帧另立项，见下；无拆帧即无整帧
-  输入），列为遗留风险，待拆帧落地后按 mpeg2v 口径（Y 平面，max|Δ|≤4 /
-  PSNR≥58dB / 差异≤3% / 帧数精确）补做。
-- `framework`/`encoder` 门保持（decoder-only 口径不变），零 `src/` 改动，
-  故无新增 `VENDOR(uefi-player):` 注释、无 fmt 影响。
-  重启条件：Ogg 集成后实机 profile 显示本箱 >30% 帧预算，或上游自带
-  no_std SIMD twins（届时走 h263/vp9 的 std 门控主义）。
+  无向量化对象；encoder 区前向/RD/码率机器属 `encoder` 门之后，
+  decoder-only 构建已排除）：`inverse_dct_1d/2d`（§7.9.3.1 55 步定点
+  butterfly，`wrapping` + `>>16`）→ `dequantize_block`（64 乘，zig-zag 查表
+  串行）→ `reconstruct_block`（8×8 加钳，`p = (pred+res).clamp(0,255)`）→
+  `lflim` + `horizontal/vertical_loop_filter_edge`（4-tap + 分段钳制，每边
+  8 行/列分支）。熵解码/MV/帧内预测串行不动（Amdahl，本轮不碰）。
 
-## Ogg  carriage（固件侧另立项，不在本箱）
+### 轮子实搜结论（2026-10-21 crates.io + docs.rs，不许跳步，结论在此）
 
-本箱只吃已拆帧 packet（§6.1 分类 + §A.2.3 granule 映射是公共 API，
-decoder-only 构建保留），OggS 页拆帧不在箱内。固件侧手写 OggS 拆帧
-（100% Rust）另立项；校验和口径先定死只取 Y 平面（Theora 输出三平面，
-下原点行序，`crop_for_display` 后翻转 + YUV→BGRA 是固件侧集成活）。
+- `wide 1.7.1`（84.0M 下载，MSRV 1.89，Zlib/Apache-2.0/MIT，
+  `default-features = false` 可 no_std）——**用**。`i16x8::mul_keep_high`
+  就是 butterfly 要的 `(a*b)>>16`（`pmulhw`，SSE2）；另有 wrapping 加减、
+  `saturating_add`（`paddsw`，重建钳制）、`min`/`max`（`pminsw/pmaxsw`）、
+  `simd_gt`+`select`（`pcmpgtw`+与/或，`lflim` 去分支）、`unbounded_shr_scalar`
+  （`psraw`）、`narrow_i16x8`（`packuswb`，饱和钳制）。其 `std` 特性只加速
+  f32/f64 `sqrt`，整数核零触及。与在树 h263-rs 同版本（`1.7.1`），共享
+  lockfile 条目，零新增依赖（AGENTS 同大版本优先）。
+- `safe_arch 1.2.0`（82.7M，同 license，no_std 原生）——不用：`core::arch`
+  薄包装 = 内在函数，无 XSAVE 集成，相对 wide 零附加价值（AGENTS 要
+  `asm!` 优先，h263 前例已在同机上选 wide 弃 safe_arch）。
+- `pulp 0.22.3`（31.9M，MIT，默认 `x86-v3`）——不用：AVX2 基线撞 UEFI
+  SSE2 基线 + XSAVE 门控，且自带分发（禁第二套 CPUID）。
+- 自研部分：wide 的 runtime-index `shuffle` 在纯 SSE2 下标量化
+  （`u16x8_.rs` 的 `pick!` 在无 SSSE3 时走 `to_array` 标量回退），而 55 步
+  butterfly 的配对每级都变，跨车道重排不可避免——故 butterfly 不按 8 车道
+  做 1 个变换（零 lane 内并行度），而是 8 行变换一次跑完（SoA，见下）；
+  唯一的 8×8 转置用 `core::arch` 的 `punpcklwd/hwd` 手排（SSE2 基线 1:1
+  指令，`#[allow(unsafe_code)]` 仅限转置函数 + SAFETY，其余全文件 safe，
+  crate 级 `#![deny(unsafe_code)]` 保持）。
+
+### 去分支方案（A/B/C 逐处落地，全部 `VENDOR(uefi-player):` 标点）
+
+- A) 55 步 butterfly：**无分支可消**（直本身是 55 步直线码）——关键是截断
+  语义即车道语义，零掩码开销。8 个 `i16x8` 寄存器 `V0..V7`（`Vk` = 8 个行
+  变换的第 `k` 个元，列优先 SoA），55 步逐字映射（`t[i]` → `Vi`）：
+  加减 wrapping（`paddw/psubw`）、乘高半部（`pmulhw`）。Table 7.65 中
+  `> i16::MAX` 的常数（C3/C4/S3/S6/S7）以 `C−65536` 进入 `pmulhw` 再 `+y`
+  补回——恒等式 `(y*C)>>16 = ((y*(C−65536))>>16) + y`（`y*65536` 是 `2^16`
+  倍数，算术右移对其精确分配），`mul_bigc` 注释有逐值验算。
+  逐位一致证明：车道全程跟踪标量值 mod 2^16（wrapping 加减/mulh 保持同余；
+  标量每次 `as i16` 截断点车道恒等于已截断值；其余下游全线性），截断点与
+  输出 `as i16` 逐位一致。行列两遍共用同一 `idct_8wide`，中间一次转置。
+  常数 splat 按使用点现播（不 hoist：8 数据 + 1 常数 + 临时恰好塞下 16 xmm，
+  hoist 7 个 splat 会 spill）。`(X+8)>>4` 用 i16 分解
+  `(X>>4) + (((X&15)+8)>>4)`（`X&15` 即数学 mod 16，负数亦然；省掉 i32
+  拓宽的 2×unpack+shift+pack）。
+- B) dequant+reconstruct 融合：**dequant 保持标量**（实测：8-wide `pmullw`
+  gather 版比标量 imul 环慢 2.4×——SSE2 无 gather，`pinsrw` 串行链与
+  store-forwarding 碎片双输；`dequantize_block` 维持上游原样，零分发）。
+  融合落在其余两处：① 2D 管线融合（行遍→转置→列遍→偏置全寄存器传递，
+  `dqc` 仅 L1 中转，转置-in 实测 0.8ns）；② 重建 2(f) 融成单遍向量核
+  （`paddsw` + `packuswb`，`add_pred_res_clamp`，三路 RES——DC 填充/全
+  IDCT/零残差——共用）。
+- C) loop_filter 去分支化：`lflim` 五段折线 = 无分支 tent
+  `clamp(r,±2l)` → `select` 折叠 → 越界选零（`pminsw/pmaxsw/pcmpgtw`+与/或，
+  SSE2 mask-select 形状，无 `blendv`）；`clamp_to_u8` 三分支 =
+  `packuswb`。横边 8 行 gather + 纵边 4 行读（列即车道，打包即连续两行，
+  纵边零 scatter）。车道填充一律经 `load_i16x8`（`black_box` 挡住 LLVM 的
+  `pinsrw` SLP——无 fence 时反汇编见 300+ `pinsrw` 串行链；有 fence 后
+  `movdqu` 单发，边缘核翻正为胜）。
+- NT/sfence/对齐：本核只有栈/小缓冲 `loadu/storeu`，无流式存储——nt 不适用
+  （`movntdqa` 要求 WC 源，对普通 RAM 会 #GP，见 `gop_simd.rs` 同款粒度）；
+  无 AVX/AVX2（SSE2 基线即可，无需 `check_avx_support`，也无第二套 CPUID）。
+
+### 特性门与固件契约（decoder-only 口径不变，framework/encoder 门保持）
+
+- `simd = ["dep:wide"]`（纯自研转置除外，零新依赖）；`std = ["simd",
+  "wide/std"]`（std 蕴含 simd，默认形与上游逐字节一致——开关默认 ON 下
+  跑 SIMD 路径，但互锁单测逐字节锁定）。`default` 不变
+  `["std", "framework", "encoder"]`；`framework`/`encoder` 各自蕴含 `std`
+  （从而蕴含 `simd`），bad 组合仍不可能。固件形 `--no-default-features`
+  （纯标量）与 `--no-default-features --features simd`（no_std SIMD）并存。
+- 运行时单比特：`simd::set_simd_enabled` 公开（无 `simd` 时 no-op），标量
+  twin 恒编译。固件接线座（本箱不管 `src/`，由接线方按此契约推）：
+  `resolve_accel` 后按 `copy_width()` 单比特推——`scalar`=关/其余=开
+  （参考 h263 e5dd289 开关 + h265 `force_*` 推法；本箱永不自研 CPUID）。
+  `Relaxed` 足够（双路逐字节一致，撕裂读至多混帧不损坏）。工作站
+  `src/config` 已有 `decode_hevc/vp9/h263` 三键（`DecodeSimd` 三态），theora
+  键（`decode_theora` + `set_simd_enabled(decode_on(...))` + 根
+  `oxideav-theora/features=["simd"]`）待接线方补——本箱只动
+  `third_party/oxideav-theora`，不动 `src/`/`Cargo.toml`/`Cargo.lock`。
+- `rust-version` 1.85 → 1.89（`wide 1.7.1` MSRV，仍低于仓线 1.92）。
+
+### 正确性证据（双路互锁，规范向量 + 尺寸×强度 sweep 逐字节比对）
+
+- 箱内嵌入式单测（默认形，开关 ON/OFF 双跑同一二进制；save/restore 防
+  并行干扰）：butterfly 广播隔离（19 边缘值×8 位置 + 3000 随机）；
+  转置已知模式 + 对合；2D sweep（DC 平坦/负 DC/小 DC/行列朝向规范向量 +
+  2000 随机密块 + 500 稀疏 + 64 位置×4 极值 impulses + 全 ±32768）；
+  2(f) 加钳（6 pred 角 × 8 res 角全积 + 300 随机）；
+  `lflim_8wide` 对标量 `lflim` 全断点穷举（`l` 0..=255 × 每 `l` 17 个
+  `±2l/±l/0/±1` 邻域 = 4352 车道）；双边 sweep（常数/台阶/渐变/棋盘/
+  200 随机平面 × 7 强度 × 4 锚点，全平面比对 + 足迹/长度守卫双路同错）；
+  `reconstruct_block` 生产路径（DC-only/全 DCT 随机系数×qi 角/uncoded）。
+  677 存量单测在 SIMD-ON 下原样全绿（精确期望即互锁向量）。
+- 整帧口径：待 Ogg 拆帧落地后补整帧 ffmpeg 双解（Y 平面 max|Δ|≤4 /
+  PSNR≥58dB / 差异≤3% / 帧数精确——沿 mpeg2v 口径，见下“遗留风险”）。
+  本轮用合成块级 sweep + 存量端到端 fixture 测试（`decode_frame_*` 全绿，
+  含 1080p 双帧 trace）代替。
+
+### 实测性能（Intel Mac，min-of-3；SSE2-only 列 = 固件 codegen 模拟）
+
+| 核 | 标量 | SIMD | 结论 |
+|---|---|---|---|
+| IDCT 2D（密块）| 119ns | 164ns | 0.72×（延迟界：55 步串行链 ×2，见下）|
+| 环路滤波双边（随机纹理）| 506–1114ns（分支预测风暴，方差大）| ~200ns（确定性）| 2.6–5× |
+| 重建全路径 intra | — | — | ~1.04×（加钳胜补 IDCT 平）|
+| 反量化（gather 版，已删）| 58ns | 139ns | 0.42×（回退标量，见上）|
+
+- IDCT 未能更快的原因（已用反汇编确认 codegen 干净：UEFI 物件 40
+  pmulhw/pmullw + 105 pack/clamp/min/max + 608 punpck，零 SSE4.1/零 VEX；
+  SIMD kernel 内无 `pinsrw` 串行链——`load_i16x8` fence 后车道填充全是
+  `movdqu`）：55 步是单依赖链 × 行列两遍串行，
+  而标量 16 个独立 1D 变换天然 ILP——这是算法结构上限，不是实现问题；
+  多块批处理可破（要改驱动循环，本轮不动）。典型稀疏内容 IDCT 切片本就
+  1–2ms，0.72× 绝对值 +0.2–0.5ms，由边缘核的 −0.5–1ms 对冲；净帧级持平偏正。
+- UEFI 终链（`.efi`）以标量形编译本箱（根未接线前）；`--features simd`
+  的 no_std 终链待根接线后由接线方验证（本箱 `cargo check` 已过）。
+
+### 验证门（本轮实跑）
+
+- host 单测默认形 686 全绿；4 配置 check 零（新）警告：默认 /
+  无默认 / 无默认+simd / UEFI（x86_64-unknown-uefi，默认+simd 双形）；
+  根三门（`check/clippy/fmt -p uefi-player`）待接线后由接线方复验——本箱
+  未动根文件，vendor 树豁免 fmt（合流能力，沿 handover §7.3）。
+- QEMU/theora-probe：Ogg 另立项后补（本箱不做拆帧）。
+
+### Ogg carriage（固件侧另立项，不在本箱；沿用 e5c2ddf 口径）
+
+- 本箱只吃已拆帧 packet（§6.1 分类 + §A.2.3 granule 映射是公共 API，
+  decoder-only 构建保留），固件侧 OggS 拆帧手写（100% Rust）另立项；
+  校验和口径先定死只取 Y 平面（Theora 输出三平面，下原点行序，
+  `crop_for_display` 后翻转 + YUV→BGRA 是固件侧集成活）。
+
+### 遗留风险
+
+1. Ogg 拆帧未落地 → 整帧 ffmpeg 双解（Y 口径）未补，帧级证据缺一块；
+   块级 sweep + 存量端到端 fixture（1080p trace）暂代。
+2. IDCT SIMD 在延迟界结构上追不上标量 ILP（0.72× 密块）；帧级净效果靠
+   边缘核对冲——若未来 profile 显示 IDCT 主导，可做跨块批处理（改驱动，
+   另立项），或固件侧按 block-type 动态选路（开关已就位）。
+3. 微架构差异：以上数字是 Intel Mac 实测；固件跑在未知 x86-64 上，
+   SSE2 确定性（无 autovec 赌博）是本轮真正的可移植收益。
+4. `cargo test` 在 no_std 形下全箱不可跑（test harness 要 std + 存量测试
+   引用 framework/encoder/std——e5c2ddf 前即如此，非本轮引入）：no_std 双形
+   只做 `check`，双路行为由默认形开关翻转覆盖。
