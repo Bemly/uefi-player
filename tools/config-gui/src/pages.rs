@@ -301,6 +301,9 @@ impl App {
                 ui.add_space(4.0);
                 ui.label(t!("play.format"));
                 self.cfg.play.format = self.format_row_all(ui, self.cfg.play.format);
+                ui.small(t!("format.mp4_sub"));
+                self.cfg.play.format = self.format_mp4_row(ui, self.cfg.play.format);
+                ui.small(t!("format.mp4_sub_hint"));
                 ui.small(format_desc(self.cfg.play.format));
                 ui.small(t!("play.format_hint"));
                 ui.add_space(4.0);
@@ -354,6 +357,9 @@ impl App {
                     ui.add_space(10.0);
                     ui.label(t!("wallpaper.format"));
                     self.cfg.wallpaper.format = self.format_row(ui, self.cfg.wallpaper.format);
+                    ui.small(t!("format.mp4_sub"));
+                    self.cfg.wallpaper.format = self.format_mp4_row(ui, self.cfg.wallpaper.format);
+                    ui.small(t!("format.mp4_sub_hint"));
                     ui.small(format_desc(self.cfg.wallpaper.format));
                     ui.add_space(10.0);
                     ui.label(t!("wallpaper.popup_freeze"));

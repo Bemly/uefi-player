@@ -192,6 +192,21 @@ impl App {
         next
     }
 
+    /// MP4 容器子选项行（三颗玻璃按钮：HEVC/H.264/VP9，同上单选的镜像，
+    /// 选中态与主行同步；走 MP4 容器的格式收拢在此行，裸流格式只在主行）。
+    pub(crate) fn format_mp4_row(&mut self, ui: &mut egui::Ui, cur: MediaFormat) -> MediaFormat {
+        const MP4: [MediaFormat; 3] = [MediaFormat::Hevc, MediaFormat::Avc, MediaFormat::Vp9];
+        let mut next = cur;
+        ui.horizontal_wrapped(|ui| {
+            for v in MP4 {
+                if self.option_button(ui, cur == v, &crate::text::format_name(v)) {
+                    next = v;
+                }
+            }
+        });
+        next
+    }
+
     /// 实测行：有值报数，无值提示切 auto 下次启动测。
     /// `&self`：背景纸（`page_backdrop`）只读重排也能调，不写状态。
     pub(crate) fn measured_line(&self) -> String {
