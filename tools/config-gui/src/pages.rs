@@ -309,16 +309,18 @@ impl App {
                 ui.add_space(4.0);
                 ui.label(t!("play.pipeline"));
                 // 8 档两行：一行 clip 系（现路 + 三段流式），一行老上传循环。
+                // 按钮显示中文名（存盘仍是 file_str 小写串）；`老*` 三档和加速页
+                // 的当代矩阵（mode=blt/direct）只是同名，不是同一个东西。
                 ui.horizontal(|ui| {
                     for v in PlayPipeline::ALL[..4].iter().copied() {
-                        if self.option_button(ui, self.cfg.play.pipeline == v, v.file_str()) {
+                        if self.option_button(ui, self.cfg.play.pipeline == v, &crate::text::pipeline_name(v)) {
                             self.cfg.play.pipeline = v;
                         }
                     }
                 });
                 ui.horizontal(|ui| {
                     for v in PlayPipeline::ALL[4..].iter().copied() {
-                        if self.option_button(ui, self.cfg.play.pipeline == v, v.file_str()) {
+                        if self.option_button(ui, self.cfg.play.pipeline == v, &crate::text::pipeline_name(v)) {
                             self.cfg.play.pipeline = v;
                         }
                     }
