@@ -1,0 +1,17 @@
+[package]
+name = "au-shape"
+version = "0.1.0"
+edition = "2024"
+description = "Annex-B AU 切分形状 host 单测执行器（与 UEFI 固件包独立）"
+
+# 轮子选择（见根 AGENTS.md「轮子优先」+「测试 100% Rust」）：
+# - shiguredo_mp4 2026.5：与固件主包同版本（caret 兼容，不 pin），host 侧用
+#   默认特性（std；固件侧 `default-features = false` 的 no_std 形，同一源码，
+#   `demux_mp4_track` 行为一致）；零第三方依赖，不增合流负担。
+# - log 0.4：与固件主包同大版本；无 logger 初始化时 `warn!` 即 no-op，
+#   单测只看形状不断言日志。
+# - 本 crate 零自研拆包逻辑：`#[path]` 原样包含 `src/video/demux.rs`
+#   （单源头，测的即固件用的同一份源码，非复刻）。
+[dependencies]
+shiguredo_mp4 = "2026.5"
+log = "0.4"
