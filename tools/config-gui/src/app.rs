@@ -690,12 +690,9 @@ impl App {
         next
     }
 
-    /// 实时背景的页面层：只留一句提示做折射燃料。`live.run` 会让它跑两遍
-    /// （可见 + 离屏），所以这里禁止任何写状态、禁止放玻璃件、
-    /// 禁止放可交互控件——只许纯文本。
-    /// 摘要行只放左侧导航卡，不在这里重复占右侧空间。
-    /// 背景图由 twin/native 纹理按 `cover_shifted` 画（见 `ui()`），这里只出字：
-    /// 可见遍字压在图上，twin 遍字进折射源。
+    /// 中央薄片头的弱化提示行：普通内容，不进折射源（折射源只有根部
+    /// `live.run` 的背景图，纯绘制不占布局）。摘要行只放左侧导航卡，
+    /// 不在这里重复占右侧空间。
     pub(crate) fn page_backdrop(&self, page: &mut egui::Ui) {
         page.add_space(4.0);
         page.label(egui::RichText::new(t!("sum.hint")).weak().small());
@@ -758,20 +755,36 @@ impl eframe::App for App {
             return;
         }
 
-        // （实时背景在中央面板内容头，见下。）
-
-        // 全窗背景图（twin 纹理复用，可见遍同画）：必须在全部面板之前画——
-        // 同层按代码顺序出画，先画的在下。右移让脸出导航（见 `cover_shifted`）。
-        // 无纸罩（用户明确不要白色遮罩）。纯绘制不占布局。
+        // 实时背景必须在全部玻璃之前跑：`live.run` 同步设置本帧 `LiveState`，
+        // 之后所有 `Glass*` 才能拿到全屏 backdrop_rect。若把它放在中央面板内容头，
+        // 顶栏/导航的玻璃在同帧先画，只能回退到自身 rect 做 backdrop，
+        // 就会把整张底图压进每颗按钮（2026-10-22 截屏故障）。
+        // 代价是 `add_contents` 只能做纯绘制（painter image，不占布局），
+        // 否则根光标会被挤、Panel 全被顶下去。文字摘要不在折射源里，
+        // 只做中央薄片内的普通内容。
+        // 先画的在下：背景图在最底，之后全部面板浮在上。右移让脸出导航
+        // （见 `cover_shifted`）。无纸罩（用户明确不要白色遮罩）。
         let screen = ui.ctx().viewport_rect();
-        if let Some(t) = self.twin_photo.as_ref() {
-            let r = Self::cover_shifted(screen, t.w, t.h, BG_SHIFT_X);
-            ui.painter().with_clip_rect(screen).image(
-                t.id,
-                r,
-                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                egui::Color32::WHITE,
-            );
+        if let Some(live) = self.live.as_ref() {
+            let clear = if self.dark {
+                egui::Color32::BLACK
+            } else {
+                egui::Color32::WHITE
+            };
+            live.run(ui, clear, |page| {
+                // twin 图进折射源（native id 自动映射；离屏画不影响可见合成；
+                // 与可见遍同矩形（含右移），折射与所见一致）。
+                // 注意：只画图，不加 label/分配，保持根光标全新。
+                if let Some(t) = self.twin_photo.as_ref() {
+                    let r = Self::cover_shifted(screen, t.w, t.h, BG_SHIFT_X);
+                    page.painter().with_clip_rect(screen).image(
+                        t.id,
+                        r,
+                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                        egui::Color32::WHITE,
+                    );
+                }
+            });
         }
 
         // 顶栏：文件动作工具条胶囊（误伤恢复：真凶是 Panel 分隔线，现已全关，
@@ -855,13 +868,9 @@ impl eframe::App for App {
 
         // 中央：大号玻璃薄片（误伤恢复：之前误判薄片直边是分割线，
         // 实为 Panel 分隔线，现已全关）。稠密表单放 panel frost 上。
-        // 中央最后加（Panel 之后）。
-        //
-        // 实时背景只能接在这里：`live.run` 要求调用时光标全新（twin 用全新
-        // Ui 重排一次，两遍光标必须一致）——根 ui 上画页面会把 Panel 全挤下去，
-        // 独立 Area 实测也会打乱 Panel 布局（原因未明，宁可信截屏），
-        // 只有中央面板内容头是安全的：兄弟 Panel 已先占位，内部只是多滚一段。
-        // 页面是弱化摘要纸（折射燃料），表单跟在后面正常滚。
+        // 中央最后加（Panel 之后）。折射源已在根部 `live.run` 跑完，
+        // 这里只放普通内容（摘要提示 + 表单），不再跑第二遍 `live.run`
+        // （两遍会互盖，谁后跑谁赢，且早画的玻璃已错过第一遍）。
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE)
             .show(ui, |ui| {
@@ -872,30 +881,7 @@ impl eframe::App for App {
                 };
                 sheet.inner_margin(egui::Margin::same(16)).show(ui, |ui| {
                     ui.set_min_size(ui.available_size());
-                    if let Some(live) = self.live.as_ref() {
-                        let clear = if self.dark {
-                            egui::Color32::BLACK
-                        } else {
-                            egui::Color32::WHITE
-                        };
-                        live.run(ui, clear, |page| {
-                            // twin 图进折射源（native id 自动映射；离屏画不影响可见合成；
-                            // 与可见遍同矩形（含右移），折射与所见一致）。
-                            if let Some(t) = self.twin_photo.as_ref() {
-                                let r = Self::cover_shifted(screen, t.w, t.h, BG_SHIFT_X);
-                                page.painter().with_clip_rect(screen).image(
-                                    t.id,
-                                    r,
-                                    egui::Rect::from_min_max(
-                                        egui::pos2(0.0, 0.0),
-                                        egui::pos2(1.0, 1.0),
-                                    ),
-                                    egui::Color32::WHITE,
-                                );
-                            }
-                            self.page_backdrop(page)
-                        });
-                    }
+                    self.page_backdrop(ui);
                     // 解码 tab 条钉死在滚动区之外、卡片最上面（不随内容滚动）。
                     // 只能放这里：根 ui 上画会把 Panel 挤下去（见上注释），
                     // 页内画会被 ScrollArea 卷走——内容头是唯一安全位。
