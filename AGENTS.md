@@ -47,7 +47,8 @@ x86 引导加载器（基于 sprout 扩展）+ SIMD 加速矩阵 + UEFI 播放�
   需要上游能力先看 sprout 5 个 lib 有没有，没有才在 `src/` 自研。
 - `tools/config-gui`：host 侧独立 crate（`std`），跨平台 `player.toml` 编辑器。
   与 UEFI 主包零依赖关系，见下文“双构建”。
-- `docs/`：给人看的设计文档；`usb_reports/`：真机报告样本。
+- `docs/`：给人看的设计文档 + 真机报告（`FWINFO*/HWBENCH*.TXT`）。
+  `usb_reports/` 只留本地二进制（测试片源/EFI，不入库）。
 
 ## 双构建（UEFI 与 host 严格隔离）
 

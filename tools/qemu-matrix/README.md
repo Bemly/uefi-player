@@ -57,8 +57,8 @@ cargo run --manifest-path tools/qemu-matrix/Cargo.toml --target "$(rustc -vV | s
 
 产物在 `tools/qemu-matrix/runs/<case>/`（串口全文 + verdict，默认清掉重跑；
 `--keep` 留盘排查；已进 `.gitignore`，不入库）。
-真机归档样本放根 `usb_reports/`，见该目录惯例。
-测试视频用 `usb_reports/1080p/video.qois`（已入库，`needs_video` 的 case 会拷进镜像）。
+真机 TXT 报告归档放 `docs/`（`FWINFO*/HWBENCH*`）。
+测试视频用本地 `usb_reports/1080p/video.qois`（二进制不入库，缺了 `needs_video` 的 case 会直接 FAIL；`needs_video` 的 case 会拷进镜像）。
 
 ## 矩阵设计
 

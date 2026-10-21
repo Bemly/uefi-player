@@ -123,4 +123,4 @@
 - 跨盘 BLS（`boot-bls-secondvol`）：第二盘 conf + efi，`0` 选中交权。
 - Linux 发现（`boot-linux-detect`）：假内核对被列出（标题 + `<linux>` 进串口），不真起。
 - Shell 发现 + 交权（`boot-shell`）：`shellx64.efi`（自家 efi）被发现并交权。
-- 真机/U 盘实测见 `usb_reports/` 归档。
+- 真机/U 盘实测见 `docs/` 下 `FWINFO*/HWBENCH*.TXT` 归档。
