@@ -139,9 +139,9 @@ struct TrackMeta {
 }
 /// 压缩样片（分组后解码；dur 只用于 fps 估算）。
 pub(crate) struct RawSample {
-    dur: f64,
-    keyframe: bool,
-    payload: Vec<u8>,
+    pub(crate) dur: f64,
+    pub(crate) keyframe: bool,
+    pub(crate) payload: Vec<u8>,
 }
 /// 解复用产物（压缩态分组；裸帧不过组，内存封顶见 GROUP_CAP）。
 pub(crate) struct DemuxedTrack {

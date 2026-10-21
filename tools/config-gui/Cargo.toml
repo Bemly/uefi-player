@@ -53,6 +53,19 @@ description = "player.toml 跨平台可视化编辑器（host 工具，与 UEFI 
 #   `egui_extras` 表格排序器（要拖入整套表格件，与玻璃行不搭，故不用）。
 #   用法：`dnd(ui, id).with_animation_time(0.0).show(下标 id 行, …)`，
 #   落点 `update_vec` 写回（重复路径靠下标 id 区分，见 `playlist.rs` 头注释）。
+# - 动态背景硬解（host macOS；固件侧不受影响）：
+#   `gpu-video 0.4`（Vulkan Video + wgpu 29，H.264 解码帧不出显存）搜过但不可用——
+#   上游兼容表只有 Linux(NVIDIA/AMD Mesa)/Windows，macOS Metal 无 Vulkan Video，
+#   本机 `VulkanInstance::new` 即错，故不用；`egui-video 0.9`（ffmpeg6/7 + SDL2，
+#   CPU 解码，重 C 依赖，要 release opt-level）与本仓纯 Rust 转码链相悖，故不用；
+#   `egui-sharkplayer 0.5`（libmpv2，eframe 0.35 同版，但自述 wgpu 下要经内存往返，
+#   且要系统 libmpv，而本仓 renderer 已强制 Wgpu，glow 不可用）故不用。
+#   最终用同门 `shiguredo_video_toolbox 2026.1`（Apple VideoToolbox H.264/H.265/VP9/AV1
+#   硬解，与本仓 `shiguredo_mp4` 同 vendor 同用法，MSRV 1.88 < 本仓 1.92，
+#   Apache-2.0；demux 仍复用 `shiguredo_mp4`，解码帧 NV12/I420 经 BT.601 转 RGBA
+#   后走 egui 纹理上 wgpu，`LiveBackdrop` 双遍即折射到玻璃上）。
+#   macOS-only（VideoToolbox 框架），故走 `target.cfg(macos)`，Linux/Windows
+#   构建不受影响（非 macOS 静默回退纯色底）。
 [dependencies]
 egui_dnd = "0.16"
 eframe = { version = "0.35", default-features = false, features = ["accesskit", "default_fonts", "wgpu", "wayland", "x11"] }
@@ -77,3 +90,6 @@ ogg = "0.9"
 qoi = "0.4"
 serde = { version = "1", features = ["derive"] }
 toml = "1"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+shiguredo_video_toolbox = "2026.1"
