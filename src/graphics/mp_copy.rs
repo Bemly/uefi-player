@@ -2,6 +2,9 @@
 //! `tsc`/`calibrate_tps` 供 `hevc_probe`/`menu`/`idle`/`boot` 计时；
 //! `dynamic_row_bounds`/`copy_block` 供 `video::mp_draw` 与上屏路径按位宽分发。
 //! 拆分仅为满足单文件 ≤1000 行，不改行为。
+//!
+//! 统一控制面搬运核：BSP/AP 行区分工（`copy_block` 位宽选路），AP 永不碰 GOP/Blt；
+//! 解码-while-上传流水的上传半即此（BSP 先解后推，AP 拷影子/前台行区，BSP 整推）。
 
 use alloc::vec;
 use alloc::vec::Vec;

@@ -1,4 +1,3 @@
-use crate::config::{self, PlayPipeline};
 use crate::error::Result;
 use crate::fs::Fs;
 use crate::graphics::Screen;
@@ -16,7 +15,7 @@ pub mod loops;
 pub mod mp;
 pub mod play;
 
-pub(crate) use self::loops::{blt_loop, direct_loop, legacy_pipeline_run};
+pub(crate) use self::loops::{blt_loop, direct_loop};
 pub use self::mp::OSD_ROWS;
 pub(crate) use self::mp::mp_draw;
 pub(crate) use self::play::{load_video_clip, need_eager_clip, resolve_play_target};
@@ -83,20 +82,10 @@ pub fn video_run(screen: &mut Screen) -> Result {
     let tps = calibrate_tps();
     let target = resolve_play_target(screen, tps)?;
 
-    // 手动管线（`[play] pipeline`）：非 clip 走老实现循环（修复后），只读 qois
-    // 片源（其它七格式 warn 回落 clip）；clip 走现行矩阵/执行器后端。
-    let pipeline = config::play_pipeline();
-    if pipeline != PlayPipeline::Clip {
-        if config::play_format() != config::MediaFormat::Qois {
-            log::warn!(
-                "play: pipeline {:?} needs qois source, fallback clip",
-                pipeline
-            );
-        } else {
-            return legacy_pipeline_run(screen, pipeline, target, tps);
-        }
-    }
-
+    // 统一控制面：无旁路分发，恒经 render 矩阵 + schedule 后端。
+    // 旧 `[play] pipeline` 7 档已删（未知键忽略）：staged/zero_copy/stream/single
+    // 走 `feed`（clip 路内拿帧方式），legacy_* 走 clip+eager+render 组合
+    // （blt 整推 / direct+bsp_only / direct+bsp_only+scalar），见 `docs/player.md`。
     let mut fs = Fs::new()?;
     let clip = load_video_clip(&mut fs, need_eager_clip())?;
 

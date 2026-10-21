@@ -33,7 +33,7 @@
 - `RenderMode::Blt` → `blt_loop`（单线程 GOP Blt；已是单引擎 push，缓冲无意义）。
 - `direct + bsp_only` → `direct_loop`（BSP 单核直写）。
 - `direct + all` → `mp_draw`（`copy_block` 位宽选路，OSD 镂空）。
-   分工由 `[render] dist` 定：`static` 按核固定行区（同构核最优）；
+   分工由 `[schedule] dist` 定：`static` 按核固定行区（同构核最优）；
    `tile` 按 64 行切块、BSP+AP 从共享原子游标领活（异构核/负载不均时赢，
    OSD 行划出 tile，AP 不再盖字——旧 static 路 AP 会盖掉 OSD 字，属已知瑕疵，
    保留作扩展比对照）；
@@ -69,23 +69,13 @@
 （`measured_max_fps`，GUI 只读 + 重测清零）。`vsync` 开（static/half/auto 探测开）
 再叠生效预算帽（`effective_vsync_fps()`，static 取滑杆值，half 取实测取半）。
 
-## 播放管线（`[play] pipeline`，手动切换）
+## 统一控制平面（`[play] feed` × `[decode.<fmt>]`，无老管线）
 
-`clip`（默认）：`Clip` 全量预解码 + 现行三路/执行器后端（上文全部）。
-其余 7 档是 `Clip` 之前的老实现（修复后进矩阵，可手动切对照）：
-
-- `staged`：`VideoMemory` 整文件进内存 + 逐帧三段解码（QOI→Raw→Blt）+ Blt 整推，
-  限速掉帧与现路同预算语义。
-- `zero_copy`：同上，省掉 Raw 中转（直解进 Blt 缓冲 + R/B 交换）。
-- `stream`：真文件流式（`read_frame_next` 边读边解 + 短读补齐），不全量进内存；
-  限速只自旋补齐，不丢帧。
-- `single`：`draw_once` 单帧反复（容器取首帧，纯 QOI 整解码），每帧重读文件，
-  零缓存下限对照。
-- `legacy_blt` / `legacy_direct` / `legacy_u64`：`Clip` 预解码 + 老上传循环
-  （Blt 整推 / BSP 直写 / u64 步进直写），无 OSD/多核/影子。
-
-老路无 OSD、无多核、无影子、无执行器后端；只读 qois（raw 回落 clip 并警告）。
-矩阵覆盖：`video-pipe-*` 7 case（path 标记 + soak 保活）。
+播放只走 `Clip`：拿帧方式由 `[play] feed` 五档切，单格式解码并发/缓冲由
+`[decode.<fmt>]` 四键调，上传路（`blt`/`direct`/`mp_draw`/`nano_pump`/
+`dynamic_draw`）零改。`[play] pipeline` 与 `[render] workers/dist` 旧键已删除
+（正典只剩 `[schedule] workers/dist`；旧文件未知键按 serde 默认忽略，
+旧值别名 `avx512`/`on`/整数壁纸 fps 已摘除，命中即整文件回默认 + 警告）。
 
 ## 供片模式（`[play] feed`，只切拿帧方式，不管上传路）
 
@@ -95,15 +85,17 @@
 | `staged` | qois 显式三段逐帧解码；其余七格式软解码 planar→BGRA 固有分段，结构等价 clip | qois（其余结构等价） |
 | `stream` | `tune.window`（1-32，默认 4）窗口边播边解，游标之后淘汰（`rewind` 重建解码器状态重播） | qois + hevc 代表格式 |
 | `zero_copy` | 单复用帧缓冲逐显示帧即时解码（调用方须立即上传） | qois |
+| `single`（NEW） | 每帧重读文件 + 重解码，零缓存下限对照（旧单帧循环的 Clip 化） | qois + hevc 代表格式 |
 
 - 只切 `Clip` 内部拿帧方式：`blt`/`direct`/`mp_draw`/`nano_pump`/`dynamic_draw`
   上传路零改，只消费 `next_frame`/`rewind`/`len`/`frame`。
-- 多核（`mp_draw`）/动态调度/壁纸恒 `clip`（壁纸随机访问循环，按 tag 裁决，
-  见固件 `lazy::feed_for`）；旧文件缺键按 `clip` 照读。
-- 矩阵覆盖：`video-feed-*` 5 case（`video: feed=` + path 行 + soak 保活；
-  clip/stream/zero_copy/staged × qois + stream × hevc 代表格式，
-  全组合不铺，避 4×8 膨胀）。
-- GUI：播放页管线区旁供片滑杆（0-3 拨档 + 一句话说明）；
+- 多核（`mp_draw`）/动态调度/壁纸恒 `clip`/`eager`（壁纸随机访问循环，按 tag 裁决，
+  见固件 `lazy::feed_for`；`mp_draw`/`dynamic_draw` 启动即 `ensure_eager` 全量，
+  不变）；旧文件缺键按 `clip` 照读。
+- 矩阵覆盖：`video-feed-*` 7 case（`video: feed=` + path 行 + soak 保活；
+  clip/staged/stream/zero_copy/single × qois + stream/single × hevc 代表格式，
+  全组合不铺，避 5×8 膨胀）。
+- GUI：播放页供片滑杆 0-4 拨档（`[play] feed = "single"` 为第 5 档）+ 一句话说明；
   `[render.tune] window` 缺键按 4、钳 1..=32（GUI 只保 roundtrip，不摆旋钮）。
 - 跳帧同样经懒解码（`pace_or_drop` 调 `next_frame` 跳过）：正确但把被跳帧也解了，
   上传路零改的代价，feed 非 clip 时高掉帧场景多耗解码。
@@ -112,6 +104,44 @@
 - 已知退化（待 Agent-B `split_annexb_aus` 真 AU 组联调结论）：stub 期整流单 AU，
   avc/hevc 懒模式首 `next_frame` 即推整流（hevc 经输出队列仍逐帧出，avc 只留末帧），
   多 slice/B 帧重排语义以联调结论为准；冒烟只用 qois 断言帧数一致。
+
+## 解码表（`[decode.<fmt>]`，每格式独立四键）
+
+| 键 | 取值 | 语义 |
+|---|---|---|
+| `threads` | `"bsp_only"`（默认）\| `"all"` | 帧级并行：`all` 在无状态格式（qois/raw）即时生效；有状态软解码（hevc/avc/vp9/h263/mpeg2v/theora 单核顺序状态机）解析但警告并驻 `bsp_only`，待 per-codec 安全流水线落地 |
+| `zero_copy` | `false`（默认）\| `true` | 单缓冲即时解码开关（全格式可行；GUI 单选开关） |
+| `streaming` | `false`（默认）\| `true` | 边播边解开关（全格式可行；GUI 单选开关） |
+| `buffers` | `0`（默认，跟随 `tune.window`）\| `1`-`32` 显式 | 解码帧缓存数（GUI 滑杆下标 0=跟随，1-32 显式；`tune.window` 仍是全局默认） |
+
+- 六表：`[decode.hevc]` / `[decode.avc]` / `[decode.vp9]` / `[decode.h263]` /
+  `[decode.mpeg2v]` / `[decode.theora]`（qois/raw 无表， trivially 全 yes）。
+- 串口契约（矩阵断言用，不断言画质）：`decode: fmt=<Fmt>` 解析行 +
+  `decode: <Fmt> threads all deferred (staying bsp_only)` 回退警告行（仅 threads=all
+  落有状态格式时）；`video: fmt=` + `play: path=` + soak 保活同旧口径。
+- Per-codec 可行性（全单核现状，`lazy.rs Source` 状态机顺序）：
+  qois 无状态逐帧 → 帧级并行可行，zero_copy/streaming/多缓冲 yes；raw 零解码 → 全 yes；
+  hevc 有状态 Annex-B + 输出队列/重排 → 解码驻顺序（stage 重叠 demux→decode→convert 待排），
+  zero_copy/streaming/buffers(window) yes；avc 解码序 vs 显示序 + B 帧/多 slice 待联调 →
+  仅顺序，其余 yes；vp9 有状态 + 隐藏 altref 跳过 → 仅顺序，其余 yes；
+  h263 流式 reader 有状态、总量未知 → 仅顺序，其余 yes；mpeg2v AU 切分有状态 4:2:0-only →
+  仅顺序，其余 yes；theora Ogg 包 + 3 头状态 → 仅顺序，其余 yes。
+- 矩阵覆盖：`video-decode-*` 6 case（每格式一样：`threads = "all"` + `zero_copy/streaming = true`
+  + `buffers = 8` 显式，断言解析 + 回退警告 + soak；画质不断言）。
+- GUI：解码页每格式四行（threads 两档滑杆 + zero_copy/streaming 两个单选开关 +
+  buffers 0-32 滑杆下标），见 SPEC `gui_controls` 24 行。
+
+## 老管线映射（已删除，仅作旧行为对照）
+
+`[play] pipeline` 八档已删除。旧 7 行为统一落到 Clip 路径（`render_additions` 为空，
+`copy_block` 位宽分发已覆盖 u64 步进循环）：staged→`feed=staged`+`render.blt`
+（manual/bsp_only，pace/drop 保留）；zero_copy→`feed=zero_copy`+`render.blt`；
+stream→`feed=stream`+`render.blt`（delta：旧 stream_loop 自旋无丢帧，
+新 `pace_or_drop` 最多连丢 2/帧，soak 用 `fps=max` 对齐）；single→NEW `feed=single`
+（重读+重解码零缓存，同旧单帧循环）；legacy_blt→clip+eager+`render.blt`；
+legacy_direct→clip+eager+`render.direct`+workers=bsp_only；
+legacy_u64→clip+eager+`render.direct`+workers=bsp_only+`accel.level=scalar`
+（U64 位宽）。旧文件 `pipeline` 键直接忽略（按 `clip` 跑），不另警告。
 
 ## 真机错位问题（曾 TODO，现状态）
 

@@ -11,13 +11,15 @@ version = 1
 level = "auto"
 [render]
 mode = "direct"
-workers = "bsp_only"
-dist = "static"
 vsync = "off"
 [play]
 fps = "max"
 [wallpaper]
 enable = false
+[schedule]
+backend = "manual"
+workers = "bsp_only"
+dist = "static"
 """
 boot_expect = ["cfg: version=1", "idle: ready"]
 keys = [
@@ -39,14 +41,16 @@ version = 1
 level = "auto"
 [render]
 mode = "auto"
-workers = "auto"
-dist = "auto"
 vsync = "auto"
 tune = { frames = 2 }
 [play]
 fps = "max"
 [wallpaper]
 enable = false
+[schedule]
+backend = "manual"
+workers = "auto"
+dist = "auto"
 """
 boot_expect = ["cfg: version=1", "idle: ready"]
 expect = ["render auto:"]
@@ -64,13 +68,15 @@ version = 1
 level = "auto"
 [render]
 mode = "direct"
-workers = "all"
-dist = "dynamic"
 vsync = "off"
 [play]
 fps = "max"
 [wallpaper]
 enable = false
+[schedule]
+backend = "manual"
+workers = "all"
+dist = "dynamic"
 """
 boot_expect = ["cfg: version=1", "idle: ready"]
 expect = ["reuse measured"]
@@ -86,14 +92,16 @@ version = 1
 level = "auto"
 [render]
 mode = "direct"
-workers = "bsp_only"
-dist = "static"
 vsync = "half"
 tune = { frames = 2 }
 [play]
 fps = "max"
 [wallpaper]
 enable = false
+[schedule]
+backend = "manual"
+workers = "bsp_only"
+dist = "static"
 """
 boot_expect = ["cfg: version=1", "idle: ready"]
 expect = ["half probe winner_ticks", "budget"]
@@ -110,14 +118,16 @@ version = 1
 level = "auto"
 [render]
 mode = "auto"
-workers = "bsp_only"
-dist = "static"
 vsync = "off"
 tune = { buffers = 2 }
 [play]
 fps = "max"
 [wallpaper]
 enable = false
+[schedule]
+backend = "manual"
+workers = "bsp_only"
+dist = "static"
 """
 boot_expect = ["cfg: version=1", "idle: ready"]
 expect = ["shadow: 2 bufs", "render auto:"]
@@ -134,8 +144,6 @@ version = 1
 level = "auto"
 [render]
 mode = "blt"
-workers = "bsp_only"
-dist = "static"
 vsync = "off"
 blt_op = "video_to_blt_buffer"
 tune = { frames = 2 }
@@ -143,6 +151,10 @@ tune = { frames = 2 }
 fps = "max"
 [wallpaper]
 enable = false
+[schedule]
+backend = "manual"
+workers = "bsp_only"
+dist = "static"
 """
 boot_expect = ["cfg: version=1", "idle: ready"]
 expect = ["blt_op(VideoToBltBuffer)"]

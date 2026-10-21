@@ -15,19 +15,17 @@ level = "auto"          # 性能序（滑杆档位）：auto | scalar | sse | ss
                         #   显式配了即按 X128 钳住用，不断 boot）
                         # | avx | f16c | fma | avx2 | bmi1 | bmi2 | avxvnni
                         # | avx512f | avx512cd | avx512dq | avx512bw | avx512vl
-                        # auto = 开机探最高可用；显式超硬件警告+钳住；
-                        # 老 "avx512" 按 avx512f 照读
+                        # auto = 开机探最高可用；显式超硬件警告+钳住
                         # 解码 SIMD 无独立开关：六家（hevc/vp9/h263/h264/mpeg2v/theora）单比特跟随全局
                         #（level=scalar 则关，其余开），见 docs/simd.md
 
 [render]
 mode    = "auto"        # auto | direct | blt
-vsync   = "auto"        # auto | static | half | off（软件帧预算；旧 "on" 按 static 照读）
+vsync   = "auto"        # auto | static | half | off（软件帧预算）
 blt_op  = "buffer_to_video"  # buffer_to_video | video_to_video | video_fill | video_to_blt_buffer
 # 只有 buffer_to_video 能上屏播视频（单发整推 + 混合整推都用它；GUI 只放行这一项，
 # 其余置灰展示不删）；其余三项只在矩阵里单发出数（引擎能力对照，不参选），Blt 不在测时跳过。
-# workers/dist 已搬家到 [schedule]（下）；残留旧键永久兼容（缺 [schedule] 表时照读，
-# [schedule] 在场则忽略；GUI 存盘即新格式）。
+# workers/dist 已删除 `[render]` 旧键（正典只剩 `[schedule]`；旧文件残留键按 serde 默认忽略）。
 # 首启校准记忆（固件回写，GUI 只读展示；"auto"/0 = 未测，下次启动必测）：
 measured_render  = "auto"  # "direct" | "blt"
 measured_workers = "auto"  # "bsp_only" | "all"
@@ -54,16 +52,48 @@ format = "qois"         # 片源格式：qois（1080p/video.qois）| raw（1080p
                         # | h263（video.h263 裸流）| mpeg2v（video.m2v 裸基本流，只收 4:2:0）
                         # | theora（video.ogv，OggS 磁盘原格式，只收 4:2:0）；
                         #   旧文件缺键按 qois 照读
-pipeline = "clip"       # 播放管线：clip（预解码现路，默认）| staged（流式三段）
-                        # | zero_copy（流式零拷贝）| stream（真文件流式）| single（单帧反复）
-                        # | legacy_blt / legacy_direct / legacy_u64（Clip + 老上传循环）
-                        # 非 clip 只读 qois（raw 时 warn 回落 clip）；老路无 OSD/多核/影子。
 feed = "clip"           # 供片模式：clip（开机全量预解码，默认）| staged（qois 显式三段，
                         # 其余七格式结构等价 clip）| stream（window 窗口边播边解，
-                        # 游标之后淘汰）| zero_copy（单复用缓冲即时解码）；
+                        # 游标之后淘汰）| zero_copy（单复用缓冲即时解码）
+                        # | single（每帧重读文件+重解码，零缓存下限对照，NEW）；
                         # 只切 Clip 内部拿帧方式，不管上传路（blt/direct/mp/nano/dynamic 零改）；
-                        # 多核（mp_draw）/动态调度/壁纸恒 clip；旧文件缺键按 clip 照读
+                        # 多核（mp_draw）/动态调度/壁纸恒 clip/eager；旧文件缺键按 clip 照读
 measured_max_fps = 0    # 固件实测回写（0 = 未测）；GUI 只读展示
+
+# 解码表（统一控制平面，每格式独立四键；qois/raw 无表）：
+# threads bsp_only/all（有状态格式 all 解析但警告并驻 bsp_only）；
+# zero_copy/streaming 布尔（全格式可行）；buffers 0=跟随 tune.window/1-32 显式。
+# 缺表缺键按默认照读（threads=bsp_only，布尔关，buffers=0）。
+[decode.hevc]
+threads = "bsp_only"    # bsp_only | all
+zero_copy = false       # 单缓冲即时解码开关
+streaming = false       # 边播边解开关
+buffers = 0             # 0=跟随 tune.window，1-32 显式覆盖
+[decode.avc]
+threads = "bsp_only"
+zero_copy = false
+streaming = false
+buffers = 0
+[decode.vp9]
+threads = "bsp_only"
+zero_copy = false
+streaming = false
+buffers = 0
+[decode.h263]
+threads = "bsp_only"
+zero_copy = false
+streaming = false
+buffers = 0
+[decode.mpeg2v]
+threads = "bsp_only"
+zero_copy = false
+streaming = false
+buffers = 0
+[decode.theora]
+threads = "bsp_only"
+zero_copy = false
+streaming = false
+buffers = 0
 
 [schedule]
 backend = "manual"      # 调度后端：manual（手写 MP 三路，workers/dist 生效）
@@ -82,6 +112,7 @@ format = "raw"          # 片源格式（与 [play] 同一矩阵，八格式全�
 popup_freeze = true     # 选项弹窗时冻结壁纸（false 则行区继续播；GUI 有开关）
 fps = "15"               # 背景帧率三态（与 [play] fps 同构）：auto（最左，跟 vsync；
                           # vsync 关则不限速）| max（最右，不限速）| 1-240（中间显式封顶）
+                          # 默认 "15"
 frames = 0              # B 过渡封顶帧数（0 = 全播预载集）
 preload = 8             # 预载帧数上限（1-32；0 = 不封顶，和播片一样拉满；
                           # 1080p BGRA 单帧约 8MB，长动画注意内存）
@@ -134,24 +165,26 @@ executor = "all"        # 诊断项 a 跑哪条执行器线：all（默认，都
 - `schedule.backend=dynamic`：多核 steal 泵（按核分带，BSP 每帧 spawn，AP steal，
   BSP 独判掉帧/OSD，确定性与手写一致）。只直写前台：`render=blt`（Blt 引擎
   单线程）/ 无 MP / 单核回 nano 泵并警告；`tune.buffers>0`（影子环 v1 不支持）
-  回 manual 并警告。缺 `[schedule]` 表的老文件继续认 `[render]` 旧键。
-- `play.pipeline=clip`（默认）：现行管线（`schedule.backend` 三后端生效）。
-  非 clip 走修复后的老实现循环（`render`/`schedule`/`workers`/`dist` 全忽略，
-  无 OSD/多核/影子，只读 qois，raw 回落 clip 并警告）：
-  `staged`（VideoMemory 整文件 + 三段解码 + Blt + 限速掉帧）/
-  `zero_copy`（直解进 Blt 缓冲 + R/B 交换 + 限速掉帧）/
-  `stream`（真文件流式边读边解 + 限速不限丢）/
-  `single`（每帧重读文件 + 单帧解码，仅对照）/
-  `legacy_blt`/`legacy_direct`/`legacy_u64`（Clip 预解码 + 老上传循环）。
-  缺键老文件按 `clip` 照读，现路行为不变。
+  回 manual 并警告。`[render] workers/dist` 旧键已删除（残留按未知键忽略）。
 - `[play] feed=clip`（默认）：开机全量预解码现路（零行为变化）。
   `staged`：qois 显式三段逐帧解码（其余七格式软解码 planar→BGRA 固有分段，
   结构等价 clip）；`stream`：`tune.window`（1-32，默认 4）窗口边播边解，
   游标之后淘汰（`rewind` 重建解码器状态重播）；`zero_copy`：单复用帧缓冲
   逐显示帧即时解码（调用方须立即上传，`blt`/`direct_loop` 与 `nano_pump`
-  满足借用契约）。只切 `Clip` 内部拿帧方式，不管上传路
+  满足借用契约）；`single`：每帧重读文件 + 重解码，零缓存下限对照（NEW）。
+  只切 `Clip` 内部拿帧方式，不管上传路
   （blt/direct/mp/nano/dynamic 零改，只消费 `next_frame`/`rewind`/`len`/`frame`）。
-  多核（`mp_draw`）/动态调度/壁纸恒 `clip`（壁纸随机访问循环，按 tag 裁决）。
+  多核（`mp_draw`）/动态调度/壁纸恒 `clip`/`eager`（壁纸随机访问循环，按 tag 裁决）。
   缺键老文件按 `clip` 照读，现路行为不变。
+- `[decode.<fmt>]`（hevc/avc/vp9/h263/mpeg2v/theora，每表四键，缺表缺键按默认照读）：
+  `threads=all` 在有状态软解码上解析但警告并驻 `bsp_only`
+  （`decode: <Fmt> threads all deferred (staying bsp_only)` 行，矩阵断言用；
+  qois/raw 无表，`all` 即时生效）；`zero_copy`/`streaming` 布尔全格式可行；
+  `buffers=0` 跟随 `tune.window`（1-32），显式 1-32 按格式覆盖；
+  `tune.window` 仍是全局默认。串口另有 `decode: fmt=<Fmt>` 解析行（矩阵断言用）。
+- 旧键/旧值：`[play] pipeline`、`[render] workers`、`[render] dist` 已删除
+  （残留键按 serde 默认忽略；`pipeline` 旧文件按 `clip` 跑）；
+  值别名 `avx512`（→`avx512f`）、`on`（→`static`）、整数壁纸 `fps` 已摘除，
+  命中即整文件回默认 + 警告（`cfg: parse error` 行），不再静默照读。
 - `async.executor`：只决定诊断项 `a` 跑 `nano`/`dynamic` 哪条线（`all` 都跑）；
   缺表缺键按 `all` 照读；生产调度不受影响。

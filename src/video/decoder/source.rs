@@ -1,6 +1,19 @@
 //! 有状态解码会话（懒供片的编码侧）：分块保留 + 顺序喂块 + 首帧几何裁决。
 //!
 //! 只被 `super::lazy::LazyState` 驱动；窗口/策略/重播语义见该文件。
+//!
+//! 每格式可行性（BSP 解码、AP 永不解码/永不碰 GOP；SIMD 单比特跟随全局，
+//! 本层不设门）：qois 无状态逐帧→BSP 分片即帧级并行可行（`eager` 分片，
+//! `threads=all` 兑现），零拷（复用 `out`）/真流式（块扫描+增量解）/多缓冲
+//! 全 yes；raw 零解码（`bytes_as_pixels` reinterpret 零拷）→全 yes，真流式
+//! （逐文件 `Fs::read_file` 重读，`single` 即此）；hevc 有状态 Annex-B+输出
+//! 队列/重排→解码顺序（`threads=all` 告警仍序，交叠 deferred），零拷（`yuv_into`
+//! 复用）/流（窗口增量）/窗缓冲 yes；avc 解码序 vs 显示序+B 帧/多 slice 待联调→
+//! 顺序，其余 yes；vp9 有状态+隐藏 altref 跳过→顺序，其余 yes；h263 流式
+//! reader 有状态、总量未知→顺序，真流式（reader 免预切）yes；mpeg2v AU 切分
+//! 有状态仅 4:2:0→顺序，其余 yes；theora Ogg 包+三头状态→顺序，其余 yes。
+//! 编码保留是 demux/扫描必需（整文件读），内存赢在解码帧侧（窗口/单槽复用，
+//! 稳态零分配）；`single` 每帧 `reset` 重走（零解码缓存）。
 
 use alloc::collections::VecDeque;
 use alloc::string::String;

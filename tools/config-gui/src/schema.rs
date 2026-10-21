@@ -36,7 +36,6 @@ pub(crate) enum AccelLevel {
     Bmi1,
     Bmi2,
     Avxvnni,
-    #[serde(alias = "avx512")]
     Avx512f,
     Avx512cd,
     Avx512dq,
@@ -159,8 +158,7 @@ impl RenderMode {
 }
 
 /// 多核开关（与固件 `WorkersMode` 同构；Blt 路径恒单线程，忽略本项）。
-/// 固件侧已搬家到 `[schedule]`；`[render]` 下是 legacy 别名（老文件照读，
-/// 新文件 GUI 只写 `[schedule]`；见 `coerce_loaded` 迁移）。
+/// 唯一位置是 `[schedule]`（`[render]` 下的同名键已删，老文件残留直接忽略）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum WorkersMode {
@@ -183,7 +181,7 @@ impl WorkersMode {
 
 /// 多核分工（与固件 `DistMode` 同构；`Tile` = tile 自调度，`Static` = 固定分区，
 /// `Dynamic` = 按实测核速加权分行，播中逐轮重算）。
-/// 搬家说明同 `WorkersMode`（`[schedule] dist` 为准）。
+/// 唯一位置是 `[schedule]`（`[render]` 下的同名键已删，老文件残留直接忽略）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum DistMode {
@@ -207,13 +205,13 @@ impl DistMode {
 }
 
 /// 垂直同步（与固件 `VsyncMode` 同构；`Static` 按预算滑杆封顶，`Half` 实测取半，
-/// `Off` 只按播放帧率跑；旧文件 `"on"` 按 `static` 照读）。
+/// `Off` 只按播放帧率跑）。
+/// 旧 `"on"` 别名已删：老文件写了它即整文件回默认 + 警告（见矩阵 `vsync_legacy_on_rejected`）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum VsyncMode {
     #[default]
     Auto,
-    #[serde(alias = "on")]
     Static,
     Half,
     Off,
@@ -360,8 +358,6 @@ impl Default for RenderTune {
 #[serde(default)]
 pub(crate) struct RenderConfig {
     pub(crate) mode: RenderMode,
-    pub(crate) workers: WorkersMode,
-    pub(crate) dist: DistMode,
     pub(crate) vsync: VsyncMode,
     pub(crate) blt_op: BltOpKind,
     pub(crate) tune: RenderTune,
@@ -437,52 +433,13 @@ pub(crate) fn default_wallpaper_format() -> MediaFormat {
     MediaFormat::Raw
 }
 
-/// `[play] pipeline`：播放实现手动切换（与固件 `PlayPipeline` 同构）。
-/// `Clip` = 预解码现路（默认）；其余 7 档是修复后的老实现循环，只读 qois。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum PlayPipeline {
-    #[default]
-    Clip,
-    Staged,
-    ZeroCopy,
-    Stream,
-    Single,
-    LegacyBlt,
-    LegacyDirect,
-    LegacyU64,
-}
-
-impl PlayPipeline {
-    pub(crate) const ALL: [Self; 8] = [
-        Self::Clip,
-        Self::Staged,
-        Self::ZeroCopy,
-        Self::Stream,
-        Self::Single,
-        Self::LegacyBlt,
-        Self::LegacyDirect,
-        Self::LegacyU64,
-    ];
-    pub(crate) fn file_str(self) -> &'static str {
-        match self {
-            Self::Clip => "clip",
-            Self::Staged => "staged",
-            Self::ZeroCopy => "zero_copy",
-            Self::Stream => "stream",
-            Self::Single => "single",
-            Self::LegacyBlt => "legacy_blt",
-            Self::LegacyDirect => "legacy_direct",
-            Self::LegacyU64 => "legacy_u64",
-        }
-    }
-}
-
 /// `[play] feed`：解码供片模式（与固件 `FeedMode` 同构；`file_str` 即落盘串）。
 /// `Clip` = 开机全预解码现路（默认）；`Staged` = 显式三段（解码/搬运/上屏分开）；
 /// `Stream` = 窗口边播边解（窗口大小见 `[render.tune] window`）；
-/// `ZeroCopy` = 单缓冲即时解码（无二级缓存）。
+/// `ZeroCopy` = 单缓冲即时解码；`Single` = 每帧重读文件 + 重解码（零缓存对照）。
 /// 多核（`mp_draw`）/动态调度/壁纸恒为 `clip`（供不上时警告回落，见 hint 文案）。
+/// 旧 `[play] pipeline` 表已删：7 老档按 `docs/player.md` 映射走 clip 路径，
+/// 老文件残留该键直接忽略（未知键 serde 默认忽略）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum FeedMode {
@@ -491,21 +448,129 @@ pub(crate) enum FeedMode {
     Staged,
     Stream,
     ZeroCopy,
+    Single,
 }
 
 impl FeedMode {
-    pub(crate) const ALL: [Self; 4] = [Self::Clip, Self::Staged, Self::Stream, Self::ZeroCopy];
+    pub(crate) const ALL: [Self; 5] = [
+        Self::Clip,
+        Self::Staged,
+        Self::Stream,
+        Self::ZeroCopy,
+        Self::Single,
+    ];
     pub(crate) fn file_str(self) -> &'static str {
         match self {
             Self::Clip => "clip",
             Self::Staged => "staged",
             Self::Stream => "stream",
             Self::ZeroCopy => "zero_copy",
+            Self::Single => "single",
         }
     }
-    /// 滑杆档位 0-3（`ALL` 的下标，`Clip=0`）。
+    /// 滑杆档位 0-4（`ALL` 的下标，`Clip=0`）。
     pub(crate) fn index(self) -> usize {
         Self::ALL.iter().position(|&v| v == self).unwrap_or(0)
+    }
+}
+
+/// 解码线程（与固件 `DecodeThreads` 同构；软解码状态机单核串行，`all` 在有状态
+/// 编解码器上只解析 + 警告 + 按 `bsp_only` 跑，见 `docs/player.md` 可行性节）。
+/// `qois`/`raw` 不进解码表（前者无状态可帧级并行，后者零解码）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum DecodeThreads {
+    #[default]
+    BspOnly,
+    All,
+}
+
+impl DecodeThreads {
+    pub(crate) const ALL: [Self; 2] = [Self::BspOnly, Self::All];
+    pub(crate) fn file_str(self) -> &'static str {
+        match self {
+            Self::BspOnly => "bsp_only",
+            Self::All => "all",
+        }
+    }
+    /// 滑杆档位 0-1（`ALL` 的下标，`BspOnly=0`）。
+    pub(crate) fn index(self) -> usize {
+        Self::ALL.iter().position(|&v| v == self).unwrap_or(0)
+    }
+}
+
+pub(crate) fn default_decode_buffers() -> u32 {
+    0
+}
+
+/// 单格式解码开关（与固件 `[decode.<fmt>]` 同构；`buffers = 0` 跟随
+/// `[render.tune] window`（1-32），显式 1-32 按格式覆盖；`tune.window` 保持全局默认）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub(crate) struct DecodeConfig {
+    pub(crate) threads: DecodeThreads,
+    pub(crate) zero_copy: bool,
+    pub(crate) streaming: bool,
+    #[serde(default = "default_decode_buffers")]
+    pub(crate) buffers: u32,
+}
+
+impl Default for DecodeConfig {
+    fn default() -> Self {
+        Self {
+            threads: DecodeThreads::BspOnly,
+            zero_copy: false,
+            streaming: false,
+            buffers: 0,
+        }
+    }
+}
+
+/// `[decode]`：6 软解格式逐格式开关（与固件 `[decode.<fmt>]` 同构；
+/// `qois`/`raw` 不进表，缺表/缺键老文件全按默认照读）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub(crate) struct DecodeTable {
+    pub(crate) hevc: DecodeConfig,
+    pub(crate) avc: DecodeConfig,
+    pub(crate) vp9: DecodeConfig,
+    pub(crate) h263: DecodeConfig,
+    pub(crate) mpeg2v: DecodeConfig,
+    pub(crate) theora: DecodeConfig,
+}
+
+impl DecodeTable {
+    /// 解码页顺序（与 SPEC `gui_controls` 同序；`MediaFormat::ALL` 的软解子集）。
+    pub(crate) const ORDER: [MediaFormat; 6] = [
+        MediaFormat::Hevc,
+        MediaFormat::Avc,
+        MediaFormat::Vp9,
+        MediaFormat::H263,
+        MediaFormat::Mpeg2v,
+        MediaFormat::Theora,
+    ];
+    pub(crate) fn get(&self, fmt: MediaFormat) -> Option<&DecodeConfig> {
+        match fmt {
+            MediaFormat::Hevc => Some(&self.hevc),
+            MediaFormat::Avc => Some(&self.avc),
+            MediaFormat::Vp9 => Some(&self.vp9),
+            MediaFormat::H263 => Some(&self.h263),
+            MediaFormat::Mpeg2v => Some(&self.mpeg2v),
+            MediaFormat::Theora => Some(&self.theora),
+            // `qois`/`raw` 不进解码表（前者无状态，后者零解码）。
+            MediaFormat::Qois | MediaFormat::Raw => None,
+        }
+    }
+    pub(crate) fn get_mut(&mut self, fmt: MediaFormat) -> Option<&mut DecodeConfig> {
+        match fmt {
+            MediaFormat::Hevc => Some(&mut self.hevc),
+            MediaFormat::Avc => Some(&mut self.avc),
+            MediaFormat::Vp9 => Some(&mut self.vp9),
+            MediaFormat::H263 => Some(&mut self.h263),
+            MediaFormat::Mpeg2v => Some(&mut self.mpeg2v),
+            MediaFormat::Theora => Some(&mut self.theora),
+            MediaFormat::Qois | MediaFormat::Raw => None,
+        }
     }
 }
 
@@ -514,9 +579,8 @@ impl FeedMode {
 /// `format` 切片源：qois 读 `1080p/video.qois`，raw 读 `1080p/frameNNNN.raw`，
 /// hevc 读 `1080p/video.hevc`（Annex-B 软解），vp9 读 `1080p/video.ivf`（软解），
 /// h263/mpeg2v/theora 格式可选、解码后继（固件明确报错，不断解析）。
-/// `pipeline` 切播放实现：clip 是预解码现路（默认），其余 7 档是老实现循环。
 /// `feed` 切解码供片：clip 全预解码（默认，老文件缺键照读）；
-/// staged/stream/zero_copy 只供 qois（mp/dynamic/壁纸恒 clip）。
+/// staged/stream/zero_copy/single 只供 qois（mp/dynamic/壁纸恒 clip）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub(crate) struct PlayConfig {
@@ -526,8 +590,6 @@ pub(crate) struct PlayConfig {
     pub(crate) measured_max_fps: u32,
     #[serde(default = "default_play_format")]
     pub(crate) format: MediaFormat,
-    #[serde(default)]
-    pub(crate) pipeline: PlayPipeline,
     #[serde(default)]
     pub(crate) feed: FeedMode,
 }
@@ -619,43 +681,14 @@ pub(crate) struct AsyncConfig {
     pub(crate) executor: AsyncExecutor,
 }
 
-/// `[wallpaper] fps` 反序列化：字符串三态 + 兼容老文件整数（固件侧同款，
-/// host/guest 隔离故各一份，见固件 `config.rs::de_wallpaper_fps`）。
-fn de_wallpaper_fps<'de, D>(d: D) -> Result<String, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    struct V;
-    impl<'de> serde::de::Visitor<'de> for V {
-        type Value = String;
-        fn expecting(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
-            f.write_str("wallpaper fps as string or integer")
-        }
-        fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<String, E> {
-            Ok(v.to_string())
-        }
-        fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<String, E> {
-            Ok(v.to_string())
-        }
-        fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<String, E> {
-            Ok(v.to_owned())
-        }
-    }
-    d.deserialize_any(V)
-}
-
-/// `[wallpaper]`：与固件 `WallpaperConfig` 同构。无校准记忆，纯开关。
-/// `format` 切片源：raw 读 `wallpaper/frameNNNN.raw`，qois 读 `wallpaper/wall.qois`。
-/// `popup_freeze`：选项弹窗时冻结壁纸（false 则行区继续播）。
-/// `fps` 三态（与 `[play] fps` 同构）：`"auto"` 最左 / `"max"` 最右 / 中间 `1`-`240`。
+/// `[wallpaper] fps`：纯字符串三态（整数老文件不再兼容：`fps = 15` 即整文件
+/// 回默认 + 警告，见矩阵 `wallpaper_fps_int_rejected`）。
+/// 与固件同口径（`[play] fps` 同构）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub(crate) struct WallpaperConfig {
     pub(crate) enable: bool,
-    #[serde(
-        default = "default_wallpaper_fps",
-        deserialize_with = "de_wallpaper_fps"
-    )]
+    #[serde(default = "default_wallpaper_fps")]
     pub(crate) fps: String,
     #[serde(default)]
     pub(crate) frames: u32,
@@ -690,7 +723,6 @@ impl Default for PlayConfig {
             fps: default_fps(),
             measured_max_fps: 0,
             format: MediaFormat::Qois,
-            pipeline: PlayPipeline::Clip,
             feed: FeedMode::Clip,
         }
     }
@@ -703,6 +735,7 @@ pub(crate) struct FileConfig {
     pub(crate) accel: AccelConfig,
     pub(crate) render: RenderConfig,
     pub(crate) play: PlayConfig,
+    pub(crate) decode: DecodeTable,
     pub(crate) wallpaper: WallpaperConfig,
     pub(crate) boot: BootConfig,
     pub(crate) schedule: ScheduleConfig,
@@ -716,6 +749,7 @@ impl Default for FileConfig {
             accel: AccelConfig::default(),
             render: RenderConfig::default(),
             play: PlayConfig::default(),
+            decode: DecodeTable::default(),
             wallpaper: WallpaperConfig::default(),
             boot: BootConfig::default(),
             schedule: ScheduleConfig::default(),
@@ -736,7 +770,7 @@ mod schema_tests {
         assert!(!cfg.wallpaper.enable);
         assert_eq!(cfg.wallpaper.fps, default_wallpaper_fps());
         assert_eq!(cfg.wallpaper.preload, default_wallpaper_preload());
-        assert_eq!(cfg.render.dist, DistMode::Auto);
+        assert_eq!(cfg.schedule.dist, DistMode::Auto);
         assert_eq!(cfg.render.measured_dist, DistMode::Auto);
     }
 
@@ -770,30 +804,35 @@ mod schema_tests {
     }
 
     #[test]
-    pub(crate) fn vsync_half_roundtrip_and_on_alias() {
+    pub(crate) fn vsync_half_roundtrip() {
         // 新档位：half 照读照写，预算回写不丢。
-        let text = "version = 1\n[accel]\nlevel = \"auto\"\n[render]\nmode = \"direct\"\nworkers = \"all\"\nvsync = \"half\"\n[play]\nfps = \"auto\"\n";
+        let text = "version = 1\n[accel]\nlevel = \"auto\"\n[render]\nmode = \"direct\"\nvsync = \"half\"\n[play]\nfps = \"auto\"\n";
         let mut cfg: FileConfig = toml::from_str(text).unwrap();
         assert_eq!(cfg.render.vsync, VsyncMode::Half);
         cfg.render.measured_vsync_fps = 42;
         let back: FileConfig = toml::from_str(&toml::to_string(&cfg).unwrap()).unwrap();
         assert_eq!(back.render.vsync, VsyncMode::Half);
         assert_eq!(back.render.measured_vsync_fps, 42);
-        // 旧文件 `"on"` 按 static 照读（固件同 alias，不断旧配置）。
-        let old: FileConfig = toml::from_str("[render]\nvsync = \"on\"\n").unwrap();
-        assert_eq!(old.render.vsync, VsyncMode::Static);
+    }
+
+    #[test]
+    pub(crate) fn vsync_legacy_on_rejected() {
+        // 旧 `"on"` 别名已删：整文件解析失败 → 调用方走全默认 + 警告（不断旧配置是固件侧行为）。
+        assert!(toml::from_str::<FileConfig>("[render]\nvsync = \"on\"\n").is_err());
     }
 
     #[test]
     pub(crate) fn dist_dynamic_roundtrip() {
         // 新档位：显式 dynamic 照读照写，measured 同理（旧文件无该值不受影响）。
-        let text = "version = 1\n[accel]\nlevel = \"auto\"\n[render]\nmode = \"direct\"\nworkers = \"all\"\ndist = \"dynamic\"\n[play]\nfps = \"auto\"\n";
+        // workers/dist 唯一位置是 `[schedule]`（`[render]` 下同名键已删，残留直接忽略）。
+        let text = "version = 1\n[render]\nmode = \"direct\"\n[schedule]\nworkers = \"all\"\ndist = \"dynamic\"\n[play]\nfps = \"auto\"\n";
         let cfg: FileConfig = toml::from_str(text).unwrap();
-        assert_eq!(cfg.render.dist, DistMode::Dynamic);
+        assert_eq!(cfg.schedule.dist, DistMode::Dynamic);
+        assert_eq!(cfg.schedule.workers, WorkersMode::All);
         let mut cfg = cfg;
         cfg.render.measured_dist = DistMode::Dynamic;
         let back: FileConfig = toml::from_str(&toml::to_string(&cfg).unwrap()).unwrap();
-        assert_eq!(back.render.dist, DistMode::Dynamic);
+        assert_eq!(back.schedule.dist, DistMode::Dynamic);
         assert_eq!(back.render.measured_dist, DistMode::Dynamic);
     }
 

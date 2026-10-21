@@ -1,7 +1,10 @@
+//! 统一控制面上传侧：`single` 同旧环走 `render.blt`（调用方配 `blt`，本层按生效路径分发，
+//! 矩阵 `fps=max` soak 对齐）；多缓冲环（`tune.buffers` 影子环 + 解码窗环，见 `decoder::lazy`）
+//! 先画影子再整推（撕裂压成一次 push）；AP 永不碰 GOP/Blt（`mp`/`exec` 纪律，Blt 整推只 BSP）。
+
 use crate::config::{self, BltOpKind, RenderMode};
 use crate::error::Result;
 use crate::video::ascii_font::FONT_8X16;
-use crate::video::decoder::Clip;
 use alloc::vec::Vec;
 use uefi::boot::{ScopedProtocol, get_handle_for_protocol, open_protocol_exclusive};
 use uefi::proto::console::gop::{BltOp, BltPixel, BltRegion, GraphicsOutput};
@@ -163,119 +166,6 @@ impl Screen {
 
         // 整个字符串画完后，最后额外换一行，防止下一次打印重叠
         self.stdout += 18;
-    }
-
-    /// 老上传循环（`[play] pipeline = legacy_blt` 用）：`Clip` 预解码帧经 GOP Blt
-    /// 整推，不走 render 矩阵。调用后不返回（循环播）。
-    pub fn draw_all_mem_raw_zero_copy(&mut self, video: &mut Clip, width: usize, height: usize) {
-        // 获取下一帧的原始像素引用
-        if let Some(pixel_slice) = video.next_frame() {
-            // 直接绘制到屏幕
-            // 假设你的屏幕分辨率和视频一致，从 (0,0) 开始画
-            self.gop
-                .blt(BltOp::BufferToVideo {
-                    buffer: pixel_slice,
-                    src: BltRegion::Full,
-                    dest: (0, 0),
-                    dims: (width, height),
-                })
-                .ok();
-        } else {
-            video.rewind();
-        }
-    }
-
-    /// 老上传循环（`[play] pipeline = legacy_direct` 用）：BSP 单核直写显存
-    /// （stride 感知），不走 render 矩阵。调用后不返回（循环播）。
-    pub fn draw_fast_direct_copy(&mut self, video: &mut Clip, width: usize, height: usize) {
-        // 1. 获取下一帧
-        let pixel_slice = match video.next_frame() {
-            Some(slice) => slice,
-            None => {
-                video.rewind();
-                return;
-            }
-        };
-
-        // 2. 先提取 ModeInfo（此时 gop 会被借用，但在这一行结束后就会释放）
-        let mode_info = self.gop.current_mode_info();
-        let stride = mode_info.stride();
-
-        // 3. 再获取 FrameBuffer（此时 gop 被独占借用）
-        let mut fb = self.gop.frame_buffer();
-        let dest_ptr = fb.as_mut_ptr();
-
-        // 4. 执行内存拷贝
-        unsafe {
-            if stride == width {
-                // 全局一次性拷贝
-                core::ptr::copy_nonoverlapping(
-                    pixel_slice.as_ptr() as *const u8,
-                    dest_ptr,
-                    width * height * 4,
-                );
-            } else {
-                // 考虑 Stride 的逐行拷贝
-                let src_ptr = pixel_slice.as_ptr() as *const u8;
-                for y in 0..height {
-                    let row_src = src_ptr.add(y * width * 4);
-                    let row_dest = dest_ptr.add(y * stride * 4);
-                    core::ptr::copy_nonoverlapping(row_src, row_dest, width * 4);
-                }
-            }
-        }
-    }
-
-    #[inline]
-    pub fn draw_u64_optimized(
-        &mut self,
-        video: &mut Clip,
-        width: usize,
-        height: usize,
-        stride: usize,
-        is_continuous: bool,
-        dest_ptr: *mut u8,
-    ) {
-        let pixel_slice = match video.next_frame() {
-            Some(slice) => slice,
-            None => {
-                video.rewind();
-                return;
-            }
-        };
-
-        let src_ptr = pixel_slice.as_ptr() as *const u8;
-
-        unsafe {
-            if is_continuous {
-                // 全屏连续拷贝
-                let total_bytes = width * height * 4;
-                u64_fast_copy(src_ptr, dest_ptr, total_bytes);
-            } else {
-                // 按行拷贝（处理 Stride）
-                let row_bytes = width * 4;
-                let stride_bytes = stride * 4;
-                for y in 0..height {
-                    let row_src = src_ptr.add(y * row_bytes);
-                    let row_dest = dest_ptr.add(y * stride_bytes);
-                    u64_fast_copy(row_src, row_dest, row_bytes);
-                }
-            }
-        }
-    }
-
-    /// 老上传循环（`[play] pipeline = legacy_u64` 用）：u64 步进直写（`scalar`
-    /// 位宽的循环形态），不走 render 矩阵。调用后不返回（循环播）。
-    pub fn draw_u64_optimized_loop(&mut self, video: &mut Clip, width: usize, height: usize) {
-        let mode_info = self.gop.current_mode_info();
-        let stride = mode_info.stride();
-        let mut fb = self.gop.frame_buffer();
-        let is_continuous = stride == width;
-        let dest_ptr = fb.as_mut_ptr();
-
-        loop {
-            self.draw_u64_optimized(video, width, height, stride, is_continuous, dest_ptr);
-        }
     }
 
     // ---------- 渲染路径矩阵（配置文件驱动） ----------

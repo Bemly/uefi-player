@@ -1,6 +1,6 @@
 # QEMU 黑盒矩阵
 
-QEMU 里跑真实固件，按 `matrix.toml` 逐 case 起虚拟机：塞 `player.toml` →
+QEMU 里跑真实固件，按 `matrix/` 分组文件逐 case 起虚拟机：塞 `player.toml` →
 抓串口 → 发按键 → 断言。和 GUI 黑盒矩阵（`tools/config-gui` 的
 `blackbox_matrix` 单测）合起来覆盖“GUI 改配置 → 落盘 → 固件生效”全链路。
 
@@ -62,7 +62,17 @@ cargo run --manifest-path tools/qemu-matrix/Cargo.toml --target "$(rustc -vV | s
 
 ## 矩阵设计
 
-- 每个 case 独立镜像、独立 QEMU 进程（`player.toml` 内联在 `matrix.toml` 里），
+- 统一控制平面（无老管线）：播放只走 `Clip`。`[play] feed` 五档
+  （clip/staged/stream/zero_copy/single）只切拿帧方式，上传路
+  （blt/direct/mp_draw/nano_pump/dynamic_draw）零改；每格式解码并发/缓冲由
+  `[decode.<fmt>]` 四键调（threads bsp_only/all + zero_copy/streaming 布尔 +
+  buffers 0=跟随`tune.window`/1-32 显式，六表 hevc/avc/vp9/h263/mpeg2v/theora）。
+  `[play] pipeline` 与 `[render] workers/dist` 旧键已删除（正典只剩 `[schedule]`
+  workers/dist；旧值别名 `avx512`/`on`/整数壁纸 fps 已摘除）。
+  旧 7 行为映射（`render_additions` 为空）：staged/zero_copy/stream→对应 feed +
+  `render.blt`；single→NEW `feed=single`；legacy_blt/direct/u64→clip+eager +
+  对应 render/workers/accel（u64 步进由 `copy_block` 位宽分发覆盖）。
+- 每个 case 独立镜像、独立 QEMU 进程（`player.toml` 内联在 `matrix/` 分组文件里），
   互不干扰；超时即 FAIL（固件 `run_menu` 永不返回，只能靠模式匹配 + 超时判定）。
 - 按键经 human monitor（telnet）`sendkey` 注入；`pause_return` 的回车一律再补
   一个键（如 `x`）。发键时机按串口标记卡点（`wait_for`），不靠裸睡——菜单每次
@@ -78,7 +88,10 @@ cargo run --manifest-path tools/qemu-matrix/Cargo.toml --target "$(rustc -vV | s
 
 ## 新增 case 规范（和 AGENTS 规则配套）
 
-1. 有新配置项/新路径 → 至少加一个 `matrix.toml` case（config 内联 + expect 串口行）。
+1. 有新配置项/新路径 → 至少加一个 `matrix/` case（config 内联 + expect 串口行）。
+   feed 加档按 `video-feed-*` 样式（`video: feed=` + path 行 + soak）；
+   decode 加键按 `video-decode-*` 样式（`decode: fmt=` 解析行 +
+   `threads all deferred` 回退警告行 + path 行 + soak，不断言画质）。
 2. 有新串口日志 → 老 case 的 `expect` 能用就复用，不硬造新 case。
 3. 慢 case（>5min）标 `slow = true`，默认跳过，`--include-slow` 才跑。
 4. 多卷场景用 `extra_volumes`（第二盘起挂 hd2、hd3…）：`{path, text|zeros|efi}` 三选一

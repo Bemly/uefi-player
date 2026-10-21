@@ -8,6 +8,7 @@
 //! 布局/循环语义不变：A 菜单背景播行区，B 引导过渡播全屏。
 //! 目录枚举/解码全部复用 `video::decoder::Clip`（`uefi-rs` 无 walker 的部分，
 //! `Clip::from_raw_dir` 内自研 20 行，与播放器同一套）。
+//! 恒 `clip`/eager（随机访问循环，按 tag 裁决，`feed`/decode 表不影响壁纸）。
 
 use crate::config::{self, MediaFormat};
 use crate::error::Result;

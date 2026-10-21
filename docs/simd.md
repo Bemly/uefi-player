@@ -44,6 +44,13 @@
 >（hevc 同款 `isa` 行），供 QEMU 矩阵断言（`hevc-probe` 的 boot_expect）。
 > ee2ccad 的 `[accel.decode]` 三键新区已回滚（GUI/固件/schema/矩阵同步摘除；
 > 窗口期写出的旧表直接忽略，不断解析）。
+>
+> 注意区分：`[decode.<fmt>] threads/zero_copy/streaming/buffers`
+>（统一控制平面，见 `docs/player.md` 解码表）不是 SIMD 开关——SIMD 仍只有上表
+> 单比特跟随全局，无 per-codec SIMD 档；`threads=all` 管帧级并行，
+> 有状态软解码上解析但警告并驻 `bsp_only`（串口
+> `decode: <Fmt> threads all deferred (staying bsp_only)` 行，`video-decode-*`
+> 矩阵断言用），与本节位宽门无关。
 
 | 家 | 开关接收端 | 开时上限 | 关时 | 硬件门 |
 |---|---|---|---|---|

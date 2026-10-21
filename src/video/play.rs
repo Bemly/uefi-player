@@ -1,6 +1,6 @@
-//! `video::play`：片源加载与播放目标裁决（`[play] format/fps` 矩阵）。
-//! `need_eager_clip` 决全量/懒形态；`load_video_clip` 八格式落同一 `Clip`；
-//! `resolve_play_target`/`measure_max_fps` 决限速目标。拆分仅为 ≤1000 行，不改行为。
+//! `video::play`：片源加载与播放目标裁决（`[play] format/fps/feed` + `[decode.*]` 矩阵）。
+//! `need_eager_clip` 决全量/懒形态（mp/dynamic 恒 eager，壁纸恒 eager 见 `feed_for`）；
+//! `load_video_clip` 八格式落同一 `Clip`；`resolve_play_target`/`measure_max_fps` 决限速目标。
 
 use super::decoder::Clip;
 use super::{VIDEO_H, VIDEO_NATIVE_FPS, VIDEO_W, rdtsc};
@@ -12,6 +12,9 @@ use alloc::format;
 use uefi::cstr16;
 
 pub(crate) fn need_eager_clip() -> bool {
+    // mp/dynamic 恒 eager（全前视行区切分）；其余懒/全量按 feed 走 clip 路。
+    // wallpaper 恒 eager 由 `feed_for` tag 裁决（此处不分支）。
+    // single 零缓存：eager 会一次全解（正确但多内存），mp/dynamic 下仍 eager（矩阵要求）。
     match config::schedule_backend() {
         config::ScheduleBackend::Dynamic => true,
         config::ScheduleBackend::Nano => false,
@@ -75,19 +78,31 @@ pub(crate) fn load_video_clip(fs: &mut Fs, eager: bool) -> Result<Clip> {
     if eager {
         clip.ensure_eager()?;
     }
+    let fmt = config::play_format();
     // 矩阵靠它断言格式分发（`video-hevc`/`video-vp9` 的 `expect` 行）。
     log::info!(
         "video: fmt={:?} frames={} {}x{}",
-        config::play_format(),
+        fmt,
         clip.len(),
         clip.w,
         clip.h
     );
-    // 供片断言行（矩阵用，不断言画质）：feed 档（配置文件拼写）+ stream 窗口。
+    // 供片断言行（矩阵用，不断言画质）：feed 档（配置文件拼写）+ 每格式生效窗
+    // （`decode.<fmt>.buffers` 显式 1-32 覆盖，0 跟随 `tune.window` 全局默认）+
+    // 解码面回显（threads/zero_copy/streaming/buffers，parse + fallback 断言用）。
     log::info!(
         "video: feed={} window={}",
         config::play_feed().as_str(),
-        config::tune_window()
+        config::decode_window(fmt),
+    );
+    log::info!(
+        "decode: fmt={:?} threads={} zero_copy={} streaming={} buffers={} window={}",
+        fmt,
+        config::decode_threads(fmt).as_str(),
+        config::decode_zero_copy(fmt),
+        config::decode_streaming(fmt),
+        config::decode_buffers(fmt),
+        config::decode_window(fmt),
     );
     Ok(clip)
 }

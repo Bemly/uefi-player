@@ -1,4 +1,4 @@
-//! 懒供片（`[play] feed` 三档：staged/stream/zero_copy，`clip` 不进此文件）。
+//! 懒供片（`[play] feed` 五档：staged/stream/zero_copy/single，`clip` 不进此文件）。
 //!
 //! - load 期只分块（纯扫描，不解码像素）+ 首帧预解（定几何、空集报错，
 //!   boot 语义与全预解码一致：坏片源直接 Err，不断 boot）；
@@ -7,20 +7,32 @@
 //!   vp9 按 IVF chunk/mp4 样片；h263 流式 reader 免预切；mpeg2v 按
 //!   `access_units`；theora 按 Ogg 包；raw 按帧文件；mp4 先整文件 demux 出
 //!   annexb/样片再分块（demux 本来就要整文件读，内存赢在解码帧侧）；
-//! - 三策略：staged（qois 走 QOI→Raw→Blt 显式三段，复用 `buffer.rs` 三缓冲；
+//! - 五策略：staged（qois 走 QOI→Raw→Blt 显式三段，复用 `buffer.rs` 三缓冲；
 //!   非 qois 在结构上等价于 clip——软解码 planar→BGRA 固有分段，
-//!   故 `feed_for` 直接裁决回全预解码，不进此文件）、stream（`tune.window`
-//!   窗口边播边解，游标之后淘汰；`rewind` 重建解码器状态重播）、zero_copy
-//!   （单复用帧缓冲逐显示帧即时解码；借用契约：调用方须立即上传，
-//!   `blt/direct_loop` 与 `nano_pump` 满足）；
+//!   故 `feed_for` 直接裁决回全预解码，不进此文件）、stream（每格式窗
+//!   `decode_buffers` 显式或跟随 `tune.window`，边播边解，游标后淘汰；
+//!   `rewind` 重建解码器状态重播）、zero_copy（单复用帧缓冲逐显示帧即时
+//!   解码；借用契约：调用方须立即上传，`blt/direct_loop` 与 `nano_pump`
+//!   满足）、single（零解码缓存：每显示帧从首块重解到游标，编码保留、
+//!   解码零保留；`raw` 逐帧真读盘，容器格式保留 demux 块；`render.blt`
+//!   同旧 `single_loop`，`fps=max` soak 对齐）；
 //! - 几何在首帧后冻结（窗口缓冲按此尺寸复用；与全预解码的"混入异形帧跳过"
 //!   同策略：后继异形显示帧记数跳过；theora 全预解码本无一致性检查，
 //!   此处为保窗口复用加检查，见 `docs/player.md`）；
 //! - 有状态编解码器（avc/hevc/vp9/h263/mpeg2v/theora）顺序喂块，状态机常驻
-//!   `Source`；`rewind` 丢弃增量上下文重建（qois/raw 无状态，只归零下标）；
+//!   `Source`；BSP 解码、AP 永不解码/永不碰 GOP（上传侧 `mp`/`exec` 纪律）；
+//!   `rewind` 丢弃增量上下文重建（qois/raw 无状态，只归零下标）；解码 SIMD
+//!   单比特跟随全局（`config::resolve_accel` 一推，本层不另设门）；
 //! - 坏块记数跳过（与全预解码同策略）；avc 逐 AU 经 `decode`（解码序，
 //!   全预解码的 `decode_stream` 是显示序，B 帧/多 slice 流以 Agent-B 联调结论为准）；
 //! - 上传路零改：只经 `next`/`reset`/`drain_all` 与 `Clip` 的窗口交互。
+//! - 解码并行（BSP/AP 分段）：`qois`/`raw` 无状态帧级并行可行（`eager` 分片，
+//!   `threads=all` 立即兑现，AP 钩子预留）；有状态六格式解码恒顺序
+//!   （`threads=all` 告警仍 `bsp_only`，demux→解码→转换交叠 deferred）；
+//!   解码-while-上传流水：`stream` 预取到窗满（BSP 先解后传，环形多缓冲）；
+//!   零拷输出：复用 `scratch`/ring（稳态零分配，`raw` reinterpret 零拷）；
+//!   真流式取数：`raw` 逐文件读盘 + `h263` reader 免预切，其余保留编码块
+//!   （整文件 demux/扫描必需，内存赢在解码帧侧）+ 窗口增量解码。
 
 use alloc::collections::VecDeque;
 use alloc::string::String;
@@ -29,7 +41,7 @@ use core::ops::Range;
 use uefi::proto::console::gop::BltPixel;
 
 use super::source::Source;
-use crate::config::{FeedMode, tune_window};
+use crate::config::{FeedMode, MediaFormat};
 use crate::video::buffer::{BltFrameBuffer, QoiFrameBuffer, RawFrameBuffer};
 use crate::video::demux::split_annexb_aus;
 
@@ -54,12 +66,13 @@ pub(crate) fn feed_for(tag: &str, staged_ok: bool) -> Option<FeedMode> {
     Some(m)
 }
 
-/// 懒策略（`FeedMode` 去掉 `Clip` 后的三档）。
+/// 懒策略（`FeedMode` 三档 + `Single` 零缓存档）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Strategy {
     Staged,
     Stream,
     ZeroCopy,
+    Single,
 }
 
 impl Strategy {
@@ -67,6 +80,7 @@ impl Strategy {
         match mode {
             FeedMode::Staged => Self::Staged,
             FeedMode::ZeroCopy => Self::ZeroCopy,
+            FeedMode::Single => Self::Single,
             FeedMode::Stream | FeedMode::Clip => Self::Stream,
         }
     }
@@ -104,17 +118,19 @@ fn fail(tag: &str, skipped: u32) -> crate::error::NyaStatus {
 impl LazyState {
     /// 构造（load 期）：分块已备，会话初建；首帧预解定几何（空集报错，
     /// 与全预解码同消息形状），随后重建会话保证从头重播语义。
+    /// `fmt` 决每格式窗（`decode_buffers` 显式或跟随 `tune.window`）。
     fn build(
         tag: &str,
         mode: FeedMode,
         mut source: Source,
         total: usize,
         preset_geom: Option<(usize, usize)>,
+        fmt: MediaFormat,
     ) -> crate::error::Result<super::Clip> {
         let strategy = Strategy::of(mode);
         let window = match strategy {
-            Strategy::Stream => tune_window() as usize,
-            Strategy::Staged | Strategy::ZeroCopy => 1,
+            Strategy::Stream => super::decode_window(fmt),
+            Strategy::Staged | Strategy::ZeroCopy | Strategy::Single => 1,
         };
         // 首帧预解：定几何 + 空集报错（boot 语义与全预解码一致）。
         let mut geom = preset_geom;
@@ -173,6 +189,50 @@ impl LazyState {
         })
     }
 
+    /// 单档构造（`feed=single` 零缓存档）：首帧预解同式，会话重建，窗恒 1。
+    /// 每 `next` 从首块重解到游标（编码保留、解码零保留；`raw` 逐帧真读盘）。
+    fn build_single(
+        tag: &str,
+        mut source: Source,
+        total: usize,
+        preset_geom: Option<(usize, usize)>,
+    ) -> crate::error::Result<super::Clip> {
+        let mut geom = preset_geom;
+        let mut first: Vec<BltPixel> = Vec::new();
+        let mut skipped = 0u32;
+        if !source.next_into(&mut first, &mut geom, &mut skipped) {
+            return Err(fail(tag, skipped));
+        }
+        let (w, h) = geom.unwrap_or((0, 0));
+        if skipped > 0 {
+            log::warn!("{}: predecoded 1 frames, skipped {} bad", tag, skipped);
+        }
+        log::info!("video: feed=single window=1 (zero decoded cache, render.blt)");
+        source.reset();
+        let frames = alloc::vec![first];
+        Ok(super::Clip {
+            w,
+            h,
+            frames,
+            cursor: 0,
+            lazy: Some(LazyState {
+                source,
+                strategy: Strategy::Single,
+                window: 1,
+                base: 0,
+                skipped,
+                produced: 1,
+                finished: false,
+                end_warned: false,
+                scratch: Vec::new(),
+                qoi: QoiFrameBuffer::new(0),
+                raw: RawFrameBuffer::new(0),
+                blt: BltFrameBuffer::new(0),
+            }),
+            total,
+        })
+    }
+
     pub(crate) fn base(&self) -> usize {
         self.base
     }
@@ -204,6 +264,8 @@ impl LazyState {
     /// 逐显示帧供片（`Clip::next_frame` 唯一落点）：命中窗口直接借，
     /// 未命中按策略填充；流尽返回 `None`（调用方 `rewind` 循环）。
     /// 跳帧（`pace_or_drop`）同样经此解码丢弃：正确但费解码，见 `docs/player.md`。
+    /// `Single`：每帧从首块重解到游标（零解码缓存，O(n²) 慢速对照）。
+    /// `Stream`：命中后预取到窗满（解码-while-上传流水，环形多缓冲）。
     pub(crate) fn next<'a>(
         &mut self,
         frames: &'a mut Vec<Vec<BltPixel>>,
@@ -211,6 +273,10 @@ impl LazyState {
         w: usize,
         h: usize,
     ) -> Option<&'a [BltPixel]> {
+        // Single 零缓存档：游标 k 需从首块重解 k+1 帧（编码保留、解码零保留）。
+        if self.strategy == Strategy::Single {
+            return self.next_single(frames, cursor, w, h);
+        }
         let mut geom = Some((w, h));
         // 填充到覆盖游标（staged/zc 单槽：未命中即解一块顶掉旧槽）。
         while !self.finished && *cursor >= self.base + frames.len() {
@@ -240,6 +306,15 @@ impl LazyState {
                 self.scratch = frames.remove(0);
                 self.base += 1;
             }
+            // 流水预取：窗未满且未流尽，解到窗满（BSP 先解后传，多缓冲环）。
+            let mut geom_pf = Some((w, h));
+            while !self.finished && frames.len() < self.window.max(1) {
+                if !self.fill(&mut geom_pf) {
+                    self.finished = true;
+                    break;
+                }
+                frames.push(core::mem::take(&mut self.scratch));
+            }
         }
         if *cursor >= self.base && *cursor - self.base < frames.len() {
             let frame = &frames[*cursor - self.base];
@@ -250,6 +325,45 @@ impl LazyState {
             self.note_end();
             None
         }
+    }
+
+    /// `Single` 供片：重建会话后从首块顺序解到游标，单槽复用，零保留。
+    /// 首轮外每帧 O(k) 重解（慢速下限对照）；流尽 `None`（调用方 `rewind`）。
+    fn next_single<'a>(
+        &mut self,
+        frames: &'a mut Vec<Vec<BltPixel>>,
+        cursor: &mut usize,
+        w: usize,
+        h: usize,
+    ) -> Option<&'a [BltPixel]> {
+        if self.finished {
+            self.note_end();
+            return None;
+        }
+        // 从首块重解到游标（含游标）：有状态机丢弃增量上下文重走。
+        self.source.reset();
+        let mut geom = Some((w, h));
+        let target = *cursor;
+        for _ in 0..=target {
+            if !self
+                .source
+                .next_into(&mut self.scratch, &mut geom, &mut self.skipped)
+            {
+                self.finished = true;
+                self.note_end();
+                return None;
+            }
+            // 中间帧解完即弃（零保留，只留目标帧；重解代价即 single 慢速本质）。
+        }
+        if frames.is_empty() {
+            frames.push(Vec::new());
+        }
+        core::mem::swap(&mut frames[0], &mut self.scratch);
+        self.base = target;
+        *cursor = target + 1;
+        self.produced += 1;
+        self.note_end();
+        Some(&frames[0])
     }
 
     /// 流尽记一笔（串口留数，首轮一次；`rewind` 后复位）。
@@ -372,7 +486,7 @@ pub(crate) fn qois_bytes(
         ranges,
         pos: 0,
     };
-    LazyState::build(tag, mode, source, total, None)
+    LazyState::build(tag, mode, source, total, None, MediaFormat::Qois)
 }
 
 pub(crate) fn hevc_bytes(
@@ -391,7 +505,7 @@ pub(crate) fn hevc_bytes(
         pending: VecDeque::new(),
         flushed: false,
     };
-    LazyState::build(tag, mode, source, total, None)
+    LazyState::build(tag, mode, source, total, None, MediaFormat::Hevc)
 }
 
 pub(crate) fn avc_bytes(
@@ -408,7 +522,7 @@ pub(crate) fn avc_bytes(
         pos: 0,
         dec: rusty_h264_decoder::Decoder::new(),
     };
-    LazyState::build(tag, mode, source, total, None)
+    LazyState::build(tag, mode, source, total, None, MediaFormat::Avc)
 }
 
 pub(crate) fn vp9_bytes(
@@ -425,7 +539,7 @@ pub(crate) fn vp9_bytes(
         dec: vp9dec::Decoder::new(),
         pending: VecDeque::new(),
     };
-    LazyState::build(tag, mode, source, total, None)
+    LazyState::build(tag, mode, source, total, None, MediaFormat::Vp9)
 }
 
 pub(crate) fn vp9_raw_frames(
@@ -440,7 +554,7 @@ pub(crate) fn vp9_raw_frames(
         dec: vp9dec::Decoder::new(),
         pending: VecDeque::new(),
     };
-    LazyState::build(tag, mode, source, total, None)
+    LazyState::build(tag, mode, source, total, None, MediaFormat::Vp9)
 }
 
 pub(crate) fn h263_bytes(
@@ -457,7 +571,7 @@ pub(crate) fn h263_bytes(
         state: h263_rs::H263State::new(h263_rs::DecoderOption::empty()),
     };
     // 流式免预切：总数未知（`None` 截断，`len` 取 `MAX`）。
-    LazyState::build(tag, mode, source, usize::MAX, None)
+    LazyState::build(tag, mode, source, usize::MAX, None, MediaFormat::H263)
 }
 
 pub(crate) fn mpeg2v_bytes(
@@ -477,7 +591,7 @@ pub(crate) fn mpeg2v_bytes(
         flushed: false,
         pts: 0,
     };
-    LazyState::build(tag, mode, source, total, None)
+    LazyState::build(tag, mode, source, total, None, MediaFormat::Mpeg2v)
 }
 
 pub(crate) fn theora_packets(
@@ -519,7 +633,7 @@ pub(crate) fn theora_packets(
         pos: 3,
         dec,
     };
-    LazyState::build(tag, mode, source, total, None)
+    LazyState::build(tag, mode, source, total, None, MediaFormat::Theora)
 }
 
 pub(crate) fn raw_dir(
@@ -570,5 +684,197 @@ pub(crate) fn raw_dir(
         frame_bytes,
     };
     // raw 几何定值（1920x1080，全预解码同值；首帧预解只验可读性）。
-    LazyState::build(tag, mode, source, total, Some((1920, 1080)))
+    LazyState::build(
+        tag,
+        mode,
+        source,
+        total,
+        Some((1920, 1080)),
+        MediaFormat::Raw,
+    )
+}
+
+/// `single` 零缓存档（`feed=single`，`render.blt` 同旧环）：分块同懒分支，
+/// 会话经 `build_single`（每显示帧从首块重解，编码保留、解码零保留；
+/// `raw` 逐帧真读盘，容器保留 demux 块，画质不断言，soak 对齐旧环）。
+pub(crate) fn qois_single_bytes(data: &[u8], tag: &str) -> crate::error::Result<super::Clip> {
+    let ranges = scan_qois(data);
+    let total = ranges.len();
+    let source = Source::Qois {
+        data: data.to_vec(),
+        ranges,
+        pos: 0,
+    };
+    LazyState::build_single(tag, source, total, None)
+}
+
+pub(crate) fn hevc_single_bytes(data: &[u8], tag: &str) -> crate::error::Result<super::Clip> {
+    let data = data.to_vec();
+    let aus = split_annexb_aus(&data, HEVC_VCL, 2);
+    let total = aus.len().max(1);
+    let source = Source::Hevc {
+        data,
+        aus,
+        pos: 0,
+        dec: rusty_h265::Decoder::new(),
+        pending: VecDeque::new(),
+        flushed: false,
+    };
+    LazyState::build_single(tag, source, total, None)
+}
+
+pub(crate) fn avc_single_bytes(data: &[u8], tag: &str) -> crate::error::Result<super::Clip> {
+    let data = data.to_vec();
+    let aus = split_annexb_aus(&data, AVC_VCL, 1);
+    let total = aus.len().max(1);
+    let source = Source::Avc {
+        data,
+        aus,
+        pos: 0,
+        dec: rusty_h264_decoder::Decoder::new(),
+    };
+    LazyState::build_single(tag, source, total, None)
+}
+
+pub(crate) fn vp9_single_bytes(data: &[u8], tag: &str) -> crate::error::Result<super::Clip> {
+    let ranges = scan_ivf(data);
+    let total = ranges.len();
+    let source = Source::Vp9Ivf {
+        data: data.to_vec(),
+        ranges,
+        pos: 0,
+        dec: vp9dec::Decoder::new(),
+        pending: VecDeque::new(),
+    };
+    LazyState::build_single(tag, source, total, None)
+}
+
+pub(crate) fn vp9_single_raw_frames(
+    samples: &[Vec<u8>],
+    tag: &str,
+) -> crate::error::Result<super::Clip> {
+    let total = samples.len();
+    let source = Source::Vp9Mp4 {
+        frames: samples.to_vec(),
+        pos: 0,
+        dec: vp9dec::Decoder::new(),
+        pending: VecDeque::new(),
+    };
+    LazyState::build_single(tag, source, total, None)
+}
+
+pub(crate) fn h263_single_bytes(data: &[u8], tag: &str) -> crate::error::Result<super::Clip> {
+    use h263_rs::parser::H263Reader;
+    let leaked: &'static mut [u8] = alloc::boxed::Box::leak(data.to_vec().into_boxed_slice());
+    let s: &'static [u8] = leaked;
+    let source = Source::H263 {
+        data: s,
+        reader: H263Reader::from_source(s),
+        state: h263_rs::H263State::new(h263_rs::DecoderOption::empty()),
+    };
+    LazyState::build_single(tag, source, usize::MAX, None)
+}
+
+pub(crate) fn mpeg2v_single_bytes(data: &[u8], tag: &str) -> crate::error::Result<super::Clip> {
+    let data = data.to_vec();
+    let aus = filmcraft_mpeg2v::access_units(&data);
+    let total = aus.len();
+    let source = Source::Mpeg2v {
+        data,
+        aus,
+        pos: 0,
+        dec: filmcraft_mpeg2v::Decoder::new(),
+        pending: VecDeque::new(),
+        flushed: false,
+        pts: 0,
+    };
+    LazyState::build_single(tag, source, total, None)
+}
+
+pub(crate) fn theora_single_packets(
+    packets: &[Vec<u8>],
+    tag: &str,
+) -> crate::error::Result<super::Clip> {
+    if packets.len() < 3 {
+        return Err(crate::error::NyaStatus::_Debug(alloc::format!(
+            "{}: theora needs 3 header packets, got {}",
+            tag,
+            packets.len()
+        )));
+    }
+    let ident = oxideav_theora::decode_identification_header(&packets[0]).map_err(|e| {
+        crate::error::NyaStatus::_Debug(alloc::format!("{}: theora ident error: {:?}", tag, e))
+    })?;
+    if ident.pf != oxideav_theora::PixelFormat::Yuv420 {
+        return Err(crate::error::NyaStatus::_Debug(alloc::format!(
+            "{}: theora only supports 4:2:0 (got {:?})",
+            tag,
+            ident.pf
+        )));
+    }
+    let _ = oxideav_theora::parse_comment_header(&packets[1]).map_err(|e| {
+        crate::error::NyaStatus::_Debug(alloc::format!("{}: theora comment error: {:?}", tag, e))
+    })?;
+    let setup = oxideav_theora::decode_setup_header(&packets[2]).map_err(|e| {
+        crate::error::NyaStatus::_Debug(alloc::format!("{}: theora setup error: {:?}", tag, e))
+    })?;
+    let dec = oxideav_theora::FrameDecoder::new(ident, setup).map_err(|e| {
+        crate::error::NyaStatus::_Debug(alloc::format!("{}: theora decoder error: {:?}", tag, e))
+    })?;
+    let total = packets.len().saturating_sub(3);
+    let source = Source::Theora {
+        packets: packets.to_vec(),
+        pos: 3,
+        dec,
+    };
+    LazyState::build_single(tag, source, total, None)
+}
+
+pub(crate) fn raw_single_dir(
+    fs: &mut crate::fs::Fs,
+    dir: &str,
+    want: usize,
+    frame_bytes: usize,
+    tag: &str,
+) -> crate::error::Result<super::Clip> {
+    let cdir =
+        uefi::CString16::try_from(dir).map_err(|_| crate::error::NyaStatus::FromStrWithBufError)?;
+    let entries = match fs.list_dir(&cdir) {
+        Ok(e) => e,
+        Err(crate::error::NyaStatus::Uefi(err)) if err.status() == uefi::Status::NOT_FOUND => {
+            return Err(crate::error::NyaStatus::_Debug(alloc::format!(
+                "{}: no {} directory",
+                tag,
+                dir
+            )));
+        }
+        Err(e) => {
+            log::warn!("{}: list failed: {:?}", tag, e);
+            return Err(e);
+        }
+    };
+    let mut names: Vec<String> = entries
+        .into_iter()
+        .filter(|(_, d)| !d)
+        .map(|(n, _)| n)
+        .filter(|n| n.to_ascii_lowercase().ends_with(".raw"))
+        .collect();
+    names.sort();
+    if names.is_empty() {
+        return Err(crate::error::NyaStatus::_Debug(alloc::format!(
+            "{}: no frames in {}",
+            tag,
+            dir
+        )));
+    }
+    let names: Vec<String> = names.into_iter().take(want.max(1)).collect();
+    let total = names.len();
+    // raw single 真读盘：目录枚举保留（名表），帧字节逐显示帧 `Fs::read_file` 重读（见 `Source::Raw`）。
+    let source = Source::Raw {
+        dir: String::from(dir),
+        names,
+        pos: 0,
+        frame_bytes,
+    };
+    LazyState::build_single(tag, source, total, Some((1920, 1080)))
 }

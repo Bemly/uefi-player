@@ -14,8 +14,7 @@ pub(crate) struct TuneVisible {
 
 /// 开机矩阵待测（与固件 `config::needs_render_bench` 同逻辑 + half）：
 /// Blt 下 workers/dist 不参测，单核下 dist 不参测。
-/// `workers`/`dist` 读 `[schedule]`（搬家后位置；`render` 下是 legacy 别名，
-/// `coerce_loaded` 已迁移，此处只认新位置）。
+/// `workers`/`dist` 只认 `[schedule]`（`[render]` 下同名键已删，老文件残留直接忽略）。
 pub(crate) fn bench_pending(cfg: &FileConfig) -> bool {
     let (m, s) = (&cfg.render, &cfg.schedule);
     if m.mode == RenderMode::Auto && m.measured_render == RenderMode::Auto {
@@ -69,19 +68,25 @@ pub(crate) fn tune_visible(cfg: &FileConfig) -> TuneVisible {
 /// 读盘钳制：Blt 三个非上屏操作 GUI 置灰不可选，残留值钳回 B2V
 /// （播放行为无变化——固件上屏路本来就只认 B2V；手写值想出引擎数
 /// 的改完别点保存，或固件侧照读，见 player.md）。
-/// `[schedule]` 缺表迁移：老文件 `[render]` 下的 workers/dist 搬到新位置，
-/// 原位置复位 Auto（下次存盘即新格式；固件侧同规则，见 `config::load`）。
-pub(crate) fn coerce_loaded(mut cfg: FileConfig, has_schedule: bool) -> FileConfig {
+/// 解码缓冲逐格式钳 0-32（0 = 跟随 `tune.window`；超限手写值钳住，不断解析）。
+/// `[play] pipeline` / `[render] workers/dist` 已删：老文件残留键 serde 默认忽略，
+/// 无需迁移（`[schedule]` 为准）。
+pub(crate) fn coerce_loaded(mut cfg: FileConfig) -> FileConfig {
     if cfg.render.blt_op != BltOpKind::BufferToVideo {
         cfg.render.blt_op = BltOpKind::BufferToVideo;
     }
-    if !has_schedule {
-        cfg.schedule.workers = cfg.render.workers;
-        cfg.schedule.dist = cfg.render.dist;
-        cfg.render.workers = WorkersMode::Auto;
-        cfg.render.dist = DistMode::Auto;
-    }
+    clamp_decode(&mut cfg.decode);
     cfg
+}
+
+/// 落盘前钳制解码缓冲（滑杆已钳 0-32，这里防手改文件后的脏值回写；
+/// 0 保留 = 跟随 `tune.window`，只压上界）。
+pub(crate) fn clamp_decode(d: &mut DecodeTable) {
+    for fmt in DecodeTable::ORDER {
+        if let Some(c) = d.get_mut(fmt) {
+            c.buffers = c.buffers.min(32);
+        }
+    }
 }
 
 /// 落盘前钳制 tune（滑杆已钳，这里防手改文件后的脏值回写）。
@@ -141,8 +146,7 @@ mod blackbox_matrix {
     }
 
     /// 单组回写断言（从笛卡尔里抽出来：8 层嵌套塞不进 100 列）。
-    /// `workers`/`dist` 走新位置 `[schedule]`（`render` 下留 legacy 默认，
-    /// 缺表迁移另见 `schedule_roundtrip_matrix`）。
+    /// `workers`/`dist` 只认新位置 `[schedule]`（`render` 下同名键已删）。
     fn roundtrip_one(
         a: AccelLevel,
         m: RenderMode,
@@ -158,8 +162,6 @@ mod blackbox_matrix {
             accel: AccelConfig { level: a },
             render: RenderConfig {
                 mode: m,
-                workers: WorkersMode::Auto,
-                dist: DistMode::Auto,
                 vsync: v,
                 blt_op: b,
                 tune: RenderTune {
@@ -180,9 +182,9 @@ mod blackbox_matrix {
                 fps: String::from("60"),
                 measured_max_fps: 120,
                 format: MediaFormat::Raw,
-                pipeline: PlayPipeline::Clip,
                 feed: FeedMode::Clip,
             },
+            decode: DecodeTable::default(),
             wallpaper: WallpaperConfig {
                 enable: true,
                 fps: String::from("20"),
@@ -229,7 +231,7 @@ mod blackbox_matrix {
         }
     }
 
-    /// 远古文件（v0.1 时代：无 wallpaper/tune 表）照读，新键全按默认。
+    /// 远古文件（v0.1 时代：无 wallpaper/tune/decode 表）照读，新键全按默认。
     #[test]
     fn compat_legacy_matrix() {
         let text = "version = 1\n[accel]\nlevel = \"auto\"\n[render]\nmode = \"auto\"\n[play]\nfps = \"auto\"\n";
@@ -238,12 +240,22 @@ mod blackbox_matrix {
         assert_eq!(cfg.wallpaper.format, MediaFormat::Raw);
         assert!(cfg.wallpaper.popup_freeze);
         assert_eq!(cfg.play.format, MediaFormat::Qois);
-        assert_eq!(cfg.render.dist, DistMode::Auto);
+        assert_eq!(cfg.play.feed, FeedMode::Clip);
+        assert_eq!(cfg.schedule.dist, DistMode::Auto);
+        assert_eq!(cfg.schedule.workers, WorkersMode::Auto);
         assert_eq!(cfg.render.vsync, VsyncMode::Auto);
         assert_eq!(cfg.render.blt_op, BltOpKind::BufferToVideo);
         assert_eq!(cfg.render.tune.buffers, default_buffers());
         assert_eq!(cfg.render.measured_vsync_fps, 0);
         assert_eq!(cfg.r#async.executor, AsyncExecutor::All);
+        // 无 `[decode]` 表：6 格式全默认（bsp_only/关/关/跟随窗口）。
+        for fmt in DecodeTable::ORDER {
+            let d = cfg.decode.get(fmt).unwrap();
+            assert_eq!(d.threads, DecodeThreads::BspOnly);
+            assert!(!d.zero_copy);
+            assert!(!d.streaming);
+            assert_eq!(d.buffers, 0);
+        }
     }
 
     /// 片源格式八档位回写（play/wallpaper 各 8 种，64 组合，不丢字段）。
@@ -292,8 +304,7 @@ mod blackbox_matrix {
         assert_eq!(legacy.wallpaper.preload, 8);
     }
 
-    /// 壁纸帧率三态字符串照读照写（与播放 `fps_string_matrix` 同构；
-    /// 整数老文件（`fps = 15`）照读为 `"15"`，不断旧配置）。
+    /// 壁纸帧率纯字符串三态照读照写（与播放 `fps_string_matrix` 同构）。
     #[test]
     fn wallpaper_fps_string_matrix() {
         for s in ["auto", "max", "15", "60", "240", "999", "abc", ""] {
@@ -303,32 +314,17 @@ mod blackbox_matrix {
             let back: FileConfig = toml::from_str(&toml::to_string(&cfg).unwrap()).unwrap();
             assert_eq!(back.wallpaper.fps, s);
         }
-        // 整数即字符串（固件 `de_wallpaper_fps` 同款，host/guest 隔离故各测一遍）。
-        let cfg: FileConfig = toml::from_str("[wallpaper]\nfps = 15\n").unwrap();
-        assert_eq!(cfg.wallpaper.fps, "15");
-        let back: FileConfig = toml::from_str(&toml::to_string(&cfg).unwrap()).unwrap();
-        assert_eq!(back.wallpaper.fps, "15");
     }
 
-    /// 播放管线八档位回写（clip/staged/zero_copy/stream/single/legacy 三档，
-    /// 不丢字段；老文件缺键按 clip 照读，现路行为不变）。
     #[test]
-    fn pipeline_roundtrip_matrix() {
-        for p in PlayPipeline::ALL {
-            let mut cfg = FileConfig::default();
-            cfg.play.pipeline = p;
-            let back: FileConfig = toml::from_str(&toml::to_string(&cfg).unwrap()).unwrap();
-            assert_eq!(back.play.pipeline, p);
-            assert_eq!(back, cfg);
-        }
-        let legacy: FileConfig = toml::from_str("version = 1\n[play]\nfps = \"max\"\n").unwrap();
-        assert_eq!(legacy.play.pipeline, PlayPipeline::Clip);
+    fn wallpaper_fps_int_rejected() {
+        // 整数老文件（`fps = 15`）不再兼容：整文件解析失败 → 调用方走全默认 + 警告。
+        assert!(toml::from_str::<FileConfig>("[wallpaper]\nfps = 15\n").is_err());
     }
 
-    /// 供片四档 × 窗口代表值回写（clip/staged/stream/zero_copy × 1/4/16/32，
+    /// 供片五档 × 窗口代表值回写（clip/staged/stream/zero_copy/single × 1/4/16/32，
     /// 不断字段；老文件缺键按 clip/4 照读，现路行为不变）。
-    /// 主笛卡尔不加 feed 维（×4 即 18.6 万组合；`pipeline` 八档同口径另表，
-    /// 全量 4 档在此全盖，不存在代表集缺口）。
+    /// 主笛卡尔不加 feed 维（×5 即 23 万组合，全量 5 档在此全盖，不存在代表集缺口）。
     #[test]
     fn feed_roundtrip_matrix() {
         let mut n = 0;
@@ -346,13 +342,86 @@ mod blackbox_matrix {
                 n += 1;
             }
         }
-        assert_eq!(n, 4 * 4);
+        assert_eq!(n, 5 * 4);
         // 老文件缺键：供片按 clip、窗口按 4 照读（现行为不变）。
         let legacy: FileConfig = toml::from_str("version = 1\n[play]\nfps = \"max\"\n").unwrap();
         assert_eq!(legacy.play.feed, FeedMode::Clip);
         let legacy_tune: FileConfig =
             toml::from_str("version = 1\n[render.tune]\nframes = 30\n").unwrap();
         assert_eq!(legacy_tune.render.tune.window, default_window());
+        // 老 `[play] pipeline` 残留键直接忽略（未知键 serde 默认忽略，不断解析）。
+        let pipelined: FileConfig =
+            toml::from_str("version = 1\n[play]\nfps = \"max\"\npipeline = \"single\"\n").unwrap();
+        assert_eq!(pipelined.play.feed, FeedMode::Clip);
+    }
+
+    /// 解码表回写（6 格式 × threads 2 档 × 零拷/流式开关 × 缓冲代表值，
+    /// 6×2×2×2×4 = 192 组合不断字段；老文件缺表/缺键全按默认照读）。
+    #[test]
+    fn decode_roundtrip_matrix() {
+        let mut n = 0;
+        for fmt in DecodeTable::ORDER {
+            for t in DecodeThreads::ALL {
+                for zc in [false, true] {
+                    for st in [false, true] {
+                        for b in [0, 1, 4, 32] {
+                            let mut cfg = FileConfig::default();
+                            {
+                                let d = cfg.decode.get_mut(fmt).unwrap();
+                                d.threads = t;
+                                d.zero_copy = zc;
+                                d.streaming = st;
+                                d.buffers = b;
+                            }
+                            let text = toml::to_string(&cfg).unwrap();
+                            assert!(text.contains(fmt.file_str()), "{fmt:?} missing in {text}");
+                            let back: FileConfig = toml::from_str(&text).unwrap();
+                            let d = back.decode.get(fmt).unwrap();
+                            assert_eq!(d.threads, t);
+                            assert_eq!(d.zero_copy, zc);
+                            assert_eq!(d.streaming, st);
+                            assert_eq!(d.buffers, b);
+                            assert_eq!(back, cfg);
+                            n += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(n, 6 * 2 * 2 * 2 * 4);
+        // 老文件缺表：6 格式全默认（bsp_only/关/关/跟随窗口）。
+        let legacy: FileConfig = toml::from_str("version = 1\n[play]\nfps = \"max\"\n").unwrap();
+        for fmt in DecodeTable::ORDER {
+            let d = legacy.decode.get(fmt).unwrap();
+            assert_eq!(d.threads, DecodeThreads::BspOnly);
+            assert!(!d.zero_copy);
+            assert!(!d.streaming);
+            assert_eq!(d.buffers, 0);
+        }
+        // 缺键部分表：只写 threads，其余按默认照读。
+        let partial: FileConfig =
+            toml::from_str("version = 1\n[decode.hevc]\nthreads = \"all\"\n").unwrap();
+        let h = partial.decode.get(MediaFormat::Hevc).unwrap();
+        assert_eq!(h.threads, DecodeThreads::All);
+        assert!(!h.zero_copy);
+        assert!(!h.streaming);
+        assert_eq!(h.buffers, 0);
+        let a = partial.decode.get(MediaFormat::Avc).unwrap();
+        assert_eq!(*a, DecodeConfig::default());
+    }
+
+    /// 解码缓冲钳制：超限手写值压到 32，0（跟随窗口）保留。
+    #[test]
+    fn decode_clamp_matrix() {
+        let mut d = DecodeTable::default();
+        d.hevc.buffers = 99;
+        d.avc.buffers = 0;
+        clamp_decode(&mut d);
+        assert_eq!(d.hevc.buffers, 32);
+        assert_eq!(d.avc.buffers, 0);
+        // `coerce_loaded` 同样钳住（读盘路径）。
+        let cfg: FileConfig = toml::from_str("[decode.vp9]\nbuffers = 64\n").unwrap();
+        assert_eq!(coerce_loaded(cfg).decode.vp9.buffers, 32);
     }
 
     /// 执行器线三档位回写（all/nano/dynamic，不丢字段；老文件缺键按 all 照读）。
@@ -422,8 +491,7 @@ mod blackbox_matrix {
         ] {
             let text = format!("[render]\nblt_op = \"{input}\"\n");
             let cfg: FileConfig = toml::from_str(&text).unwrap();
-            // 该文本无 `[schedule]` 表（has_schedule=false，走缺表迁移，不影响 blt 断言）。
-            assert_eq!(coerce_loaded(cfg, false).render.blt_op, expected, "{input}");
+            assert_eq!(coerce_loaded(cfg).render.blt_op, expected, "{input}");
         }
     }
 
@@ -686,8 +754,8 @@ mod blackbox_matrix {
         assert!(tune_visible(&m).frames);
     }
 
-    /// `[schedule]` 三档位回写 + 缺表迁移：36 组合不断字段；
-    /// 老文件（`[render]` 旧键、无 `[schedule]` 表）迁到新位置，原位置复位。
+    /// `[schedule]` 三档位回写：36 组合不断字段；
+    /// 老文件 `[render]` 旧键已删，残留直接忽略（未知键 serde 默认忽略），`[schedule]` 全默认。
     #[test]
     fn schedule_roundtrip_matrix() {
         for b in ScheduleBackend::ALL {
@@ -705,29 +773,26 @@ mod blackbox_matrix {
                 }
             }
         }
-        // 老文件：`[render]` 旧键 + 无 `[schedule]` 表 → 迁到新位置。
+        // 老文件：`[render]` 旧键残留 → 直接忽略，`[schedule]` 全默认。
         let old: FileConfig = toml::from_str(
             "version = 1\n[render]\nmode = \"direct\"\nworkers = \"all\"\ndist = \"tile\"\n",
         )
         .unwrap();
-        assert_eq!(old.render.workers, WorkersMode::All);
-        let moved = coerce_loaded(old, false);
-        assert_eq!(moved.schedule.workers, WorkersMode::All);
-        assert_eq!(moved.schedule.dist, DistMode::Tile);
-        assert_eq!(moved.render.workers, WorkersMode::Auto);
-        assert_eq!(moved.render.dist, DistMode::Auto);
-        // 新文件：`[schedule]` 表在场 → `[render]` 残留不动（固件侧同规则）。
+        let moved = coerce_loaded(old);
+        assert_eq!(moved.schedule.workers, WorkersMode::Auto);
+        assert_eq!(moved.schedule.dist, DistMode::Auto);
+        assert_eq!(moved.render.mode, RenderMode::Direct);
+        // 新文件：`[render]` 残留 + `[schedule]` 同在 → 残留同样忽略。
         let new: FileConfig = toml::from_str(
             "version = 1\n[render]\nworkers = \"all\"\n[schedule]\nbackend = \"nano\"\n",
         )
         .unwrap();
-        let kept = coerce_loaded(new, true);
+        let kept = coerce_loaded(new);
         assert_eq!(kept.schedule.backend, ScheduleBackend::Nano);
-        assert_eq!(kept.render.workers, WorkersMode::All);
+        assert_eq!(kept.schedule.workers, WorkersMode::Auto);
     }
 
-    /// 加速全量 31 档回写（`ALL` 逐档 `file_str` 照读照写，不丢字段；
-    /// 老文件 `"avx512"` 按 `avx512f` 照读，不断旧配置）。
+    /// 加速全量 31 档回写（`ALL` 逐档 `file_str` 照读照写，不丢字段）。
     #[test]
     fn accel_levels_roundtrip() {
         let mut n = 0;
@@ -742,10 +807,10 @@ mod blackbox_matrix {
             n += 1;
         }
         assert_eq!(n, 31);
-        // 老文件 `"avx512"`（改名前的写法）按 `avx512f` 照读。
-        let legacy: FileConfig =
-            toml::from_str("version = 1\n[accel]\nlevel = \"avx512\"\n").unwrap();
-        assert_eq!(legacy.accel.level, AccelLevel::Avx512f);
+        // 老 `"avx512"` 别名已删：整文件解析失败 → 调用方走全默认 + 警告。
+        assert!(
+            toml::from_str::<FileConfig>("version = 1\n[accel]\nlevel = \"avx512\"\n").is_err()
+        );
         // 缺键老文件按 auto 照读（现行为不变）。
         let missing: FileConfig = toml::from_str("version = 1\n[accel]\n").unwrap();
         assert_eq!(missing.accel.level, AccelLevel::Auto);

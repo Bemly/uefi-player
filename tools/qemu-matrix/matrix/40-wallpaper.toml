@@ -12,13 +12,15 @@ version = 1
 level = "auto"
 [render]
 mode = "direct"
-workers = "bsp_only"
-dist = "static"
 vsync = "off"
 [play]
 fps = "max"
 [wallpaper]
 enable = false
+[schedule]
+backend = "manual"
+workers = "bsp_only"
+dist = "static"
 """
 boot_expect = ["cfg: version=1", "idle: ready"]
 keys = [
@@ -40,14 +42,16 @@ version = 1
 level = "auto"
 [render]
 mode = "direct"
-workers = "bsp_only"
-dist = "static"
 vsync = "off"
 [play]
 fps = "max"
 [wallpaper]
 enable = true
 fps = 15
+[schedule]
+backend = "manual"
+workers = "bsp_only"
+dist = "static"
 """
 boot_expect = ["cfg: version=1", "idle: ready"]
 keys = [
@@ -70,8 +74,6 @@ version = 1
 level = "auto"
 [render]
 mode = "direct"
-workers = "bsp_only"
-dist = "static"
 vsync = "off"
 [play]
 fps = "max"
@@ -79,6 +81,10 @@ fps = "max"
 enable = true
 fps = 15
 popup_freeze = false
+[schedule]
+backend = "manual"
+workers = "bsp_only"
+dist = "static"
 """
 boot_expect = ["cfg: version=1", "idle: ready"]
 keys = [
@@ -101,8 +107,6 @@ version = 1
 level = "auto"
 [render]
 mode = "direct"
-workers = "bsp_only"
-dist = "static"
 vsync = "off"
 [play]
 fps = "max"
@@ -110,6 +114,10 @@ fps = "max"
 enable = true
 fps = 15
 format = "qois"
+[schedule]
+backend = "manual"
+workers = "bsp_only"
+dist = "static"
 """
 boot_expect = ["cfg: version=1", "idle: ready"]
 keys = [
@@ -133,8 +141,6 @@ version = 1
 level = "auto"
 [render]
 mode = "direct"
-workers = "bsp_only"
-dist = "static"
 vsync = "off"
 [play]
 fps = "max"
@@ -142,6 +148,10 @@ fps = "max"
 enable = true
 fps = 15
 format = "avc"
+[schedule]
+backend = "manual"
+workers = "bsp_only"
+dist = "static"
 """
 boot_expect = ["cfg: version=1", "idle: ready"]
 keys = [
@@ -165,8 +175,6 @@ version = 1
 level = "auto"
 [render]
 mode = "direct"
-workers = "bsp_only"
-dist = "static"
 vsync = "off"
 [play]
 fps = "max"
@@ -174,6 +182,10 @@ fps = "max"
 enable = true
 fps = 15
 preload = 0
+[schedule]
+backend = "manual"
+workers = "bsp_only"
+dist = "static"
 """
 boot_expect = ["cfg: version=1", "idle: ready"]
 expect = ["wallpaper: preloaded 3 frames"]
@@ -190,14 +202,16 @@ version = 1
 level = "auto"
 [render]
 mode = "direct"
-workers = "bsp_only"
-dist = "static"
 vsync = "off"
 [play]
 fps = "max"
 [wallpaper]
 enable = true
 fps = "max"
+[schedule]
+backend = "manual"
+workers = "bsp_only"
+dist = "static"
 """
 boot_expect = ["cfg: version=1", "idle: ready"]
 expect = ["wallpaper: preloaded 2 frames"]

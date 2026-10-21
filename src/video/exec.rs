@@ -14,6 +14,10 @@
 //! - 执行器数组与 MP 协议句柄常驻 BSP 栈（帧内不返回，见 `BSPDriver` 自持），
 //!   AP 经裸指针按 `who_am_i` 取自己的那台（每台只被一核 poll）；
 //! - AP 永不碰 GOP（BSP 才画 OSD），`Screen` 活着，裸指针安全。
+//!
+//! 统一控制面：`nano_pump` 全档供片直通（含 `single` 零缓存重解 + `stream` 窗预取，
+//!   取帧→上传→限速/掉帧，BSP 单泵）；`dynamic_draw` 恒 `eager`（需全前视分带，load 期
+//!   已强制，AP 只 steal 行拷，永不解码、永不碰 GOP）。解码 SIMD 单比特跟随全局。
 
 use alloc::boxed::Box;
 use alloc::format;

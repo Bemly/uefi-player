@@ -1,5 +1,5 @@
 # 20-video.toml：QEMU 黑盒矩阵分组（`matrix/` 目录，按用例前缀分组，合并后等价原 `matrix.toml`）。
-# 共 26 cases，单文件 ≤1000 行（AGENTS 口径）。新增 case 按前缀落对应文件，并写 `covers`。
+# 共 27 cases，单文件 ≤1000 行（AGENTS 口径）。新增 case 按前缀落对应文件，并写 `covers`。
 
 [[case]]
 name = "video-mp"
@@ -12,13 +12,15 @@ version = 1
 level = "auto"
 [render]
 mode = "direct"
-workers = "all"
-dist = "static"
 vsync = "off"
 [play]
 fps = "max"
 [wallpaper]
 enable = false
+[schedule]
+backend = "manual"
+workers = "all"
+dist = "static"
 """
 boot_expect = ["cfg: version=1", "idle: ready"]
 keys = [
@@ -41,13 +43,15 @@ version = 1
 level = "auto"
 [render]
 mode = "blt"
-workers = "bsp_only"
-dist = "static"
 vsync = "off"
 [play]
 fps = "max"
 [wallpaper]
 enable = false
+[schedule]
+backend = "manual"
+workers = "bsp_only"
+dist = "static"
 """
 boot_expect = ["cfg: version=1", "idle: ready"]
 keys = [
@@ -71,14 +75,16 @@ version = 1
 level = "auto"
 [render]
 mode = "direct"
-workers = "bsp_only"
-dist = "static"
 vsync = "off"
 [play]
 fps = "max"
 format = "raw"
 [wallpaper]
 enable = false
+[schedule]
+backend = "manual"
+workers = "bsp_only"
+dist = "static"
 """
 boot_expect = ["cfg: version=1", "idle: ready"]
 keys = [
@@ -102,14 +108,16 @@ version = 1
 level = "auto"
 [render]
 mode = "direct"
-workers = "bsp_only"
-dist = "static"
 vsync = "off"
 [play]
 fps = "max"
 format = "hevc"
 [wallpaper]
 enable = false
+[schedule]
+backend = "manual"
+workers = "bsp_only"
+dist = "static"
 """
 boot_expect = ["cfg: version=1", "play.fmt=Hevc", "idle: ready"]
 keys = [
@@ -133,14 +141,16 @@ version = 1
 level = "auto"
 [render]
 mode = "direct"
-workers = "bsp_only"
-dist = "static"
 vsync = "off"
 [play]
 fps = "max"
 format = "vp9"
 [wallpaper]
 enable = false
+[schedule]
+backend = "manual"
+workers = "bsp_only"
+dist = "static"
 """
 boot_expect = ["cfg: version=1", "play.fmt=Vp9", "idle: ready"]
 keys = [
@@ -164,14 +174,16 @@ version = 1
 level = "auto"
 [render]
 mode = "direct"
-workers = "bsp_only"
-dist = "static"
 vsync = "off"
 [play]
 fps = "max"
 format = "h263"
 [wallpaper]
 enable = false
+[schedule]
+backend = "manual"
+workers = "bsp_only"
+dist = "static"
 """
 boot_expect = ["cfg: version=1", "play.fmt=H263", "idle: ready"]
 keys = [
@@ -194,14 +206,16 @@ version = 1
 level = "auto"
 [render]
 mode = "direct"
-workers = "bsp_only"
-dist = "static"
 vsync = "off"
 [play]
 fps = "max"
 format = "mpeg2v"
 [wallpaper]
 enable = false
+[schedule]
+backend = "manual"
+workers = "bsp_only"
+dist = "static"
 """
 boot_expect = ["cfg: version=1", "play.fmt=Mpeg2v", "idle: ready"]
 keys = [
@@ -224,14 +238,16 @@ version = 1
 level = "auto"
 [render]
 mode = "direct"
-workers = "bsp_only"
-dist = "static"
 vsync = "off"
 [play]
 fps = "max"
 format = "theora"
 [wallpaper]
 enable = false
+[schedule]
+backend = "manual"
+workers = "bsp_only"
+dist = "static"
 """
 boot_expect = ["cfg: version=1", "play.fmt=Theora", "idle: ready"]
 keys = [
@@ -254,14 +270,16 @@ version = 1
 level = "auto"
 [render]
 mode = "direct"
-workers = "bsp_only"
-dist = "static"
 vsync = "off"
 [play]
 fps = "max"
 format = "avc"
 [wallpaper]
 enable = false
+[schedule]
+backend = "manual"
+workers = "bsp_only"
+dist = "static"
 """
 boot_expect = ["cfg: version=1", "play.fmt=Avc", "idle: ready"]
 keys = [
@@ -285,14 +303,16 @@ version = 1
 level = "auto"
 [render]
 mode = "direct"
-workers = "bsp_only"
-dist = "static"
 vsync = "off"
 [play]
 fps = "max"
 format = "hevc"
 [wallpaper]
 enable = false
+[schedule]
+backend = "manual"
+workers = "bsp_only"
+dist = "static"
 """
 boot_expect = ["cfg: version=1", "play.fmt=Hevc", "idle: ready"]
 keys = [
@@ -316,14 +336,16 @@ version = 1
 level = "auto"
 [render]
 mode = "direct"
-workers = "bsp_only"
-dist = "static"
 vsync = "off"
 [play]
 fps = "max"
 format = "vp9"
 [wallpaper]
 enable = false
+[schedule]
+backend = "manual"
+workers = "bsp_only"
+dist = "static"
 """
 boot_expect = ["cfg: version=1", "play.fmt=Vp9", "idle: ready"]
 keys = [
@@ -424,203 +446,12 @@ keys = [
 expect = ["play: path=mp_draw", "sched.backend=Manual"]
 soak_sec = 15
 
-# 老播放管线（[play] pipeline 手动切换，修复后的老实现循环）：每档一个 case，
-# 内联配置 + 串口 path 标记 + soak 保活（不断言画面，只看无红线）。
-# 非 clip 只读 qois（needs_video 供片）；raw 回落 clip 不在此覆盖。
-[[case]]
-name = "video-pipe-staged"
-covers = ["src/video.rs", "src/video/", "usb_reports/1080p/video.qois"]
-timeout_sec = 180
-needs_video = true
-config = """
-version = 1
-[accel]
-level = "auto"
-[render]
-mode = "direct"
-vsync = "off"
-[play]
-fps = "max"
-pipeline = "staged"
-[wallpaper]
-enable = false
-"""
-boot_expect = ["cfg: version=1", "idle: ready"]
-keys = [
-  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
-  { send = "p", wait_after = 3 },
-  { send = "0", wait_for = ["menu: ready"], wait_after = 5 },
-]
-expect = ["play: path=staged_loop"]
-soak_sec = 15
-
-[[case]]
-name = "video-pipe-zero-copy"
-covers = ["src/video.rs", "src/video/", "usb_reports/1080p/video.qois"]
-timeout_sec = 180
-needs_video = true
-config = """
-version = 1
-[accel]
-level = "auto"
-[render]
-mode = "direct"
-vsync = "off"
-[play]
-fps = "max"
-pipeline = "zero_copy"
-[wallpaper]
-enable = false
-"""
-boot_expect = ["cfg: version=1", "idle: ready"]
-keys = [
-  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
-  { send = "p", wait_after = 3 },
-  { send = "0", wait_for = ["menu: ready"], wait_after = 5 },
-]
-expect = ["play: path=zero_copy_loop"]
-soak_sec = 15
-
-[[case]]
-name = "video-pipe-stream"
-covers = ["src/video.rs", "src/video/", "usb_reports/1080p/video.qois"]
-timeout_sec = 180
-needs_video = true
-config = """
-version = 1
-[accel]
-level = "auto"
-[render]
-mode = "direct"
-vsync = "off"
-[play]
-fps = "max"
-pipeline = "stream"
-[wallpaper]
-enable = false
-"""
-boot_expect = ["cfg: version=1", "idle: ready"]
-keys = [
-  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
-  { send = "p", wait_after = 3 },
-  { send = "0", wait_for = ["menu: ready"], wait_after = 5 },
-]
-expect = ["play: path=stream_loop"]
-soak_sec = 15
-
-[[case]]
-name = "video-pipe-single"
-covers = ["src/video.rs", "src/video/", "usb_reports/1080p/video.qois"]
-timeout_sec = 180
-needs_video = true
-config = """
-version = 1
-[accel]
-level = "auto"
-[render]
-mode = "direct"
-vsync = "off"
-[play]
-fps = "max"
-pipeline = "single"
-[wallpaper]
-enable = false
-"""
-boot_expect = ["cfg: version=1", "idle: ready"]
-keys = [
-  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
-  { send = "p", wait_after = 3 },
-  { send = "0", wait_for = ["menu: ready"], wait_after = 5 },
-]
-expect = ["play: path=single_loop"]
-soak_sec = 15
-
-[[case]]
-name = "video-pipe-legacy-blt"
-covers = ["src/video.rs", "src/video/", "usb_reports/1080p/video.qois"]
-timeout_sec = 180
-needs_video = true
-config = """
-version = 1
-[accel]
-level = "auto"
-[render]
-mode = "direct"
-vsync = "off"
-[play]
-fps = "max"
-pipeline = "legacy_blt"
-[wallpaper]
-enable = false
-"""
-boot_expect = ["cfg: version=1", "idle: ready"]
-keys = [
-  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
-  { send = "p", wait_after = 3 },
-  { send = "0", wait_for = ["menu: ready"], wait_after = 5 },
-]
-expect = ["play: path=legacy_blt_loop"]
-soak_sec = 15
-
-[[case]]
-name = "video-pipe-legacy-direct"
-covers = ["src/video.rs", "src/video/", "usb_reports/1080p/video.qois"]
-timeout_sec = 180
-needs_video = true
-config = """
-version = 1
-[accel]
-level = "auto"
-[render]
-mode = "direct"
-vsync = "off"
-[play]
-fps = "max"
-pipeline = "legacy_direct"
-[wallpaper]
-enable = false
-"""
-boot_expect = ["cfg: version=1", "idle: ready"]
-keys = [
-  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
-  { send = "p", wait_after = 3 },
-  { send = "0", wait_for = ["menu: ready"], wait_after = 5 },
-]
-expect = ["play: path=legacy_direct_loop"]
-soak_sec = 15
-
-[[case]]
-name = "video-pipe-legacy-u64"
-covers = ["src/video.rs", "src/video/", "usb_reports/1080p/video.qois"]
-timeout_sec = 180
-needs_video = true
-config = """
-version = 1
-[accel]
-level = "auto"
-[render]
-mode = "direct"
-vsync = "off"
-[play]
-fps = "max"
-pipeline = "legacy_u64"
-[wallpaper]
-enable = false
-"""
-boot_expect = ["cfg: version=1", "idle: ready"]
-keys = [
-  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
-  { send = "p", wait_after = 3 },
-  { send = "0", wait_for = ["menu: ready"], wait_after = 5 },
-]
-expect = ["play: path=legacy_u64_loop"]
-soak_sec = 15
-
-# 供片模式（`[play] feed` 四档，只切 `Clip` 内部拿帧方式，上传路零改）：
+# 供片模式（`[play] feed` 五档，只切 `Clip` 内部拿帧方式，上传路零改）：
 # clip 全预解码现路 / staged qois 显式三段 / stream 窗口边播边解 /
-# zero_copy 单缓冲即时解码。断言串口 `video: feed=` + 上传路 path 行 + soak 保活。
-# qois 四档 × stream hevc 代表格式（hevc 其余供片在结构上等价 clip，
-# 见固件 `FeedMode` 注释；全组合不铺，避 4×8 膨胀）。
+# zero_copy 单缓冲即时解码 / single 每帧重读重解码零缓存。断言串口 `video: feed=`
+# + 上传路 path 行 + soak 保活。
+# qois 五档 × stream/single hevc 代表格式（hevc 其余供片在结构上等价 clip，
+# 见固件 `FeedMode` 注释；全组合不铺，避 5×8 膨胀）。
 # 上传路沿用 direct 单核整轮（供片不管上传，path 行与 video-raw 同形）。
 [[case]]
 name = "video-feed-clip"
@@ -633,14 +464,16 @@ version = 1
 level = "auto"
 [render]
 mode = "direct"
-workers = "bsp_only"
-dist = "static"
 vsync = "off"
 [play]
 fps = "max"
 feed = "clip"
 [wallpaper]
 enable = false
+[schedule]
+backend = "manual"
+workers = "bsp_only"
+dist = "static"
 """
 boot_expect = ["cfg: version=1", "play.feed=Clip", "idle: ready"]
 keys = [
@@ -662,14 +495,16 @@ version = 1
 level = "auto"
 [render]
 mode = "direct"
-workers = "bsp_only"
-dist = "static"
 vsync = "off"
 [play]
 fps = "max"
 feed = "staged"
 [wallpaper]
 enable = false
+[schedule]
+backend = "manual"
+workers = "bsp_only"
+dist = "static"
 """
 boot_expect = ["cfg: version=1", "play.feed=Staged", "idle: ready"]
 keys = [
@@ -691,8 +526,6 @@ version = 1
 level = "auto"
 [render]
 mode = "direct"
-workers = "bsp_only"
-dist = "static"
 vsync = "off"
 tune = { window = 4 }
 [play]
@@ -700,6 +533,10 @@ fps = "max"
 feed = "stream"
 [wallpaper]
 enable = false
+[schedule]
+backend = "manual"
+workers = "bsp_only"
+dist = "static"
 """
 boot_expect = ["cfg: version=1", "play.feed=Stream", "idle: ready"]
 keys = [
@@ -721,14 +558,16 @@ version = 1
 level = "auto"
 [render]
 mode = "direct"
-workers = "bsp_only"
-dist = "static"
 vsync = "off"
 [play]
 fps = "max"
 feed = "zero_copy"
 [wallpaper]
 enable = false
+[schedule]
+backend = "manual"
+workers = "bsp_only"
+dist = "static"
 """
 boot_expect = ["cfg: version=1", "play.feed=ZeroCopy", "idle: ready"]
 keys = [
@@ -752,8 +591,6 @@ version = 1
 level = "auto"
 [render]
 mode = "direct"
-workers = "bsp_only"
-dist = "static"
 vsync = "off"
 tune = { window = 4 }
 [play]
@@ -762,6 +599,10 @@ format = "hevc"
 feed = "stream"
 [wallpaper]
 enable = false
+[schedule]
+backend = "manual"
+workers = "bsp_only"
+dist = "static"
 """
 boot_expect = ["cfg: version=1", "play.fmt=Hevc", "play.feed=Stream", "idle: ready"]
 keys = [
@@ -770,6 +611,304 @@ keys = [
   { send = "0", wait_for = ["menu: ready"], wait_after = 5 },
 ]
 expect = ["video: feed=stream", "play: path=direct_loop", "video: fmt=Hevc"]
+soak_sec = 10
+
+
+# 供片 single（统一控制平面 NEW 档）：qois 每帧重读文件+重解码，零缓存下限对照
+#（旧单帧循环的 Clip 化：同 `feed` 正交上传路，此处沿用 direct
+# 单核整轮，与其余 feed 四档同形；`video: feed=single` + path 行 + soak 保活）。
+[[case]]
+name = "video-feed-single"
+covers = ["src/video/decoder", "src/video.rs", "usb_reports/1080p/video.qois"]
+timeout_sec = 180
+needs_video = true
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+vsync = "off"
+[play]
+fps = "max"
+feed = "single"
+[wallpaper]
+enable = false
+[schedule]
+backend = "manual"
+workers = "bsp_only"
+dist = "static"
+"""
+boot_expect = ["cfg: version=1", "play.feed=Single", "idle: ready"]
+keys = [
+  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
+  { send = "p", wait_after = 3 },
+  { send = "0", wait_for = ["menu: ready"], wait_after = 5 },
+]
+expect = ["video: feed=single", "play: path=direct_loop"]
+soak_sec = 15
+
+# single × hevc 代表格式：Annex-B 样片每帧重建解码器状态重播进 Clip
+#（`video: fmt=Hevc` 分发不断 + `video: feed=single` 供片不断；旧管线只读 qois，
+# hevc single 无旧对照，是新平面首个多格式 single 证明）。
+[[case]]
+name = "video-feed-single-hevc"
+covers = ["src/video/decoder", "src/video.rs", "src/diag/data/hevc_probe_main.265"]
+timeout_sec = 180
+needs_hevcvideo = true
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+vsync = "off"
+[play]
+fps = "max"
+format = "hevc"
+feed = "single"
+[wallpaper]
+enable = false
+[schedule]
+backend = "manual"
+workers = "bsp_only"
+dist = "static"
+"""
+boot_expect = ["cfg: version=1", "play.fmt=Hevc", "play.feed=Single", "idle: ready"]
+keys = [
+  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
+  { send = "p", wait_after = 3 },
+  { send = "0", wait_for = ["menu: ready"], wait_after = 5 },
+]
+expect = ["video: feed=single", "play: path=direct_loop", "video: fmt=Hevc"]
+soak_sec = 10
+
+# 解码表（`[decode.<fmt>]`，统一控制平面）：每格式独立四键
+#（threads bsp_only/all + zero_copy/streaming 布尔 + buffers 0=跟随 tune.window/1-32 显式）。
+# 有状态软解码（hevc/avc/vp9/h263/mpeg2v/theora 单核顺序状态机）threads=all 解析但
+# 警告并驻 bsp_only（qois/raw 无表，all 即时生效）；zero_copy/streaming/buffers(window)
+# 全格式可行。断言：解析（`decode: fmt=` 行）+ 回退警告（`threads all deferred` 行）
+# + 上传路 path 行 + soak 保活，不断言画质。
+[[case]]
+name = "video-decode-hevc"
+covers = ["src/video/decoder", "src/video.rs", "src/diag/data/hevc_probe_main.265"]
+timeout_sec = 180
+needs_hevcvideo = true
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+vsync = "off"
+[play]
+fps = "max"
+format = "hevc"
+feed = "clip"
+[wallpaper]
+enable = false
+[schedule]
+backend = "manual"
+workers = "bsp_only"
+dist = "static"
+[decode.hevc]
+threads = "all"
+zero_copy = true
+streaming = true
+buffers = 8
+"""
+boot_expect = ["cfg: version=1", "play.fmt=Hevc", "idle: ready"]
+keys = [
+  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
+  { send = "p", wait_after = 3 },
+  { send = "0", wait_for = ["menu: ready"], wait_after = 5 },
+]
+expect = ["video: fmt=Hevc", "decode: fmt=Hevc", "decode: Hevc threads all deferred", "play: path=direct_loop"]
+soak_sec = 10
+
+[[case]]
+name = "video-decode-avc"
+covers = ["src/video/decoder", "src/video.rs", "src/diag/data/video-avc.mp4"]
+timeout_sec = 180
+needs_avcvideo = true
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+vsync = "off"
+[play]
+fps = "max"
+format = "avc"
+feed = "clip"
+[wallpaper]
+enable = false
+[schedule]
+backend = "manual"
+workers = "bsp_only"
+dist = "static"
+[decode.avc]
+threads = "all"
+zero_copy = true
+streaming = true
+buffers = 8
+"""
+boot_expect = ["cfg: version=1", "play.fmt=Avc", "idle: ready"]
+keys = [
+  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
+  { send = "p", wait_after = 3 },
+  { send = "0", wait_for = ["menu: ready"], wait_after = 5 },
+]
+expect = ["video: fmt=Avc", "decode: fmt=Avc", "decode: Avc threads all deferred", "play: path=direct_loop"]
+soak_sec = 10
+
+[[case]]
+name = "video-decode-vp9"
+covers = ["src/video/decoder", "src/video.rs", "src/diag/data/vp9_probe.ivf"]
+timeout_sec = 180
+needs_vp9video = true
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+vsync = "off"
+[play]
+fps = "max"
+format = "vp9"
+feed = "clip"
+[wallpaper]
+enable = false
+[schedule]
+backend = "manual"
+workers = "bsp_only"
+dist = "static"
+[decode.vp9]
+threads = "all"
+zero_copy = true
+streaming = true
+buffers = 8
+"""
+boot_expect = ["cfg: version=1", "play.fmt=Vp9", "idle: ready"]
+keys = [
+  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
+  { send = "p", wait_after = 3 },
+  { send = "0", wait_for = ["menu: ready"], wait_after = 5 },
+]
+expect = ["video: fmt=Vp9", "decode: fmt=Vp9", "decode: Vp9 threads all deferred", "play: path=direct_loop"]
+soak_sec = 10
+
+[[case]]
+name = "video-decode-h263"
+covers = ["src/video/decoder", "src/video.rs", "src/diag/data/video.h263"]
+timeout_sec = 180
+needs_h263video = true
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+vsync = "off"
+[play]
+fps = "max"
+format = "h263"
+feed = "clip"
+[wallpaper]
+enable = false
+[schedule]
+backend = "manual"
+workers = "bsp_only"
+dist = "static"
+[decode.h263]
+threads = "all"
+zero_copy = true
+streaming = true
+buffers = 8
+"""
+boot_expect = ["cfg: version=1", "play.fmt=H263", "idle: ready"]
+keys = [
+  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
+  { send = "p", wait_after = 3 },
+  { send = "0", wait_for = ["menu: ready"], wait_after = 5 },
+]
+expect = ["video: fmt=H263", "decode: fmt=H263", "decode: H263 threads all deferred", "play: path=direct_loop"]
+soak_sec = 10
+
+[[case]]
+name = "video-decode-mpeg2v"
+covers = ["src/video/decoder", "src/video.rs", "src/diag/data/video.m2v"]
+timeout_sec = 180
+needs_mpeg2vvideo = true
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+vsync = "off"
+[play]
+fps = "max"
+format = "mpeg2v"
+feed = "clip"
+[wallpaper]
+enable = false
+[schedule]
+backend = "manual"
+workers = "bsp_only"
+dist = "static"
+[decode.mpeg2v]
+threads = "all"
+zero_copy = true
+streaming = true
+buffers = 8
+"""
+boot_expect = ["cfg: version=1", "play.fmt=Mpeg2v", "idle: ready"]
+keys = [
+  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
+  { send = "p", wait_after = 3 },
+  { send = "0", wait_for = ["menu: ready"], wait_after = 5 },
+]
+expect = ["video: fmt=Mpeg2v", "decode: fmt=Mpeg2v", "decode: Mpeg2v threads all deferred", "play: path=direct_loop"]
+soak_sec = 10
+
+[[case]]
+name = "video-decode-theora"
+covers = ["src/video/decoder", "src/video.rs", "src/diag/data/video.ogv"]
+timeout_sec = 180
+needs_theoravideo = true
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+vsync = "off"
+[play]
+fps = "max"
+format = "theora"
+feed = "clip"
+[wallpaper]
+enable = false
+[schedule]
+backend = "manual"
+workers = "bsp_only"
+dist = "static"
+[decode.theora]
+threads = "all"
+zero_copy = true
+streaming = true
+buffers = 8
+"""
+boot_expect = ["cfg: version=1", "play.fmt=Theora", "idle: ready"]
+keys = [
+  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
+  { send = "p", wait_after = 3 },
+  { send = "0", wait_for = ["menu: ready"], wait_after = 5 },
+]
+expect = ["video: fmt=Theora", "decode: fmt=Theora", "decode: Theora threads all deferred", "play: path=direct_loop"]
 soak_sec = 10
 
 # 诊断键：弹窗 → p 进纯播放器 → 1/4/7 各出数，q 回壁纸（pause_return 吞键）。

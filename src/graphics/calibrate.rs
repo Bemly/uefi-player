@@ -1,6 +1,9 @@
 //! `graphics::calibrate`：`render.mode/workers/dist/vsync = "auto"` 的开机矩阵校准。
 //! 由 `Screen::ensure_render_calibrated` 落点（首启必跑全矩阵，有记忆复用快启）。
 //! 拆分仅为满足单文件 ≤1000 行，不改行为。
+//!
+//! 统一控制面：校准只覆盖渲染/调度/vsync 维（解码表不进 bench）；AP 只拷校准行
+//! （永不解码、永不碰 GOP，Blt 整推只 BSP，混合影子同 `mp` 纪律）。
 
 use alloc::boxed::Box;
 use alloc::string::{String, ToString};

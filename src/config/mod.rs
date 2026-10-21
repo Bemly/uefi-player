@@ -13,13 +13,14 @@
 //!                 #   按 X128 钳住用，不断 boot）| avx | f16c | fma | avx2
 //!                 # | bmi1 | bmi2 | avxvnni | avx512f | avx512cd | avx512dq
 //!                 # | avx512bw | avx512vl
-//!                 # auto = 开机探最高可用；显式超硬件警告+钳住；老 "avx512" 按 avx512f 照读
+//!                 # auto = 开机探最高可用；显式超硬件警告+钳住；旧 "avx512" 已删
+//!                 # （非法值整文件回默认 + 警告，无别名）；旧 "on"（vsync）与整数
+//!                 # 壁纸 fps 同理（无别名/回退）。
 //!                 # 解码 SIMD 无独立开关：六家（hevc/vp9/h263/h264/mpeg2v/theora）单比特跟随全局
 //!                 #（level=scalar 则关，其余开），见 `resolve_accel` 末尾
 //! [render]
 //! mode    = "auto"        # "auto" | "direct" | "blt"
-//! workers = "auto"        # "auto" | "bsp_only" | "all"（多核开关）
-//! dist    = "auto"        # "auto" | "static" | "tile" | "dynamic"（多核分工，只对 direct+all 有效）
+//!                         # `[render] workers/dist` 已删除（未知键忽略；正典只认 `[schedule]`）
 //! vsync   = "auto"        # "auto" | "static" | "half" | "off"（软件帧预算，无硬件 vsync）
 //! blt_op  = "buffer_to_video"
 //! # 首启校准记忆（固件回写，GUI 只读展示；"auto"/0 = 未测，下次启动必测）：
@@ -34,26 +35,34 @@
 //! tile_rows = 64   # tile 高（行），MP 自调度切块粒度（8-512）
 //! vsync_fps = 60   # vsync 预算帧率：static 的封顶 + auto 探测达标线（15-240）
 //! buffers   = 0    # 后缓冲帧数（0 = 直写前台，现状；1-16 = 影子环 + 整推，撕裂窗口压成一次 push）
-//! window    = 4    # 流式供片窗口（`[play] feed = "stream"` 的解码帧缓存数，1-32）
+//! window    = 4    # 流式供片全局默认（`feed = "stream"` 且 `decode.<fmt>.buffers = 0`
+//!                  # 跟随时用；1-32，显式 1-32 按格式覆盖，见 `[decode.*]`）
 //! [play]
 //! fps = "auto"            # "auto" | "max" | "1".."240"
 //! feed = "clip"           # 供片模式："clip"（全量预解码，默认，老文件缺键照读）
 //!                         # | "staged"（qois 显式三段逐帧，其余七格式等价 clip）
-//!                         # | "stream"（window 窗口边播边解，游标后淘汰）
+//!                         # | "stream"（每格式窗边播边解，游标后淘汰）
 //!                         # | "zero_copy"（单复用缓冲即时解码，调用方须立即上传）
+//!                         # | "single"（零缓存逐帧重解 + render.blt，旧 single 同语义）
 //!                         # 只切 `Clip` 内部拿帧方式，上传路（blt/direct/mp/nano）零改
+//!                         # `[play] pipeline` 已删除（未知键忽略；旧 7 档映射见 `docs/player.md`）
 //! format = "qois"         # 片源格式："qois"（1080p/video.qois）| "raw"（1080p/frameNNNN.raw）
 //!                         # | "hevc"（1080p/video.hevc，Annex-B 软解）| "vp9"（1080p/video.ivf 软解）
 //!                         # | "h263" | "mpeg2v" | "theora"（格式可选、解码后继，选中即明确报错）
-//! pipeline = "clip"       # 播放管线："clip"（预解码现路）| "staged" | "zero_copy" | "stream"
-//!                         # | "single" | "legacy_blt" | "legacy_direct" | "legacy_u64"（老实现手动切）
 //! measured_max_fps = 0    # 固件实测后回写，GUI 只读展示
+//! [decode.hevc]           # 每格式解码表（六软解 + qois/raw 全键，缺表缺键全默认）：
+//! threads = "bsp_only"    # "bsp_only"（默认，顺序安全）| "all"（qois/raw 立即兑现，
+//!                         # 有状态解析但告警仍顺序）
+//! zero_copy = false       # 单选开关（默认 false；feed=zero_copy 照常零拷，本项叠加 hint）
+//! streaming = false       # 单选开关（默认 false；feed=stream 照常窗口，本项叠加 hint）
+//! buffers = 0             # 滑杆下标（0 = 跟随 tune.window 全局默认，1-32 显式覆盖每格式）
+//!                         # 其余 [decode.avc/vp9/h263/mpeg2v/theora/qois/raw] 同四键
 //! [wallpaper]
 //! enable = false          # 菜单背景 + 引导过渡总开关（默认关）
 //! format = "raw"          # 片源格式："raw"（wallpaper/frameNNNN.raw）| "qois"（wallpaper/wall.qois）
 //! fps = "15"               # 背景帧率三态（与 [play] fps 同构）："auto"（最左，
 //!                         # 跟 vsync；vsync 关则不限速）| "max"（最右，不限速）
-//!                         # | "1".."240"（中间显式封顶）；默认 "15"，老文件整数照读
+//!                         # | "1".."240"（中间显式封顶）；默认 "15"（整数值整文件回默认）
 //! frames = 0              # B 过渡封顶帧数（0 = 全播预载集）
 //! preload = 8             # 预载帧数上限（1-32；0 = 不封顶，和播片一样拉满；
 //!                         # 1080p BGRA 单帧约 8MB，长动画注意内存）
@@ -85,20 +94,25 @@ use uefi::cstr16;
 use crate::error::NyaStatus;
 use crate::fs::Fs;
 
+mod decode;
 mod types;
 
+pub use decode::{
+    decode_buffers, decode_streaming, decode_threads, decode_window, decode_zero_copy,
+};
 pub use types::*;
 
-/// 解析结果：配置 + 可选的屏显警告（文件不存在不算错，返回 None）
-/// + `[schedule]` 表是否存在（`workers`/`dist` 搬家后的新老位置裁决用）。
-pub fn parse() -> (Config, Option<String>, bool) {
+/// 解析结果：配置 + 可选的屏显警告（文件不存在不算错，返回 None）。
+/// 非法值整文件回默认 + 警告（无别名/回退：`play.pipeline`、`[render] workers/dist`
+/// 旧键未知忽略；`accel.level` 旧 `"avx512"`、`vsync` 旧 `"on"`、整数壁纸 `fps`
+/// 旧值走整文件默认 + 警告；未知键 serde 默认忽略）。
+pub fn parse() -> (Config, Option<String>) {
     let mut fs = match Fs::new() {
         Ok(f) => f,
         Err(e) => {
             return (
                 Config::default(),
                 Some(format!("cfg: open volume failed: {:?}", e)),
-                false,
             );
         }
     };
@@ -107,27 +121,22 @@ pub fn parse() -> (Config, Option<String>, bool) {
         Ok(b) => b,
         // 没有配置文件是正常情况：静默用默认。
         Err(NyaStatus::Uefi(err)) if err.status() == uefi::Status::NOT_FOUND => {
-            return (Config::default(), None, false);
+            return (Config::default(), None);
         }
         Err(e) => {
             return (
                 Config::default(),
                 Some(format!("cfg: read failed: {:?}", e)),
-                false,
             );
         }
     };
 
     let text = String::from_utf8_lossy(&bytes);
-    let has_schedule = toml::from_str::<toml::Table>(&text)
-        .map(|t| t.contains_key("schedule"))
-        .unwrap_or(false);
     match toml::from_str::<Config>(&text) {
-        Ok(cfg) => (cfg, None, has_schedule),
+        Ok(cfg) => (cfg, None),
         Err(e) => (
             Config::default(),
             Some(format!("cfg: parse error: {} -- using defaults", e)),
-            false,
         ),
     }
 }
@@ -172,7 +181,7 @@ static TUNE_TILE_ROWS: AtomicU32 = AtomicU32::new(default_tile_rows());
 static TUNE_VSYNC_FPS: AtomicU32 = AtomicU32::new(default_vsync_fps());
 /// 后缓冲帧数（0-16，0 = 直写）。显式旋钮，不进矩阵 bench。
 static TUNE_BUFFERS: AtomicU32 = AtomicU32::new(default_buffers());
-/// 流式供片窗口（1-32，默认 4；`buffers` 同口径的显式旋钮，不进矩阵 bench）。
+/// 流式供片全局默认（1-32，默认 4；`decode.<fmt>.buffers = 0` 跟随时用）。
 static TUNE_WINDOW: AtomicU32 = AtomicU32::new(default_window());
 /// 供片模式（`FeedMode` 判别值；0 = clip 默认，老文件缺键照读）。
 static PLAY_FEED: AtomicU8 = AtomicU8::new(0);
@@ -183,8 +192,6 @@ static PLAY_CAP: AtomicU32 = AtomicU32::new(0);
 static PLAY_MEASURED: AtomicU32 = AtomicU32::new(0);
 /// 片源格式（0 = qois，1 = raw；`[play]` 默认 qois，`[wallpaper]` 默认 raw）。
 static PLAY_FORMAT: AtomicU8 = AtomicU8::new(0);
-/// 播放管线（`PlayPipeline` 判别值；0 = clip 默认）。
-static PLAY_PIPELINE: AtomicU8 = AtomicU8::new(0);
 static WALLPAPER_FORMAT: AtomicU8 = AtomicU8::new(1);
 /// 0 = 未测，1 = direct，2 = blt（`mode = "auto"` 的矩阵结论，校准/记忆二选一写入）
 static RESOLVED_RENDER: AtomicU8 = AtomicU8::new(0);
@@ -201,19 +208,14 @@ static RESOLVED_DIST: AtomicU8 = AtomicU8::new(0);
 static MAX_ACCEL: AtomicU8 = AtomicU8::new(0);
 
 /// 开机读一次；返回需要屏显的警告行。
+/// 正典只有 `[schedule] workers/dist`（`[render]` 旧键未知忽略，不再照读）；
+/// `[play] pipeline` 已删（未知忽略）；非法枚举/整数壁纸值整文件回默认 + 警告。
 pub fn load() -> Option<String> {
-    let (cfg, warn, has_schedule) = parse();
+    let (cfg, warn) = parse();
     ACCEL.store(cfg.accel.level.as_u8(), Ordering::Relaxed);
     RENDER.store(cfg.render.mode.as_u8(), Ordering::Relaxed);
-    // workers/dist 搬家裁决：`[schedule]` 表存在用新位置，否则认 `[render]` 旧键
-    // （缺表老文件；显式旧键给一行警告后照读，不写回）。
-    let (workers, dist) = if has_schedule {
-        (cfg.schedule.workers, cfg.schedule.dist)
-    } else {
-        (cfg.render.workers, cfg.render.dist)
-    };
-    WORKERS.store(workers.as_u8(), Ordering::Relaxed);
-    DIST.store(dist.as_u8(), Ordering::Relaxed);
+    WORKERS.store(cfg.schedule.workers.as_u8(), Ordering::Relaxed);
+    DIST.store(cfg.schedule.dist.as_u8(), Ordering::Relaxed);
     SCHED_BACKEND.store(cfg.schedule.backend.as_u8(), Ordering::Relaxed);
     VSYNC.store(cfg.render.vsync.as_u8(), Ordering::Relaxed);
     MEASURED_RENDER.store(cfg.render.measured_render.as_u8(), Ordering::Relaxed);
@@ -228,6 +230,8 @@ pub fn load() -> Option<String> {
     TUNE_VSYNC_FPS.store(cfg.render.tune.vsync_fps.clamp(15, 240), Ordering::Relaxed);
     TUNE_BUFFERS.store(cfg.render.tune.buffers.min(16), Ordering::Relaxed);
     TUNE_WINDOW.store(cfg.render.tune.window.clamp(1, 32), Ordering::Relaxed);
+    // 每格式解码表（缺表缺键全默认；buffers 钳 0-32，0 = 跟随 tune.window）。
+    decode::store_all(&cfg.decode);
     match parse_fps(&cfg.play.fps) {
         FpsPolicy::Auto => PLAY_MODE.store(0, Ordering::Relaxed),
         FpsPolicy::Capped(n) => {
@@ -238,7 +242,6 @@ pub fn load() -> Option<String> {
     }
     PLAY_MEASURED.store(cfg.play.measured_max_fps, Ordering::Relaxed);
     PLAY_FORMAT.store(cfg.play.format.as_u8(), Ordering::Relaxed);
-    PLAY_PIPELINE.store(cfg.play.pipeline.as_u8(), Ordering::Relaxed);
     PLAY_FEED.store(cfg.play.feed.as_u8(), Ordering::Relaxed);
     WALLPAPER_FORMAT.store(cfg.wallpaper.format.as_u8(), Ordering::Relaxed);
     WALLPAPER_ENABLE.store(cfg.wallpaper.enable as u8, Ordering::Relaxed);
@@ -267,8 +270,8 @@ pub fn load() -> Option<String> {
         cfg.accel.level,
         cfg.render.mode,
         cfg.schedule.backend,
-        workers,
-        dist,
+        cfg.schedule.workers,
+        cfg.schedule.dist,
         cfg.render.vsync,
         cfg.render.blt_op,
         cfg.render.tune.frames,
@@ -292,14 +295,34 @@ pub fn load() -> Option<String> {
         cfg.boot.macos,
         cfg.boot.strict,
     );
-    // 缺表老文件显式写了旧键：认旧值 + 提示搬家（不写回，下次 GUI 存盘即正）。
-    if !has_schedule
-        && (cfg.render.workers != WorkersMode::Auto || cfg.render.dist != DistMode::Auto)
-    {
-        return Some(String::from(
-            "cfg: [render] workers/dist moved to [schedule], honored this boot",
-        ));
-    }
+    log::info!(
+        "decode: hevc(threads={} zc={} stream={} buf={}) avc(threads={} zc={} stream={} buf={}) vp9(threads={} zc={} stream={} buf={}) h263(threads={} zc={} stream={} buf={}) mpeg2v(threads={} zc={} stream={} buf={}) theora(threads={} zc={} stream={} buf={}) tune.window={}",
+        cfg.decode.hevc.threads.as_str(),
+        cfg.decode.hevc.zero_copy as u8,
+        cfg.decode.hevc.streaming as u8,
+        cfg.decode.hevc.buffers.min(32),
+        cfg.decode.avc.threads.as_str(),
+        cfg.decode.avc.zero_copy as u8,
+        cfg.decode.avc.streaming as u8,
+        cfg.decode.avc.buffers.min(32),
+        cfg.decode.vp9.threads.as_str(),
+        cfg.decode.vp9.zero_copy as u8,
+        cfg.decode.vp9.streaming as u8,
+        cfg.decode.vp9.buffers.min(32),
+        cfg.decode.h263.threads.as_str(),
+        cfg.decode.h263.zero_copy as u8,
+        cfg.decode.h263.streaming as u8,
+        cfg.decode.h263.buffers.min(32),
+        cfg.decode.mpeg2v.threads.as_str(),
+        cfg.decode.mpeg2v.zero_copy as u8,
+        cfg.decode.mpeg2v.streaming as u8,
+        cfg.decode.mpeg2v.buffers.min(32),
+        cfg.decode.theora.threads.as_str(),
+        cfg.decode.theora.zero_copy as u8,
+        cfg.decode.theora.streaming as u8,
+        cfg.decode.theora.buffers.min(32),
+        cfg.render.tune.window.clamp(1, 32),
+    );
     warn
 }
 
@@ -891,12 +914,8 @@ pub fn play_format() -> MediaFormat {
     MediaFormat::from_u8(PLAY_FORMAT.load(Ordering::Relaxed))
 }
 
-/// 播放管线（默认 clip；老文件缺键照读）。
-pub fn play_pipeline() -> PlayPipeline {
-    PlayPipeline::from_u8(PLAY_PIPELINE.load(Ordering::Relaxed))
-}
-
 /// 供片模式（默认 clip；老文件缺键照读；只切 `Clip` 内部拿帧方式）。
+/// 五档：clip/staged/stream/zero_copy/single（`[play] pipeline` 已删）。
 pub fn play_feed() -> FeedMode {
     FeedMode::from_u8(PLAY_FEED.load(Ordering::Relaxed))
 }

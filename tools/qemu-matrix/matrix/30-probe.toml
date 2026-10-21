@@ -11,13 +11,15 @@ version = 1
 level = "auto"
 [render]
 mode = "direct"
-workers = "bsp_only"
-dist = "static"
 vsync = "off"
 [play]
 fps = "max"
 [wallpaper]
 enable = false
+[schedule]
+backend = "manual"
+workers = "bsp_only"
+dist = "static"
 """
 boot_expect = ["cfg: version=1", "idle: ready"]
 keys = [
@@ -43,13 +45,15 @@ version = 1
 level = "auto"
 [render]
 mode = "direct"
-workers = "bsp_only"
-dist = "static"
 vsync = "off"
 [play]
 fps = "max"
 [wallpaper]
 enable = false
+[schedule]
+backend = "manual"
+workers = "bsp_only"
+dist = "static"
 """
 boot_expect = ["cfg: version=1", "idle: ready"]
 keys = [
@@ -70,8 +74,6 @@ version = 1
 level = "auto"
 [render]
 mode = "direct"
-workers = "bsp_only"
-dist = "static"
 vsync = "off"
 [play]
 fps = "max"
@@ -79,6 +81,10 @@ fps = "max"
 enable = false
 [async]
 executor = "nano"
+[schedule]
+backend = "manual"
+workers = "bsp_only"
+dist = "static"
 """
 boot_expect = ["cfg: version=1", "idle: ready"]
 keys = [
@@ -98,8 +104,6 @@ version = 1
 level = "auto"
 [render]
 mode = "direct"
-workers = "bsp_only"
-dist = "static"
 vsync = "off"
 [play]
 fps = "max"
@@ -107,6 +111,10 @@ fps = "max"
 enable = false
 [async]
 executor = "dynamic"
+[schedule]
+backend = "manual"
+workers = "bsp_only"
+dist = "static"
 """
 boot_expect = ["cfg: version=1", "idle: ready"]
 keys = [
@@ -128,13 +136,15 @@ version = 1
 level = "auto"
 [render]
 mode = "direct"
-workers = "bsp_only"
-dist = "static"
 vsync = "off"
 [play]
 fps = "max"
 [wallpaper]
 enable = false
+[schedule]
+backend = "manual"
+workers = "bsp_only"
+dist = "static"
 """
 boot_expect = ["cfg: version=1", "idle: ready"]
 keys = [
@@ -157,13 +167,15 @@ version = 1
 level = "auto"
 [render]
 mode = "direct"
-workers = "bsp_only"
-dist = "static"
 vsync = "off"
 [play]
 fps = "max"
 [wallpaper]
 enable = false
+[schedule]
+backend = "manual"
+workers = "bsp_only"
+dist = "static"
 """
 boot_expect = ["cfg: version=1", "idle: ready"]
 keys = [
@@ -185,13 +197,15 @@ version = 1
 level = "auto"
 [render]
 mode = "direct"
-workers = "bsp_only"
-dist = "static"
 vsync = "off"
 [play]
 fps = "max"
 [wallpaper]
 enable = false
+[schedule]
+backend = "manual"
+workers = "bsp_only"
+dist = "static"
 """
 boot_expect = ["cfg: version=1", "accel: decode simd hevc=on vp9=on h263=on h264=off mpeg2v=on theora=on", "idle: ready"]
 keys = [

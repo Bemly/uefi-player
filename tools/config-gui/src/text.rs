@@ -152,22 +152,16 @@ pub(crate) fn feed_desc(v: FeedMode) -> String {
         FeedMode::Staged => t!("feed.desc_staged"),
         FeedMode::Stream => t!("feed.desc_stream"),
         FeedMode::ZeroCopy => t!("feed.desc_zero_copy"),
+        FeedMode::Single => t!("feed.desc_single"),
     }
     .into_owned()
 }
 
-/// 管线档位显示名（存盘仍用 `file_str` 小写串；名字只管消歧：
-/// `老*` = 上古实现对照循环，和加速页的当代矩阵不是一回事）。
-pub(crate) fn pipeline_name(v: PlayPipeline) -> String {
+/// 解码线程显示名（存盘仍用 `file_str` 小写串）。
+pub(crate) fn decode_threads_desc(v: DecodeThreads) -> String {
     match v {
-        PlayPipeline::Clip => t!("pipeline.clip"),
-        PlayPipeline::Staged => t!("pipeline.staged"),
-        PlayPipeline::ZeroCopy => t!("pipeline.zero_copy"),
-        PlayPipeline::Stream => t!("pipeline.stream"),
-        PlayPipeline::Single => t!("pipeline.single"),
-        PlayPipeline::LegacyBlt => t!("pipeline.legacy_blt"),
-        PlayPipeline::LegacyDirect => t!("pipeline.legacy_direct"),
-        PlayPipeline::LegacyU64 => t!("pipeline.legacy_u64"),
+        DecodeThreads::BspOnly => t!("decode.desc_threads_bsp"),
+        DecodeThreads::All => t!("decode.desc_threads_all"),
     }
     .into_owned()
 }

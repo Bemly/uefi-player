@@ -1,5 +1,11 @@
 //! `video::mp`：全核并行播放（`direct + all`，`mp_draw` + OSD + 确定性掉帧）。
 //! `PlayTask` 常驻 AP + 世代同步；BSP 判迟全核执行同一结论。拆分仅为 ≤1000 行，不改行为。
+//!
+//! 统一控制面分工（解码并行）：`mp_draw` 恒 `clip`/`eager`（需全前视做行区切分，
+//! `need_eager_clip` 强制，`single`/窗懒不进此路）；BSP 解码（load 期全量，播时
+//! 只拷屏），AP 只拷行区（`copy_block` 位宽选路，永不解码有状态流、永不碰 GOP/Blt；
+//! Blt 整推只 BSP）。解码-while-上传流水在 `blt`/`direct`/`nano` 懒侧（窗预取+环形
+//! 多缓冲，见 `decoder::lazy`），本路以全量帧表换确定性（`tile`/`dynamic` 同）。
 
 use super::decoder::Clip;
 use super::{VIDEO_H, VIDEO_W, rdtsc};

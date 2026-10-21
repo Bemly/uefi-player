@@ -1,6 +1,13 @@
 //! 全量预解码（`[play] feed = "clip"` 的落点，也是壁纸/mp 强制路径）：
 //! 与拆分前 `decoder.rs` 逐行一致（默认零行为变化）；懒供片见 `super::lazy`。
+//!
+//! 解码并行（统一控制面）：BSP 全量解码，AP 永不解码/永不碰 GOP；SIMD 单比特
+//! 跟随全局（本层不设门）。`qois`/`raw` 无状态帧级并行可行：`threads=all` 即
+//! 兑现（分片顺序解码，AP 钩子预留，同字节输出）；有状态六格式 `threads=all`
+//! 解析但 warn 仍顺序（状态机串行，交叠 deferred）。零拷：`raw` reinterpret
+//! 零拷；其余按帧分配（全量语义，稳态复用在懒 `single`/窗侧）。
 
+use crate::config::MediaFormat;
 use alloc::vec;
 use alloc::vec::Vec;
 use uefi::proto::console::gop::BltPixel;
@@ -9,6 +16,7 @@ type EagerClip = super::Clip;
 /// qois 字节流解码核心（`tag` 只进串口：`video` / `wallpaper`）。
 /// 坏帧记数跳过，全坏/几何不一致直接报错（曾无限 rewind 空转）。
 pub(crate) fn from_qois_bytes(data: &[u8], tag: &str) -> crate::error::Result<EagerClip> {
+    let _ = super::decode_threads(MediaFormat::Qois);
     let mut frames = Vec::new();
     let mut skipped = 0u32;
     let mut offset = 0;
@@ -114,6 +122,7 @@ pub(crate) fn from_qois_bytes(data: &[u8], tag: &str) -> crate::error::Result<Ea
 /// 坏帧计数跳过，全坏/几何不一致直接报错（与 `from_qois_bytes` 同策略）。
 /// 片源：`1080p/video.hevc`（样片见 `src/diag/data/hevc_probe_main.265`）。
 pub(crate) fn from_hevc_bytes(data: &[u8], tag: &str) -> crate::error::Result<EagerClip> {
+    let _ = super::decode_threads(MediaFormat::Hevc);
     let mut dec = rusty_h265::Decoder::new();
     dec.push_annexb(data, None).map_err(|e| {
         crate::error::NyaStatus::_Debug(alloc::format!("{}: hevc push error: {:?}", tag, e))
@@ -237,6 +246,7 @@ fn collect_vp9_frame(
 /// 片源：`1080p/video.ivf`（样片见 `src/diag/data/vp9_probe.ivf`，
 /// 160x120×10 帧，host 已验 `shown=10`）。
 pub(crate) fn from_vp9_bytes(data: &[u8], tag: &str) -> crate::error::Result<EagerClip> {
+    let _ = super::decode_threads(MediaFormat::Vp9);
     let mut rdr = vp9dec::ivf::IvfReader::new(data).map_err(|e| {
         crate::error::NyaStatus::_Debug(alloc::format!("{}: vp9 ivf error: {:?}", tag, e))
     })?;
@@ -296,6 +306,7 @@ pub(crate) fn from_vp9_raw_frames(
     samples: &[Vec<u8>],
     tag: &str,
 ) -> crate::error::Result<EagerClip> {
+    let _ = super::decode_threads(MediaFormat::Vp9);
     let mut dec = vp9dec::Decoder::new();
     let mut frames = Vec::new();
     let mut skipped = 0u32;
@@ -344,6 +355,7 @@ pub(crate) fn from_vp9_raw_frames(
 /// YUV420 → BGRA（只收 tight 8-bit 4:2:0，坏帧计数跳过）。
 /// 片源：MP4 `avcC` 参数集 + 样片转 Annex-B（见 `demux_mp4_track`）。
 pub(crate) fn from_avc_bytes(data: &[u8], tag: &str) -> crate::error::Result<EagerClip> {
+    let _ = super::decode_threads(MediaFormat::Avc);
     let decoded = rusty_h264_decoder::Decoder::new()
         .decode_stream(data)
         .map_err(|e| {
@@ -402,6 +414,7 @@ pub(crate) fn from_avc_bytes(data: &[u8], tag: &str) -> crate::error::Result<Eag
 /// 连续坏包直接截断，避免空转）。
 /// 片源：`1080p/video.h263`（裸 H.263 基线流，无容器）。
 pub(crate) fn from_h263_bytes(data: &[u8], tag: &str) -> crate::error::Result<EagerClip> {
+    let _ = super::decode_threads(MediaFormat::H263);
     use h263_rs::parser::H263Reader;
     let mut state = h263_rs::H263State::new(h263_rs::DecoderOption::empty());
     let mut reader = H263Reader::from_source(data);
@@ -479,6 +492,7 @@ pub(crate) fn from_h263_bytes(data: &[u8], tag: &str) -> crate::error::Result<Ea
 /// 只收 4:2:0（422/444 记数跳过）。pts 按 AU 序号递增。
 /// 片源：`1080p/video.m2v`（裸基本流，无容器）。
 pub(crate) fn from_mpeg2v_bytes(data: &[u8], tag: &str) -> crate::error::Result<EagerClip> {
+    let _ = super::decode_threads(MediaFormat::Mpeg2v);
     let mut dec = filmcraft_mpeg2v::Decoder::new();
     let mut frames = Vec::new();
     let mut skipped = 0u32;
@@ -566,6 +580,7 @@ pub(crate) fn from_theora_packets(
     packets: &[Vec<u8>],
     tag: &str,
 ) -> crate::error::Result<EagerClip> {
+    let _ = super::decode_threads(MediaFormat::Theora);
     if packets.len() < 3 {
         return Err(crate::error::NyaStatus::_Debug(alloc::format!(
             "{}: theora needs 3 header packets, got {}",
@@ -686,6 +701,7 @@ pub(crate) fn from_raw_dir(
         )));
     }
 
+    let _ = super::decode_threads(MediaFormat::Raw);
     let mut frames = Vec::new();
     let mut skipped = 0u32;
     for name in names.into_iter().take(want.max(1)) {

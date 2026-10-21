@@ -15,6 +15,7 @@ pub(crate) enum Page {
     File,
     Accel,
     Player,
+    Decode,
     Wallpaper,
     Boot,
     Transcode,
@@ -40,9 +41,13 @@ pub(crate) struct App {
     /// 播放帧率滑杆镜像：0 = auto，1-240 = 限速，241 = max。
     /// `GlassSlider` 只要 `f32`，每帧写回 `cfg.play.fps`。
     pub(crate) play_f: f32,
-    /// 供片模式滑杆镜像：0-3 对应 `FeedMode::ALL` 下标（`sync_widgets` 随读盘同步，
+    /// 供片模式滑杆镜像：0-4 对应 `FeedMode::ALL` 下标（`sync_widgets` 随读盘同步，
     /// 否则开档文件载入后滑杆仍停在旧位，下一帧会把已载入的档位盖掉）。
     pub(crate) feed_f: f32,
+    /// 解码表滑杆镜像（与 `DecodeTable::ORDER` 同序，同下标）：
+    /// 线程 0-1 对应 `DecodeThreads::ALL` 下标，缓冲 0-32（0 = 跟随 `tune.window`）。
+    pub(crate) dec_threads_f: [f32; 6],
+    pub(crate) dec_buffers_f: [f32; 6],
     /// 加速档位滑杆镜像：0-30 对应 `AccelLevel::ALL` 下标（`sync_widgets` 随读盘同步，
     /// 否则开档文件载入后滑杆仍停在旧位，下一帧会把已载入的档位盖掉）。
     pub(crate) accel_f: f32,
@@ -122,6 +127,8 @@ impl App {
             page: Page::File,
             play_f: 0.0,
             feed_f: FeedMode::Clip.index() as f32,
+            dec_threads_f: [0.0; 6],
+            dec_buffers_f: [0.0; 6],
             accel_f: AccelLevel::Auto.index() as f32,
             wp_fps_f: 15.0,
             wp_frames_f: 0.0,
@@ -150,6 +157,12 @@ impl App {
     pub(crate) fn sync_widgets(&mut self) {
         self.accel_f = self.cfg.accel.level.index() as f32;
         self.feed_f = self.cfg.play.feed.index() as f32;
+        for (i, fmt) in DecodeTable::ORDER.iter().enumerate() {
+            if let Some(d) = self.cfg.decode.get(*fmt) {
+                self.dec_threads_f[i] = d.threads.index() as f32;
+                self.dec_buffers_f[i] = d.buffers.min(32) as f32;
+            }
+        }
         self.play_f = match parse_fps(&self.cfg.play.fps) {
             FpsPolicy::Auto => 0.0,
             FpsPolicy::Max => 241.0,
@@ -291,11 +304,9 @@ impl App {
         match std::fs::read_to_string(&path) {
             Ok(text) => match toml::from_str::<FileConfig>(&text) {
                 Ok(cfg) => {
-                    // 缺 `[schedule]` 表即老文件：`[render]` 旧键迁过来（见 coerce）。
-                    let has_schedule = toml::from_str::<toml::Table>(&text)
-                        .map(|t| t.contains_key("schedule"))
-                        .unwrap_or(false);
-                    let cfg = coerce_loaded(cfg, has_schedule);
+                    // 未知键 serde 默认忽略：老文件残留（`[play] pipeline` /
+                    // `[render] workers/dist` / 别名值）不进解析，整文件失败才报错。
+                    let cfg = coerce_loaded(cfg);
                     let msg = t!(
                         "status.loaded",
                         path = path.clone(),
@@ -323,6 +334,7 @@ impl App {
 
     pub(crate) fn save_to(&mut self, path: &str) {
         clamp_tune(&mut self.cfg.render.tune);
+        clamp_decode(&mut self.cfg.decode);
         // tune 变了 = bench 条件变了：旧记忆作废，下次启动重测。
         // 不做这个，改 tune 会被“有记忆快启”吞掉，永远不生效。
         if self.cfg.render.tune != self.tune_at_load {
@@ -559,6 +571,7 @@ impl eframe::App for App {
                     ui.selectable_value(&mut self.page, Page::File, t!("nav.file"));
                     ui.selectable_value(&mut self.page, Page::Accel, t!("nav.accel"));
                     ui.selectable_value(&mut self.page, Page::Player, t!("nav.player"));
+                    ui.selectable_value(&mut self.page, Page::Decode, t!("nav.decode"));
                     ui.selectable_value(&mut self.page, Page::Wallpaper, t!("nav.wallpaper"));
                     ui.selectable_value(&mut self.page, Page::Boot, t!("nav.boot"));
                     ui.selectable_value(&mut self.page, Page::Transcode, t!("nav.transcode"));
@@ -637,6 +650,7 @@ impl eframe::App for App {
                     self.nav_button(ui, Page::File, t!("nav.file").into_owned());
                     self.nav_button(ui, Page::Accel, t!("nav.accel").into_owned());
                     self.nav_button(ui, Page::Player, t!("nav.player").into_owned());
+                    self.nav_button(ui, Page::Decode, t!("nav.decode").into_owned());
                     self.nav_button(ui, Page::Wallpaper, t!("nav.wallpaper").into_owned());
                     self.nav_button(ui, Page::Boot, t!("nav.boot").into_owned());
                     self.nav_button(ui, Page::Transcode, t!("nav.transcode").into_owned());
@@ -645,8 +659,8 @@ impl eframe::App for App {
                     ui.add_space(8.0);
                     ui.small(t!("sum.accel", v = self.cfg.accel.level.file_str()));
                     ui.small(t!("sum.render", v = self.cfg.render.mode.file_str()));
-                    ui.small(t!("sum.workers", v = self.cfg.render.workers.file_str()));
-                    ui.small(t!("sum.dist", v = self.cfg.render.dist.file_str()));
+                    ui.small(t!("sum.workers", v = self.cfg.schedule.workers.file_str()));
+                    ui.small(t!("sum.dist", v = self.cfg.schedule.dist.file_str()));
                     ui.small(t!("sum.vsync", v = self.cfg.render.vsync.file_str()));
                     ui.small(t!(
                         "sum.wallpaper",

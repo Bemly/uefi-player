@@ -1,3 +1,25 @@
+//! 统一解码控制面（`[play] feed` 5 档 + `[decode.<fmt>]` 每格式表）：
+//! `feed`（clip/staged/stream/zero_copy/single）切拿帧方式，`decode` 表
+//! （threads/zero_copy/streaming/buffers）调每格式解码行为。BSP 解码、AP 只
+//! 拷屏（永不碰 GOP/Blt）；解码 SIMD 单比特跟随全局（`config::resolve_accel`
+//! 一推，见该函数尾）；`tune.window` 仍是全局默认，`buffers=0` 跟随它。
+//!
+//! 每格式可行性（单核现状，`Source` 状态机顺序；`threads=all` 在有状态软
+//! 解上解析但告警仍 `bsp_only`，`qois`/`raw` 立即兑现帧级并行）：
+//! qois 无状态逐帧→帧级并行可行，零拷/流/多缓冲全 yes；raw 零解码→全 yes；
+//! hevc 有状态 Annex-B+输出队列/重排→解码顺序（demux→解码→转换交叠 deferred），
+//! 零拷/流/窗缓冲 yes；avc 显示序 vs 解码序+B 帧/多 slice 待 Agent-B 联调→顺序，
+//! 其余 yes；vp9 有状态+隐藏 altref 跳过→顺序，其余 yes；h263 流式 reader 有
+//! 状态、总量未知→顺序，其余 yes；mpeg2v AU 切分有状态仅 4:2:0→顺序，其余 yes；
+//! theora Ogg 包+三头状态→顺序，其余 yes。
+//!
+//! 缺口（`src/config/types.rs` 已规范：`DecodeThreads`/`DecodeTable`/
+//! `FeedMode::Single` 现货，`play.pipeline` + `[render] workers/dist` 已删，
+//! 别名已摘；`src/config/mod.rs` 访问子缺→本文件同名垫片过渡，
+//! 一俟 `config::decode_threads/zero_copy/streaming/buffers` 落定即转调，
+//! 矩阵靠串口 `decode:`/`video: feed=` 行断言，画质不断言）。
+
+use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 use uefi::Status;
@@ -5,6 +27,7 @@ use uefi::proto::console::gop::BltPixel;
 use uefi::proto::media::file::{File, FileInfo, RegularFile};
 
 use super::demux::Mp4VideoKind;
+use crate::config::{DecodeThreads, FeedMode, MediaFormat};
 
 mod eager;
 mod lazy;
@@ -12,78 +35,152 @@ mod source;
 
 use lazy::LazyState;
 
-/// 整文件进内存的流式帧源（旧 `staged`/`zero_copy` 管线用：`Clip` 预解码之前的形态，
-/// 内存换时间——文件全驻留，逐帧只解码不重复读盘）。
-pub struct VideoMemory {
-    pub data: Vec<u8>,
-    pub cursor: usize,
-}
-
-impl VideoMemory {
-    pub fn new(mut file: RegularFile) -> crate::error::Result<Self> {
-        let mut info_buf = vec![0u8; 128];
-        let info = loop {
-            match file.get_info::<FileInfo>(&mut info_buf) {
-                Ok(info) => break info,
-                Err(e) if e.status() == Status::BUFFER_TOO_SMALL => {
-                    if let Some(size) = *e.data() {
-                        info_buf.resize(size, 0)
-                    }
-                }
-                // 其他状态的Option均为None,这里拉平
-                Err(e) => Err(e.status())?,
-            }
-        };
-        let size = info.file_size() as usize;
-
-        // 一次性分配内存并读取
-        let mut buffer = vec![0u8; size];
-        file.read(&mut buffer)?;
-
-        Ok(Self {
-            data: buffer,
-            cursor: 0,
-        })
-    }
-
-    /// 取下一帧进 `qoi_buf`（`u32le len + QOI` 串接）。
-    /// 越界守卫：尾部不足 4 字节长度头、或长度超出剩余数据时直接结束（不 panic，
-    /// 调用方 `rewind` 循环）。
-    pub fn next_frame(&mut self, qoi_buf: &mut Vec<u8>) -> bool {
-        if self.cursor + 4 > self.data.len() {
-            return false;
-        }
-
-        let len_bytes = &self.data[self.cursor..self.cursor + 4];
-        let frame_len =
-            u32::from_le_bytes([len_bytes[0], len_bytes[1], len_bytes[2], len_bytes[3]]) as usize;
-
-        self.cursor += 4;
-        let end = self.cursor + frame_len;
-        // 长度超出剩余数据：文件截断，按结束处理（不 panic）。
-        if end > self.data.len() {
-            return false;
-        }
-
-        // 将这一帧的数据拷贝到 qoi_buf
-        qoi_buf.clear();
-        qoi_buf.extend_from_slice(&self.data[self.cursor..end]);
-
-        self.cursor = end;
-        true
-    }
-
-    pub fn rewind(&mut self) {
-        self.cursor = 0;
+/// 有状态软解（顺序解码，其余三项 yes；`qois`/`raw` 非状态，见文件头）。
+pub(crate) fn is_stateful_fmt(fmt: MediaFormat) -> bool {
+    match fmt {
+        MediaFormat::Qois | MediaFormat::Raw => false,
+        _ => true,
     }
 }
 
-//////// 统一播放剪辑：预解码帧集（`Vec<Vec<BltPixel>>` + 游标），`[play] feed` 四档供片。
+fn decode_key(fmt: MediaFormat) -> &'static str {
+    match fmt {
+        MediaFormat::Qois => "qois",
+        MediaFormat::Raw => "raw",
+        MediaFormat::Hevc => "hevc",
+        MediaFormat::Vp9 => "vp9",
+        MediaFormat::H263 => "h263",
+        MediaFormat::Mpeg2v => "mpeg2v",
+        MediaFormat::Theora => "theora",
+        MediaFormat::Avc => "avc",
+    }
+}
+
+/// `[decode.<fmt>]` 二次解析（`Config` 无此表故 `serde` 忽略，不断整文件；
+/// 缺文件/缺表/坏值全回默认，矩阵靠本层 `decode:` 日志断言）。load 期调用
+/// （逐 `Clip` 构造几次文件读，非逐帧），失败静默默认。
+fn decode_table() -> Option<toml::Table> {
+    let mut fs = crate::fs::Fs::new().ok()?;
+    let bytes = fs
+        .read_file(uefi::cstr16!("player.toml"))
+        .unwrap_or_default();
+    if bytes.is_empty() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&bytes);
+    toml::from_str::<toml::Table>(&text).ok()
+}
+
+fn decode_sub(table: &toml::Table, fmt: MediaFormat) -> Option<toml::Table> {
+    let dec = table.get("decode")?.as_table()?;
+    dec.get(decode_key(fmt))?.as_table().cloned()
+}
+
+/// 规范垫片：`config::decode_threads(fmt) -> DecodeThreads`（缺口见文件头）。
+/// 有状态 `all` 解析但 warn 仍 `bsp_only`；`qois`/`raw` 立即兑现。
+pub fn decode_threads(fmt: MediaFormat) -> DecodeThreads {
+    let want_all = decode_table()
+        .and_then(|t| decode_sub(&t, fmt))
+        .and_then(|s| s.get("threads").cloned())
+        .and_then(|v| v.as_str().map(String::from))
+        .map(|s| s.to_ascii_lowercase() == "all")
+        .unwrap_or(false);
+    if !want_all {
+        return DecodeThreads::BspOnly;
+    }
+    if is_stateful_fmt(fmt) {
+        log::warn!(
+            "decode: {} threads all deferred (staying bsp_only)",
+            decode_key(fmt)
+        );
+        return DecodeThreads::BspOnly;
+    }
+    log::info!(
+        "decode: fmt={} threads=all honored (frame-parallel safe)",
+        decode_key(fmt)
+    );
+    DecodeThreads::All
+}
+
+/// 规范垫片：`config::decode_zero_copy(fmt) -> bool`（显式开关，缺省 false；
+/// `feed=zero_copy` 照常走零拷复用，本项为叠加 hint，稳态零分配见 `lazy`）。
+pub fn decode_zero_copy(fmt: MediaFormat) -> bool {
+    decode_table()
+        .and_then(|t| decode_sub(&t, fmt))
+        .and_then(|s| s.get("zero_copy").cloned())
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
+/// 规范垫片：`config::decode_streaming(fmt) -> bool`（显式开关，缺省 false；
+/// `feed=stream` 照常窗口边播边解；`raw` 逐文件 + `h263` reader 恒真流式）。
+pub fn decode_streaming(fmt: MediaFormat) -> bool {
+    decode_table()
+        .and_then(|t| decode_sub(&t, fmt))
+        .and_then(|s| s.get("streaming").cloned())
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
+/// 规范垫片：`config::decode_buffers(fmt) -> u32`（raw 值 0-32：0 跟随
+/// `tune.window`，1-32 显式覆盖；钳制 0-32，矩阵靠 `decode:` 行断言）。
+pub fn decode_buffers(fmt: MediaFormat) -> u32 {
+    let raw = decode_table()
+        .and_then(|t| decode_sub(&t, fmt))
+        .and_then(|s| s.get("buffers").cloned())
+        .and_then(|v| v.as_integer())
+        .unwrap_or(0)
+        .clamp(0, 32) as u32;
+    raw.min(32)
+}
+
+/// 每格式解码窗（`buffers=0` 继承全局 `tune.window` 1-32，显式 1-32 覆盖）。
+pub(crate) fn decode_window(fmt: MediaFormat) -> usize {
+    match decode_buffers(fmt) {
+        0 => crate::config::tune_window().clamp(1, 32).max(1) as usize,
+        n => n.clamp(1, 32).max(1) as usize,
+    }
+}
+
+/// `feed="single"` 识别（首选规范 `config::play_feed`，回退 raw 串解析；
+/// 壁纸恒 `clip`，见 `lazy::feed_for`）。
+pub(crate) fn feed_is_single_raw() -> bool {
+    if crate::config::play_feed() == FeedMode::Single {
+        return true;
+    }
+    let t = match decode_table() {
+        Some(t) => t,
+        None => return false,
+    };
+    t.get("play")
+        .and_then(|p| p.as_table())
+        .and_then(|p| p.get("feed"))
+        .and_then(|v| v.as_str().map(String::from))
+        .map(|s| s.to_ascii_lowercase() == "single")
+        .unwrap_or(false)
+}
+
+/// 单行解码面日志（矩阵 `parse` 断言用，不断言画质）：每 `Clip` 构造记一笔。
+pub(crate) fn log_decode_plane(fmt: MediaFormat, tag: &str) {
+    log::info!(
+        "decode: tag={} fmt={} threads={} zero_copy={} streaming={} buffers={} window={}",
+        tag,
+        decode_key(fmt),
+        decode_threads(fmt).as_str(),
+        decode_zero_copy(fmt),
+        decode_streaming(fmt),
+        decode_buffers(fmt),
+        decode_window(fmt),
+    );
+}
+
+//////// 统一播放剪辑：预解码帧集（`Vec<Vec<BltPixel>>` + 游标），`[play] feed` 五档供片。
 //////// 对外 API 冻结（`video.rs`/`menu.rs`/`wallpaper.rs`/`exec.rs` 零改）：
 //////// 字段 `w,h,frames,cursor` + 方法 `next_frame/rewind/len/frame` 签名不变；
 //////// 内部按 `feed` 切供片方式（见 `lazy.rs`）：`clip` 全量预解码（默认，
 //////// 与旧行为逐字节一致）/`staged`（qois 显式三段，其余等价 clip）/
-//////// `stream`（window 窗口边播边解）/`zero_copy`（单复用缓冲即时解码）。
+//////// `stream`（每格式窗边播边解，`decode_buffers` 显式或跟随 `tune.window`）/
+//////// `zero_copy`（单复用缓冲即时解码）/`single`（零缓存逐帧重解，`render.blt` 同旧环）。
 //////// 供片源八格式（`[play]/[wallpaper] format` 矩阵，见 `config::MediaFormat`）：
 //////// - qois：`u32le len + QOI` 串接文件，解码为 BGRA（播放器 P3 老路）；
 //////// - raw：`frameNNNN.raw` BGRA 直存序列，零解码直搬（壁纸 P4 老路）；
@@ -132,7 +229,12 @@ impl Clip {
 
     /// qois 字节流解码（`tag` 只进串口：`video` / `wallpaper`）。
     /// 供片裁决见 `lazy::feed_for`（clip 全预解码 / 壁纸恒预解码 / 其余懒解码）。
+    /// `single` 先行（raw 串识别，壁纸除外）；解码面单行日志供矩阵 parse 断言。
     pub fn from_qois_bytes(data: &[u8], tag: &str) -> crate::error::Result<Self> {
+        log_decode_plane(MediaFormat::Qois, tag);
+        if tag != "wallpaper" && feed_is_single_raw() {
+            return lazy::qois_single_bytes(data, tag);
+        }
         if let Some(mode) = lazy::feed_for(tag, true) {
             return lazy::qois_bytes(data, tag, mode);
         }
@@ -147,6 +249,10 @@ impl Clip {
 
     /// hevc 字节流解码（Annex-B，`tag` 只进串口）。
     pub fn from_hevc_bytes(data: &[u8], tag: &str) -> crate::error::Result<Self> {
+        log_decode_plane(MediaFormat::Hevc, tag);
+        if tag != "wallpaper" && feed_is_single_raw() {
+            return lazy::hevc_single_bytes(data, tag);
+        }
         if let Some(mode) = lazy::feed_for(tag, false) {
             return lazy::hevc_bytes(data, tag, mode);
         }
@@ -161,6 +267,10 @@ impl Clip {
 
     /// vp9 字节流解码（IVF 容器，`tag` 只进串口）。
     pub fn from_vp9_bytes(data: &[u8], tag: &str) -> crate::error::Result<Self> {
+        log_decode_plane(MediaFormat::Vp9, tag);
+        if tag != "wallpaper" && feed_is_single_raw() {
+            return lazy::vp9_single_bytes(data, tag);
+        }
         if let Some(mode) = lazy::feed_for(tag, false) {
             return lazy::vp9_bytes(data, tag, mode);
         }
@@ -194,6 +304,10 @@ impl Clip {
 
     /// vp9 裸帧序列解码（MP4 `Vp09` 轨用）。
     pub fn from_vp9_raw_frames(samples: &[Vec<u8>], tag: &str) -> crate::error::Result<Self> {
+        log_decode_plane(MediaFormat::Vp9, tag);
+        if tag != "wallpaper" && feed_is_single_raw() {
+            return lazy::vp9_single_raw_frames(samples, tag);
+        }
         if let Some(mode) = lazy::feed_for(tag, false) {
             return lazy::vp9_raw_frames(samples, tag, mode);
         }
@@ -202,6 +316,10 @@ impl Clip {
 
     /// avc 字节流解码（Annex-B，`tag` 只进串口；MP4-only，无裸流路）。
     pub fn from_avc_bytes(data: &[u8], tag: &str) -> crate::error::Result<Self> {
+        log_decode_plane(MediaFormat::Avc, tag);
+        if tag != "wallpaper" && feed_is_single_raw() {
+            return lazy::avc_single_bytes(data, tag);
+        }
         if let Some(mode) = lazy::feed_for(tag, false) {
             return lazy::avc_bytes(data, tag, mode);
         }
@@ -210,6 +328,10 @@ impl Clip {
 
     /// h263 裸流解码（`tag` 只进串口；流式 reader，懒模式免预切）。
     pub fn from_h263_bytes(data: &[u8], tag: &str) -> crate::error::Result<Self> {
+        log_decode_plane(MediaFormat::H263, tag);
+        if tag != "wallpaper" && feed_is_single_raw() {
+            return lazy::h263_single_bytes(data, tag);
+        }
         if let Some(mode) = lazy::feed_for(tag, false) {
             return lazy::h263_bytes(data, tag, mode);
         }
@@ -224,6 +346,10 @@ impl Clip {
 
     /// mpeg2 裸流解码（`tag` 只进串口；接入单元切分，只收 4:2:0）。
     pub fn from_mpeg2v_bytes(data: &[u8], tag: &str) -> crate::error::Result<Self> {
+        log_decode_plane(MediaFormat::Mpeg2v, tag);
+        if tag != "wallpaper" && feed_is_single_raw() {
+            return lazy::mpeg2v_single_bytes(data, tag);
+        }
         if let Some(mode) = lazy::feed_for(tag, false) {
             return lazy::mpeg2v_bytes(data, tag, mode);
         }
@@ -238,6 +364,10 @@ impl Clip {
 
     /// theora 包序列解码（`tag` 只进串口；ident/comment/setup 三头 + 数据包）。
     pub fn from_theora_packets(packets: &[Vec<u8>], tag: &str) -> crate::error::Result<Self> {
+        log_decode_plane(MediaFormat::Theora, tag);
+        if tag != "wallpaper" && feed_is_single_raw() {
+            return lazy::theora_single_packets(packets, tag);
+        }
         if let Some(mode) = lazy::feed_for(tag, false) {
             return lazy::theora_packets(packets, tag, mode);
         }
@@ -262,6 +392,10 @@ impl Clip {
         frame_bytes: usize,
         tag: &str,
     ) -> crate::error::Result<Self> {
+        log_decode_plane(MediaFormat::Raw, tag);
+        if tag != "wallpaper" && feed_is_single_raw() {
+            return lazy::raw_single_dir(fs, dir, want, frame_bytes, tag);
+        }
         if let Some(mode) = lazy::feed_for(tag, false) {
             return lazy::raw_dir(fs, dir, want, frame_bytes, tag, mode);
         }

@@ -2,7 +2,7 @@
 //!
 //! 与 `tools/config-gui/src/schema.rs` 同构（字段名/枚举字符串一致，改动双边同步）。
 
-use alloc::string::{String, ToString};
+use alloc::string::String;
 
 use serde::{Deserialize, Serialize};
 
@@ -15,7 +15,8 @@ use serde::{Deserialize, Serialize};
 /// （`avx512f`/`cd`/`dq`/`bw`/`vl`）；共 31 档。
 /// `tbm`/`sse4a` 为 AMD 专有（扩展叶 8000_0001H ECX bit 21/6，
 /// QEMU `qemu64` 无此叶，显式配了即按 X128 钳住用，见 `docs/simd.md`）。
-/// 老文件 `"avx512"` 按 `avx512f` 照读（`alias`，不断旧配置）。
+/// 老文件 `"avx512"` 不再是别名：非法值整文件回默认 + 警告（无别名/回退，
+/// 见 `super::parse`），与 `VsyncMode::Static` 的旧 `"on"`、壁纸整数 `fps` 同规则。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum AccelLevel {
@@ -49,7 +50,6 @@ pub enum AccelLevel {
     Bmi1,
     Bmi2,
     Avxvnni,
-    #[serde(alias = "avx512")]
     Avx512f,
     Avx512cd,
     Avx512dq,
@@ -163,8 +163,8 @@ impl RenderMode {
 /// 多核开关：`Auto` = 校准矩阵实测（BSP 单核直写 vs 全核并行），只在
 /// `render.mode` 允许直写时有意义（Blt 路径恒单线程，忽略本项）。
 ///
-/// 新位置是 `[schedule] workers`；这里是 legacy 别名：`[schedule]` 表存在即忽略，
-/// 缺表老文件继续认这里的值（一次性，不写回）。
+/// 唯一位置是 `[schedule] workers`；`[render]` 下旧键已删除（未知键忽略，
+/// 不再照读；见 `ScheduleConfig`）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkersMode {
@@ -224,7 +224,8 @@ impl CopyWidth {
 /// （快核多拿；校准时 probe 定权计时，播放时每轮按各核上一轮耗时重算，无 tile 游标开销）。
 /// `Auto` = 同机实测三选一。
 ///
-/// 新位置是 `[schedule] dist`；这里是 legacy 别名（规则同 `WorkersMode`）。
+/// 新位置是 `[schedule] dist`；`[render]` 下旧键已删除（未知键忽略，
+/// 不再照读；见 `ScheduleConfig`）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum DistMode {
@@ -342,13 +343,12 @@ pub struct ScheduleConfig {
 /// 固定封顶；`Half` = 开机实测冠军路最高帧率，取半稳定跑并回写
 /// `measured_vsync_fps`（下次启动复用）；`Auto` = 按 `tune.vsync_fps` 预算探测
 /// 冠军路，零超期则开（封顶同预算）否则关；`Off` = 只按 `play.fps` 跑。
-/// 旧文件的 `"on"` 按 `static` 照读（alias，不断旧配置）。
+/// 旧 `"on"` 不再是别名：非法值整文件回默认 + 警告（无别名/回退）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum VsyncMode {
     #[default]
     Auto,
-    #[serde(alias = "on")]
     Static,
     Half,
     Off,
@@ -453,10 +453,6 @@ impl Default for RenderTune {
 #[serde(default)]
 pub struct RenderConfig {
     pub mode: RenderMode,
-    /// legacy 别名（见 `WorkersMode`）：`[schedule]` 表存在即忽略。
-    pub workers: WorkersMode,
-    /// legacy 别名（见 `DistMode`）：`[schedule]` 表存在即忽略。
-    pub dist: DistMode,
     pub vsync: VsyncMode,
     pub blt_op: BltOpKind,
     pub tune: RenderTune,
@@ -490,6 +486,7 @@ pub struct Config {
     pub boot: BootConfig,
     pub schedule: ScheduleConfig,
     pub r#async: AsyncConfig,
+    pub decode: DecodeTable,
 }
 
 impl Default for Config {
@@ -503,6 +500,7 @@ impl Default for Config {
             boot: BootConfig::default(),
             schedule: ScheduleConfig::default(),
             r#async: AsyncConfig::default(),
+            decode: DecodeTable::default(),
         }
     }
 }
@@ -558,31 +556,9 @@ pub(crate) const fn default_wallpaper_preload() -> u32 {
     8
 }
 
-/// `[wallpaper] fps` 反序列化：字符串三态（`"auto"`/`"max"`/`"15"`）+
-/// 兼容老文件整数（`fps = 15` 照读为 `"15"`，不断旧配置）。
-/// `toml` 标量经 `deserialize_any` 进 `visit_i64/u64/str`，no_std 可用。
-fn de_wallpaper_fps<'de, D>(d: D) -> Result<String, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    struct V;
-    impl<'de> serde::de::Visitor<'de> for V {
-        type Value = String;
-        fn expecting(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
-            f.write_str("wallpaper fps as string or integer")
-        }
-        fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<String, E> {
-            Ok(v.to_string())
-        }
-        fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<String, E> {
-            Ok(v.to_string())
-        }
-        fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<String, E> {
-            Ok(String::from(v))
-        }
-    }
-    d.deserialize_any(V)
-}
+/// `[wallpaper] fps`：字符串三态（`"auto"`/`"max"`/`"15"`）。整数值不再兼容：
+/// 非字符串即整文件回默认 + 警告（无别名/回退，与 `accel.level` 旧 `"avx512"`、
+/// `vsync` 旧 `"on"` 同规则）。
 
 /// `[wallpaper]`：动态壁纸开关（P4）。片源双格式（`format` 矩阵，见 `MediaFormat`）：
 /// - `raw`（默认）：`wallpaper/frameNNNN.raw`，BGRA 直存，首版定死 1920x1080；
@@ -594,11 +570,8 @@ where
 pub struct WallpaperConfig {
     pub enable: bool,
     /// 背景循环帧率三态（与 `[play] fps` 同构：`"auto"` 最左 / `"max"` 最右 /
-    /// 中间 `1`-`240` 显式封顶；默认 `"15"`，老文件整数照读）。
-    #[serde(
-        default = "default_wallpaper_fps",
-        deserialize_with = "de_wallpaper_fps"
-    )]
+    /// 中间 `1`-`240` 显式封顶；默认 `"15"`）。
+    #[serde(default = "default_wallpaper_fps")]
     pub fps: String,
     /// B 过渡封顶帧数（0 = 全播预载集）。
     #[serde(default)]
@@ -693,55 +666,96 @@ fn default_fps() -> String {
     String::from("auto")
 }
 
-/// 播放管线（`[play] pipeline`，手动切换播放实现）：
-/// - `Clip`（默认）：`Clip` 全量预解码 + 现行三路/执行器后端（`schedule.backend` 生效）；
-/// - `Staged`：流式三段解码（QOI→Raw→Blt，旧 `draw_all_mem` 循环）；
-/// - `ZeroCopy`：流式零拷贝解码（直解进 Blt 缓冲 + R/B 交换，旧 `draw_all_mem_zero_copy` 循环）；
-/// - `Stream`：真文件流式（边读边解，旧 `draw` 循环，不全量进内存）；
-/// - `Single`：单帧反复（旧 `draw_once` 循环，每帧重读文件，仅对照）；
-/// - `LegacyBlt`/`LegacyDirect`/`LegacyU64`：`Clip` 预解码 + 老上传循环
-///   （Blt 整推 / BSP 直写 / u64 步进直写，不走 render 矩阵与执行器后端）。
-/// 非 `Clip` 管线只读 qois 片源（`format = "raw"` 时 warn 回落 `Clip`）。
+/// 解码线程档（`[decode.<fmt>] threads`，两档滑杆）：`bsp_only` 安全默认
+/// （有状态软解顺序，单核现状）；`all` 在 `qois`/`raw` 立即兑现帧级并行，
+/// 有状态软解解析但告警仍 `bsp_only`（每格式安全管线落地前，见 `docs/player.md`）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
-pub enum PlayPipeline {
+pub enum DecodeThreads {
     #[default]
-    Clip,
-    Staged,
-    ZeroCopy,
-    Stream,
-    Single,
-    LegacyBlt,
-    LegacyDirect,
-    LegacyU64,
+    BspOnly,
+    All,
 }
 
-impl PlayPipeline {
+impl DecodeThreads {
     pub(crate) const fn as_u8(self) -> u8 {
         match self {
-            Self::Clip => 0,
-            Self::Staged => 1,
-            Self::ZeroCopy => 2,
-            Self::Stream => 3,
-            Self::Single => 4,
-            Self::LegacyBlt => 5,
-            Self::LegacyDirect => 6,
-            Self::LegacyU64 => 7,
+            Self::BspOnly => 0,
+            Self::All => 1,
         }
     }
-
     pub(crate) fn from_u8(v: u8) -> Self {
         match v {
-            1 => Self::Staged,
-            2 => Self::ZeroCopy,
-            3 => Self::Stream,
-            4 => Self::Single,
-            5 => Self::LegacyBlt,
-            6 => Self::LegacyDirect,
-            7 => Self::LegacyU64,
-            _ => Self::Clip,
+            1 => Self::All,
+            _ => Self::BspOnly,
         }
     }
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::BspOnly => "bsp_only",
+            Self::All => "all",
+        }
+    }
+}
+
+pub(crate) const fn default_decode_buffers() -> u32 {
+    0
+}
+
+/// 每格式解码项（`[decode.<fmt>]` 四旋钮，见 `DecodeTable`）：
+/// - `threads`：`bsp_only`（默认，顺序安全）/`all`（qois/raw 立即兑现，
+///   有状态告警仍顺序）；
+/// - `zero_copy`：单选开关（默认 false；`feed=zero_copy` 照常走零拷复用，
+///   本项为叠加 hint，稳态零分配）；
+/// - `streaming`：单选开关（默认 false；`feed=stream` 照常窗口边播边解，
+///   `raw` 逐文件 + `h263` reader 恒流式）；
+/// - `buffers`：滑杆下标（0 = 跟随 `tune.window` 全局默认，1-32 显式覆盖每格式）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DecodeEntry {
+    #[serde(default)]
+    pub threads: DecodeThreads,
+    #[serde(default)]
+    pub zero_copy: bool,
+    #[serde(default)]
+    pub streaming: bool,
+    #[serde(default = "default_decode_buffers")]
+    pub buffers: u32,
+}
+
+impl Default for DecodeEntry {
+    fn default() -> Self {
+        Self {
+            threads: DecodeThreads::BspOnly,
+            zero_copy: false,
+            streaming: false,
+            buffers: 0,
+        }
+    }
+}
+
+/// 每格式解码表（`[decode.<fmt>]`，八格式全键，缺表缺键全默认）：
+/// GUI 解码页只摆六软解（hevc/avc/vp9/h263/mpeg2v/theora 四旋钮）；
+/// qois/raw 项保留（`threads=all` 立即兑现，其余全 yes），供矩阵/串口同口径。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct DecodeTable {
+    #[serde(default)]
+    pub qois: DecodeEntry,
+    #[serde(default)]
+    pub raw: DecodeEntry,
+    #[serde(default)]
+    pub hevc: DecodeEntry,
+    #[serde(default)]
+    pub vp9: DecodeEntry,
+    #[serde(default)]
+    pub h263: DecodeEntry,
+    #[serde(default)]
+    pub mpeg2v: DecodeEntry,
+    #[serde(default)]
+    pub theora: DecodeEntry,
+    #[serde(default)]
+    pub avc: DecodeEntry,
 }
 
 /// 播放帧率开关（GUI 滑杆：最左 auto / 中间 1-240 / 最右 max）。
@@ -770,9 +784,12 @@ pub fn parse_fps(s: &str) -> FpsPolicy {
 /// - `Clip`（默认）：全量预解码（现行行为，老文件缺键照读，零行为变化）；
 /// - `Staged`：qois 走显式三段（QOI→Raw→Blt，`buffer.rs` 三缓冲复用）逐帧解码，
 ///   其余七格式在结构上等价于 `clip`（软解码 planar→BGRA 固有分段，见 `docs/player.md`）；
-/// - `Stream`：`tune.window` 窗口边播边解，游标之后淘汰（`rewind` 重建解码器状态重播）；
+/// - `Stream`：`decode_buffers(fmt)` 窗口边播边解（0 跟随 `tune.window`，
+///   1-32 显式覆盖），游标之后淘汰（`rewind` 重建解码器状态重播）；
 /// - `ZeroCopy`：单复用帧缓冲逐显示帧即时解码（调用方须立即上传，
-///   `blt/direct_loop` 与 `nano_pump` 满足此借用契约）。
+///   `blt/direct_loop` 与 `nano_pump` 满足此借用契约）；
+/// - `Single`：零缓存逐帧重解（每帧重读文件 + 重解码 + `render.blt` 整推，
+///   与旧 `single_loop` 同语义；`mp_draw`/`dynamic_draw`/壁纸恒 `clip`，见 `feed_for`）。
 /// 上传路（blt/direct/mp/nano/dynamic）零改：只消费 `next_frame`/`rewind`/`len`/`frame`。
 /// 非法值整个文件回默认 + 警告（与其它枚举档位同规则，不单独兜底）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -783,6 +800,7 @@ pub enum FeedMode {
     Staged,
     Stream,
     ZeroCopy,
+    Single,
 }
 
 impl FeedMode {
@@ -792,6 +810,7 @@ impl FeedMode {
             Self::Staged => 1,
             Self::Stream => 2,
             Self::ZeroCopy => 3,
+            Self::Single => 4,
         }
     }
 
@@ -800,6 +819,7 @@ impl FeedMode {
             1 => Self::Staged,
             2 => Self::Stream,
             3 => Self::ZeroCopy,
+            4 => Self::Single,
             _ => Self::Clip,
         }
     }
@@ -812,6 +832,7 @@ impl FeedMode {
             Self::Staged => "staged",
             Self::Stream => "stream",
             Self::ZeroCopy => "zero_copy",
+            Self::Single => "single",
         }
     }
 }
@@ -819,7 +840,8 @@ impl FeedMode {
 /// `[play]`：`fps` 是字符串（三态没法用纯数字表达），`measured_max_fps`
 /// 只由固件实测回写（0 = 未测），GUI 只读展示。`format` 切片源（八格式全通，
 /// 容器优先裸流回退，见 `video::load_video_clip`）。
-/// `pipeline` 切播放实现（默认 `clip`，老文件缺键照读；非 `clip` 只读 qois）。
+/// `feed` 切供片（默认 `clip`，老文件缺键照读；`[play] pipeline` 已删除，
+/// 旧键未知忽略，不再照读）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PlayConfig {
@@ -830,9 +852,6 @@ pub struct PlayConfig {
     /// 片源格式（默认 qois，老文件照读）。
     #[serde(default = "default_play_format")]
     pub format: MediaFormat,
-    /// 播放管线（默认 clip，老文件照读）。
-    #[serde(default)]
-    pub pipeline: PlayPipeline,
     /// 供片模式（默认 clip，老文件缺键照读；只切 `Clip` 内部拿帧方式）。
     #[serde(default)]
     pub feed: FeedMode,
@@ -844,7 +863,6 @@ impl Default for PlayConfig {
             fps: default_fps(),
             measured_max_fps: 0,
             format: MediaFormat::Qois,
-            pipeline: PlayPipeline::Clip,
             feed: FeedMode::Clip,
         }
     }
