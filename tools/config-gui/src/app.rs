@@ -542,8 +542,8 @@ impl App {
         let size = galley.size();
         let (rect, response) = ui.allocate_exact_size(size, egui::Sense::hover());
         if ui.is_rect_visible(rect) {
-            // 1 物理像素：pt 按像素密度折，保证 10px 像素字不断裂。
-            let r = 1.0 / ui.ctx().pixels_per_point();
+            // 2 物理像素（用户拍板）：pt 按像素密度折，保证 10px 像素字不断裂。
+            let r = 2.0 / ui.ctx().pixels_per_point();
             for dy in [-r, 0.0, r] {
                 for dx in [-r, 0.0, r] {
                     if dx == 0.0 && dy == 0.0 {
@@ -553,7 +553,12 @@ impl App {
                         .galley(rect.min + egui::vec2(dx, dy), galley.clone(), stroke);
                 }
             }
-            ui.painter().galley(rect.min, galley, fg);
+            // 主字加粗：像素字无 bold 字重，横向双打 1 物理像素增粗
+            // （浅色黑字/暗色白字同式，保持描边中心对称）。
+            for ox in [-r * 0.5, r * 0.5] {
+                ui.painter()
+                    .galley(rect.min + egui::vec2(ox, 0.0), galley.clone(), fg);
+            }
         }
         response
     }
@@ -872,23 +877,11 @@ impl eframe::App for App {
             });
         }
 
-        // 顶栏：文件动作工具条胶囊（误伤恢复：真凶是 Panel 分隔线，现已全关，
-        // 胶囊本身圆角无直边）。
+        // 动作条：右下角悬浮胶囊（用户拍板：顶部常驻改悬浮，像图二右下角）。
+        // `Area` 前景层锚右下，不占 Panel 布局；里面仍是玻璃工具条 +
+        // 玻璃按钮（件库约束不变）。偏移留出底栏状态条的高度。
+        // 顶栏不放标题（窗口标题栏 + 导航/文件页已有，不重复）。
         let mut act = Action::None;
-        egui::Panel::top("toolbar")
-            .frame(egui::Frame::NONE)
-            .resizable(false)
-            .show_separator_line(false)
-            .show(ui, |ui| {
-                ui.add_space(8.0);
-                ui.vertical_centered(|ui| {
-                    egui_glass::GlassToolbar::new(self.bar_style()).show(ui, |ui| {
-                        // 顶栏不放标题（窗口标题栏 + 导航/文件页已有，不重复）。
-                        act = self.action_buttons(ui);
-                    });
-                });
-                ui.add_space(8.0);
-            });
         egui::Panel::bottom("status")
             .frame(egui::Frame::NONE)
             .resizable(false)
@@ -963,6 +956,16 @@ impl eframe::App for App {
                 egui::Frame::NONE
                     .inner_margin(egui::Margin::same(16))
                     .show(ui, |ui| {
+                        // 中央字号整体放大一档（用户：中间内容再大一点）。
+                        // 默认 Body 13 / Small 9 / Heading 18 / Mono 13，
+                        // 这里只改中央这个 Ui 的 style，不影响顶栏/导航/状态栏。
+                        {
+                            let mut style = (**ui.style()).clone();
+                            for font_id in style.text_styles.values_mut() {
+                                font_id.size += 3.0;
+                            }
+                            ui.set_style(style);
+                        }
                         ui.set_min_size(ui.available_size());
                         self.page_backdrop(ui);
                         // 解码 tab 条钉死在滚动区之外、卡片最上面（不随内容滚动）。
@@ -973,6 +976,16 @@ impl eframe::App for App {
                         }
                         egui::ScrollArea::vertical().show(ui, |ui| self.page_content(ui));
                     });
+            });
+
+        // 悬浮动作条最后画（前景层，盖在中央内容右下角，不挤任何布局）。
+        egui::Area::new("float_actions".into())
+            .order(egui::Order::Foreground)
+            .anchor(egui::Align2::RIGHT_BOTTOM, egui::vec2(-16.0, -64.0))
+            .show(ui.ctx(), |ui| {
+                egui_glass::GlassToolbar::new(self.bar_style()).show(ui, |ui| {
+                    act = self.action_buttons(ui);
+                });
             });
 
         self.do_action(ui.ctx(), act);

@@ -26,8 +26,8 @@
 //!   `icon.ico` 给 Windows 用。重做图标跑 `make_icon.py <原图>` + `iconutil` 即可。
 //!
 //! UI 布局照抄 `egui_glass` 官方 README 配方：“Sidebar and opaque content”
-//! （顶栏胶囊 + 底栏状态胶囊 → 左侧玻璃导航卡 →
-//! 中央大号玻璃薄片放稠密表单），分隔一律留白，不用 `Separator`。
+//! （底栏状态胶囊 → 左侧玻璃导航卡 → 中央透明内容放稠密表单 →
+//! 右下角悬浮动作胶囊），分隔一律留白，不用 `Separator`。
 //! 试错记录：曾因 Panel 边界直线误伤过胶囊/薄片，真凶是 `Panel` 默认的
 //! `show_separator_line`（已全关），详见 AGENTS.md。
 //!
