@@ -1,6 +1,10 @@
 #!/bin/sh
-# 打 macOS .app 包：Dock/访达图标走 bundle 里的 icon.icns。
-# cargo run 是裸二进制，看不到图标；要图标就双击这里产出的 .app。
+# 打 macOS .app 包：Dock 名/访达名/图标走 bundle（CFBundleDisplayName +
+# en/zh-Hans 本地化，英文 UEFI Player / 中文 UEFI播放器）。
+# cargo run 是裸二进制，Dock 提示只能是可执行文件名（macOS 行为），
+# 看不到图标和包装名；要正确 Dock 名 + 图标就双击这里产出的 .app。
+# 注意：Dock 名是系统级的（跟系统语言走），不跟应用内中英切换联动；
+# 窗口标题栏才跟应用内切换（UEFI Player / UEFI播放器，见 app.rs）。
 # 用法：./bundle_macos.sh [debug|release]   （默认 debug）
 set -eu
 
@@ -19,9 +23,10 @@ else
     BIN="$HERE/target/$HOST/debug/player-config-gui"
 fi
 
-APP="$HERE/target/bundle/player-config-gui.app"
+APP="$HERE/target/bundle/UEFI Player.app"
 rm -rf "$APP"
-mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" \
+    "$APP/Contents/Resources/en.lproj" "$APP/Contents/Resources/zh-Hans.lproj"
 cp "$BIN" "$APP/Contents/MacOS/player-config-gui"
 cp "$HERE/assets/icon.icns" "$APP/Contents/Resources/icon.icns"
 
@@ -37,7 +42,11 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
     <key>CFBundleIdentifier</key>
     <string>dev.bemly.player-config-gui</string>
     <key>CFBundleName</key>
-    <string>player.toml editor</string>
+    <string>UEFI Player</string>
+    <key>CFBundleDisplayName</key>
+    <string>UEFI Player</string>
+    <key>LSHasLocalizedDisplayName</key>
+    <true/>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
@@ -47,5 +56,15 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 </dict>
 </plist>
 PLIST
+
+# 本地化 Dock/访达名：英文 UEFI Player，简中 UEFI播放器（跟系统语言走）。
+cat > "$APP/Contents/Resources/en.lproj/InfoPlist.strings" <<'STRINGS'
+"CFBundleName" = "UEFI Player";
+"CFBundleDisplayName" = "UEFI Player";
+STRINGS
+cat > "$APP/Contents/Resources/zh-Hans.lproj/InfoPlist.strings" <<'STRINGS'
+"CFBundleName" = "UEFI播放器";
+"CFBundleDisplayName" = "UEFI播放器";
+STRINGS
 
 echo "bundled: $APP"
