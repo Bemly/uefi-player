@@ -13,7 +13,7 @@
 //!                 # | tbm | sse4a（AMD 专有，扩展叶 8000_0001H ECX bit 21/6；
 //!                 #   qemu64 无此叶，显式配了即按 X128 钳住用，不断 boot）
 //!                 # auto = 开机探最高可用；显式超硬件警告+钳住；老 "avx512" 按 avx512f 照读
-//!                 # 解码 SIMD 无独立开关：四家（hevc/vp9/h263/h264）单比特跟随全局
+//!                 # 解码 SIMD 无独立开关：六家（hevc/vp9/h263/h264/mpeg2v/theora）单比特跟随全局
 //!                 #（level=scalar 则关，其余开），见 `resolve_accel` 末尾
 //! [render]
 //! mode    = "auto"        # "auto" | "direct" | "blt"
@@ -417,7 +417,7 @@ pub fn vsync_enabled() -> bool {
 /// 开机探一次硬件最大搬运位宽（P2）：先 `ensure_xsave_enabled`（CPL0 直接开，
 /// 幂等），再按 CPUID/XCR0 取最高可用。调一次，`upload_frame` 每次读结论。
 /// 必须在任何上屏/bench 之前调（`main` 里调，bench/播放只读）。
-/// 末尾把 `[accel]` 开关推进四家解码轮子：单比特跟随全局搬运位宽
+/// 末尾把 `[accel]` 开关推进六家解码轮子：单比特跟随全局搬运位宽
 /// （`copy_width() == U64`（即 `level=scalar`）则关，其余开）；
 /// 首解前各轮子自保（`hevc_probe`/`avc_probe` 的幂等 `ensure` + vp9 轮内镜像门）保持。
 pub fn resolve_accel() {
@@ -437,7 +437,7 @@ pub fn resolve_accel() {
         }
         log::info!("accel: hardware max width = {:?}", max_width_name(max));
         // 解码轮子的运行时检测就是这道固件门（轮内无第二套 CPUID/XCR0 探）：
-        // 四家单比特跟随全局 `copy_width()`（`scalar`=关/其余=开），首解前生效。
+        // 六家单比特跟随全局 `copy_width()`（`scalar`=关/其余=开），首解前生效。
         // `V128`（AVX/F16C）在 hevc 轮侧无 VEX-128 档，取其下最高档 `Sse41`
         //（AVX 机器恒有 SSE4.1，可安全执行）。
         let on = copy_width() != CopyWidth::U64;
@@ -455,8 +455,17 @@ pub fn resolve_accel() {
         vp9dec::simd::set_simd_allowed(on);
         h263_rs_yuv::bt601::set_simd_enabled(on);
         h263_rs_deblock::deblock::set_simd_enabled(on);
+        // mpeg2v（`filmcraft_mpeg2v::set_simd_enabled`，`simd` 特性下整数 SSE2 核，
+        // 关特性时调用即 no-op）与 theora（`oxideav_theora::simd::set_simd_enabled`，
+        // `simd` 特性下 wide 整数核，关特性时调用即 no-op）：
+        // 同推单比特语义（`scalar`=关/其余=开，h263 双箱同款）。
+        filmcraft_mpeg2v::set_simd_enabled(on);
+        oxideav_theora::simd::set_simd_enabled(on);
         log::info!(
-            "accel: decode simd hevc={} vp9={} h263={}",
+            "accel: decode simd hevc={} vp9={} h263={} h264={} mpeg2v={} theora={}",
+            onoff(on),
+            onoff(on),
+            onoff(on),
             onoff(on),
             onoff(on),
             onoff(on),

@@ -32,18 +32,25 @@ rusty_h264-accel = { version = "0.16", default-features = false }
 rusty_h265 = { path = "third_party/rusty_h265", default-features = false, features = ["simd"] }
 # Theora 解码（ogg 片源用；pure-Rust，上游 0.0.12 尚无 no_std 分层，
 # 本仓 vendor 到 third_party/oxideav-theora 后自 port 标量 decoder-only，
-# 见该目录 VENDOR.md；纯标量整数 iDCT，无 SIMD 概念；`default-features = false`
+# 见该目录 VENDOR.md；标量 decoder-only + `simd` 下 wide 整数核
+# （IDCT butterfly/重建加钳/环路滤波去分支）；`simd` 开：运行时
+# `simd::set_simd_enabled` 单比特门，单比特跟随全局 `[accel] level`
+# （`scalar`=关/其余=开，无独立开关），关特性时调用即 no-op；
+# `default-features = false`
 # 即无 std、无 encoder、无 oxideav-core 框架胶水（直接依赖会把 std-only 的
 # oxideav-core/serde_json/thiserror 拖进固件，故 vendor + framework 可选）；
 # Ogg 页拆帧不在箱内，固件侧手写 OggS 拆帧另立项）。
-oxideav-theora = { path = "third_party/oxideav-theora", default-features = false }
+oxideav-theora = { path = "third_party/oxideav-theora", default-features = false, features = ["simd"] }
 # MPEG-2/MPEG-1 视频解码（DVD/广播 TS/MXF-IMX 片源用；pure-Rust clean-room，上游未发
-# crates.io 故 vendor 到 third_party/filmcraft-mpeg2v 后自 port 标量路，见该目录 VENDOR.md；
-# 本箱无 SIMD 概念（纯标量 f32 IDCT），`default-features = false` 即固件形；
+# crates.io 故 vendor 到 third_party/filmcraft-mpeg2v 后自 port 标量路 + `simd`
+# 下整数 SSE2 核（定点 IDCT 行核 + `pavgb` 预测平均），见该目录 VENDOR.md；
+# `simd` 开：运行时 `set_simd_enabled` 单比特门，单比特跟随全局 `[accel] level`
+# （`scalar`=关/其余=开，无独立开关），关特性时调用即 no-op；
+# `default-features = false` 即固件形；
 # IDCT 建表用 libm（本仓闭包经 rusty_h264-decoder 已有，复用零新增风险），
 # 查表一次化用 spin::Once（core::cell 不 Sync；MIT/MSRV1.38/零传递依赖的新叶子）；
 # 精度口径是容差制（max|Δ|≤4、PSNR≥58dB），非 bit-exact，校验和只取 Y 平面）。
-filmcraft-mpeg2v = { path = "third_party/filmcraft-mpeg2v", default-features = false }
+filmcraft-mpeg2v = { path = "third_party/filmcraft-mpeg2v", default-features = false, features = ["simd"] }
 # VP9 解码（mp4/壁纸片源用；pure-Rust clean-room，上游 0.1.1 尚无 no_std 分层，
 # 本仓 vendor 到 third_party/vp9dec 后自 port 标量路 + AVX2 整数核（x86_64 常编，
 # 无特性门，`avx2_enabled` 运行时门），见该目录 VENDOR.md；

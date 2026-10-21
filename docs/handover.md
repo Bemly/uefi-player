@@ -304,3 +304,26 @@ no_std，`decoder`（`features = ["libm", "asm"]`）+ 根尾部 `[patch.crates-i
 - 遗留风险：开状态假设 AVX2/SSE4.1 可执行（无 SSE4.1/AVX2 老 CPU 上
   `level != scalar` 会 `#UD`；`deblock` 的“sse2”核本就无条件用 SSSE3/SSE4.1，
   上游原样）；详见 vendor `VENDOR.md` 固件门契约。
+
+### 7.7 mpeg2v/theora 接线收尾（2026-10-21，六家齐，根+文档只动，不碰 vendor 树）
+
+背景：filmcraft-mpeg2v（`simd` 整数 SSE2，`set_simd_enabled` 根导出）与
+oxideav-theora（`simd` wide 整数核，`simd::set_simd_enabled`）的 vendor 树
+与 VENDOR 固件契约已分别落地（§7.5 之后两笔 vendor 提交），根侧只差最后
+一推。本轮一次性收尾，vendor 树零改动。
+
+- 根 `Cargo.toml`：`filmcraft-mpeg2v` + `oxideav-theora` 各加
+  `features = ["simd"]`（特性名以各自 vendor manifest 为准，皆为 `simd`）；
+  两处“无 SIMD 概念”过期注释改写成清单比特语义（`scalar`=关/其余=开，
+  关特性时调用即 no-op）。
+- `src/config/mod.rs` `resolve_accel`：h263 双箱同款再加两行
+  `filmcraft_mpeg2v::set_simd_enabled(on)` +
+  `oxideav_theora::simd::set_simd_enabled(on)`
+  （`on = copy_width() != U64` 单比特跟随全局）；串口 decode simd 行扩展到
+  六家（`hevc/vp9/h263/h264/mpeg2v/theora`，on/off 值），hevc/h264 两条
+  `isa` 行保留；文件头 + 函数注释“四家”改“六家”。
+- 文档：`docs/simd.md` 接线表加 mpeg2v/theora 两行 + 标题/语义/悬空历史同步
+  六家；`docs/config.md` 两处同步六家；`matrix.toml` 头注释 + `hevc-probe`
+  `boot_expect` 同步六家断言（旧三家子串仍能命中，新行是精确全断言）。
+- 验证：固件 `build/clippy/fmt -p uefi-player` + GUI host 单测 +
+  qemu-matrix 单测 + `menu-smoke`/`hevc-probe` 全绿后 commit+push。

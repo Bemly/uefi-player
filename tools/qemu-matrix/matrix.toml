@@ -13,7 +13,7 @@
 # `[accel] level` 全集 31 档（auto + 30，见 docs/simd.md 档位→位宽表），
 # 本矩阵各 case 统一用 `auto`（门禁口径 qemu64/SSE2 基线），显式档位由
 # GUI 笛卡尔（9 代表档）+ 全量 roundtrip 表 + 固件超硬件钳住覆盖；
-# 解码 SIMD 无独立开关，三家单比特跟随全局（`hevc-probe` 断言即全跟随值）。
+# 解码 SIMD 无独立开关，六家单比特跟随全局（`hevc-probe` 断言即全跟随值）。
 # 以下动了直接全跑（选择依据本身可能已过期）：tools/qemu-matrix/**、
 # 根 Cargo.toml、.cargo/、rust-toolchain.toml、sprout pin（third_party/sprout
 # 工作区恒脏只看分支 diff，日常忽略）。提交门禁仍是全矩阵，`--changed` 只省迭代时间。
@@ -753,7 +753,7 @@ fps = "max"
 [wallpaper]
 enable = false
 """
-boot_expect = ["cfg: version=1", "accel: decode simd hevc=on vp9=on h263=on", "idle: ready"]
+boot_expect = ["cfg: version=1", "accel: decode simd hevc=on vp9=on h263=on h264=on mpeg2v=on theora=on", "idle: ready"]
 keys = [
   { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
   { send = "p", wait_after = 3 },

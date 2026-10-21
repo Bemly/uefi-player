@@ -16,7 +16,7 @@ level = "auto"          # auto | scalar | sse | sse2 | sse3 | ssse3 | sse41 | ss
                         #   qemu64 无此叶，显式配了即按 X128 钳住用，不断 boot）
                         # auto = 开机探最高可用；显式超硬件警告+钳住；
                         # 老 "avx512" 按 avx512f 照读
-                        # 解码 SIMD 无独立开关：四家（hevc/vp9/h263/h264）单比特跟随全局
+                        # 解码 SIMD 无独立开关：六家（hevc/vp9/h263/h264/mpeg2v/theora）单比特跟随全局
                         #（level=scalar 则关，其余开），见 docs/simd.md
 
 [render]
@@ -105,8 +105,8 @@ executor = "all"        # 诊断项 a 跑哪条执行器线：all（默认，都
   所选 `blt_op` 若非 `buffer_to_video`，矩阵里单发出数（引擎能力对照，不参选）。
 - `accel.level=auto`：探最高可用位宽；显式档位只管上限语义，实际搬运走位宽。
   档位→位宽映射见 `docs/simd.md`（标量/密码类档不加宽，按基线下限同宽处理）。
-- 解码 SIMD（hevc/vp9/h263/h264）无独立开关：单比特跟随全局搬运位宽
-  （`level=scalar` 则四家全关，其余开；串口 `accel: decode simd hevc=…` 行
+- 解码 SIMD（hevc/vp9/h263/h264/mpeg2v/theora）无独立开关：单比特跟随全局搬运位宽
+  （`level=scalar` 则六家全关，其余开；串口 `accel: decode simd hevc=…` 行
   + `accel: h264 decode isa = …` 行值全跟随全局，供矩阵断言）。ee2ccad 窗口期的 `[accel.decode]` 表直接忽略，
   不断旧文件解析。
 - `schedule.backend=manual`：旧三路（blt 单线程引擎 / direct BSP 单核直写 /
