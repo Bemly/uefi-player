@@ -702,8 +702,12 @@ impl App {
     /// cover 矩形（中心右移 `shift_x`；溢出允许，调用方限裁剪）。
     /// 背景脸在片源偏左，居中 cover 会把它压进 216 宽导航区
     /// （糊脸 + 清晰脸看着像重影）；右移让脸滑进中央区。纯数学，可单测。
+    /// 硬约束：平移后仍必须盖住全屏（否则露出的 `clear` 色就是左白边，
+    /// 2026-10-22 故障）。`sized.w >= sw + 2*|shift|` 即得。
     pub(crate) fn cover_shifted(screen: egui::Rect, iw: f32, ih: f32, shift_x: f32) -> egui::Rect {
-        let scale = (screen.width() / iw).max(screen.height() / ih);
+        let base = (screen.width() / iw).max(screen.height() / ih);
+        let need = (screen.width() + 2.0 * shift_x.abs()) / iw;
+        let scale = base.max(need);
         let sized = egui::vec2(iw * scale, ih * scale);
         egui::Rect::from_center_size(
             egui::pos2(screen.center().x + shift_x, screen.center().y),
@@ -902,15 +906,23 @@ mod cover_tests {
 
     #[test]
     fn shifted_face_clears_nav() {
-        // 1024x712 窗 + 1280x720 图 + 右移 180：片源脸（tex x 180..350）
-        // 落窗 x 239..417，右缘出 216 宽导航（左脸颊仍擦边，
-        // 糊区无完整五官，不成重影）；右缘不出窗。
+        // 1024x712 窗 + 1280x720 图 + 右移 180：盖住全屏是硬约束
+        // （`sized.w >= sw + 2*shift`，否则左侧露 `clear` 白边）；
+        // 脸是尽力而为：片源脸（tex x 180..350）落窗 x ~195..378，
+        // 左脸颊擦边 216 导航（糊区无完整五官，不成重影）；右缘不出窗。
         let screen = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1024.0, 712.0));
         let r = App::cover_shifted(screen, 1280.0, 720.0, BG_SHIFT_X);
+        // 硬约束：平移后仍盖住全屏，无白边。
+        assert!(r.min.x <= 0.0 && r.max.x >= 1024.0, "covers horizontally");
+        assert!(r.min.y <= 0.0 && r.max.y >= 712.0, "covers vertically");
         let face = |tx: f32| r.min.x + tx / 1280.0 * r.width();
-        assert!(face(180.0) > 216.0, "face left edge clears nav");
+        assert!(
+            face(180.0) > 170.0,
+            "face mostly clears nav (cheek overlap ok)"
+        );
         assert!(face(350.0) < 1024.0, "face right edge on screen");
         // 同矩形在 twin/可见两遍共用（折射与所见一致），尺寸恒定。
-        assert!((r.width() - 1265.78).abs() < 0.01 && r.height() == 712.0);
+        // scale = max(1024/1280, 712/720, (1024+360)/1280) = 1.08125。
+        assert!((r.width() - 1384.0).abs() < 0.01 && (r.height() - 778.5).abs() < 0.01);
     }
 }
