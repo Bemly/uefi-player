@@ -4,8 +4,8 @@
 use eframe::egui;
 use rust_i18n::t;
 
+use crate::decode_bg;
 use crate::gallery::GalleryState;
-use crate::{decode_bg, load_bg_image};
 use crate::rules::*;
 use crate::schema::*;
 use crate::text::*;
@@ -114,8 +114,6 @@ pub(crate) struct App {
     pub(crate) dark: bool,
     /// 中文模式：`rust_i18n::set_locale` 全局切换，文案全走 `t!`。
     pub(crate) zh: bool,
-    /// 存一份 render state，深浅切换时重传 backdrop 用（`RenderState: Clone`）。
-    pub(crate) rs: Option<egui_wgpu::RenderState>,
     /// 实时背景：页面跑两遍（可见 + 离屏折射源），开关浮在上层。无 GPU 时为 None。
     pub(crate) live: Option<egui_glass::LiveBackdrop>,
     /// twin 折射源里的背景图（与可见遍同一张片源第一帧；native id 在
@@ -170,33 +168,34 @@ impl App {
             .send_viewport_cmd(egui::ViewportCommand::Title(t!("app.title").into_owned()));
         cc.egui_ctx.set_visuals(egui::Visuals::light());
         let mut glass = false;
-        let mut rs = None;
         let mut live = None;
         let mut twin_photo = None;
         if let Some(r) = cc.wgpu_render_state.as_ref() {
             // MSAA 数与 NativeOptions 一致（默认不开 MSAA，传 1）。
             egui_glass::init(r, 1);
-            // 顺序按官方要求：init → live → set_backdrop（背景图，见 `load_bg_image`）。
+            // 顺序按官方要求：init → live（live 常开，玻璃恒采 twin，
+            // 静态底无人采样，不再 `set_backdrop`，省一次上传）。
             live = Some(egui_glass::LiveBackdrop::new(r, Some(live_fonts)));
-            egui_glass::set_backdrop(&cc.egui_ctx, r, &load_bg_image());
             // twin 折射源图：与可见遍同一包，Rgba8 直传（行距 w*4 天然 256 对齐，
             // `write_texture` 无需补齐）；native id 登记（live 之后，自动镜像）。
             if let Some((w, h, px)) = decode_bg() {
-                let tex = r.device.create_texture(&egui_wgpu::wgpu::TextureDescriptor {
-                    label: Some("bg photo twin"),
-                    size: egui_wgpu::wgpu::Extent3d {
-                        width: w,
-                        height: h,
-                        depth_or_array_layers: 1,
-                    },
-                    mip_level_count: 1,
-                    sample_count: 1,
-                    dimension: egui_wgpu::wgpu::TextureDimension::D2,
-                    format: egui_wgpu::wgpu::TextureFormat::Rgba8Unorm,
-                    usage: egui_wgpu::wgpu::TextureUsages::TEXTURE_BINDING
-                        | egui_wgpu::wgpu::TextureUsages::COPY_DST,
-                    view_formats: &[],
-                });
+                let tex = r
+                    .device
+                    .create_texture(&egui_wgpu::wgpu::TextureDescriptor {
+                        label: Some("bg photo twin"),
+                        size: egui_wgpu::wgpu::Extent3d {
+                            width: w,
+                            height: h,
+                            depth_or_array_layers: 1,
+                        },
+                        mip_level_count: 1,
+                        sample_count: 1,
+                        dimension: egui_wgpu::wgpu::TextureDimension::D2,
+                        format: egui_wgpu::wgpu::TextureFormat::Rgba8Unorm,
+                        usage: egui_wgpu::wgpu::TextureUsages::TEXTURE_BINDING
+                            | egui_wgpu::wgpu::TextureUsages::COPY_DST,
+                        view_formats: &[],
+                    });
                 r.queue.write_texture(
                     egui_wgpu::wgpu::TexelCopyTextureInfo {
                         texture: &tex,
@@ -227,7 +226,6 @@ impl App {
                 });
             }
             glass = true;
-            rs = Some(r.clone());
         }
         let mut app = Self {
             path: "player.toml".to_owned(),
@@ -256,7 +254,6 @@ impl App {
             glass,
             dark: false,
             zh: false,
-            rs,
             live,
             twin_photo,
             gallery: GalleryState::new(),
@@ -562,10 +559,6 @@ impl App {
                 } else {
                     egui::Visuals::light()
                 });
-                if let Some(rs) = self.rs.as_ref() {
-                    // 背景图与主题无关（恒为片源第一帧），只重传同一张。
-                    egui_glass::set_backdrop(ctx, rs, &load_bg_image());
-                }
                 self.status = t!(
                     "status.theme",
                     theme = if self.dark {
@@ -701,14 +694,29 @@ impl App {
     /// （可见 + 离屏），所以这里禁止任何写状态、禁止放玻璃件、
     /// 禁止放可交互控件——只许纯文本。
     /// 摘要行只放左侧导航卡，不在这里重复占右侧空间。
-    /// 背景图由 glass 自家的 `show_backdrop` 满窗画（见 `ui()`），这里只出字：
-    /// 可见遍字压在图上，twin 遍字进折射源（纸罩两遍同画，见 `ui()`）。
+    /// 背景图由 twin/native 纹理按 `cover_shifted` 画（见 `ui()`），这里只出字：
+    /// 可见遍字压在图上，twin 遍字进折射源。
     pub(crate) fn page_backdrop(&self, page: &mut egui::Ui) {
         page.add_space(4.0);
         page.label(egui::RichText::new(t!("sum.hint")).weak().small());
         page.add_space(4.0);
     }
+
+    /// cover 矩形（中心右移 `shift_x`；溢出允许，调用方限裁剪）。
+    /// 背景脸在片源偏左，居中 cover 会把它压进 216 宽导航区
+    /// （糊脸 + 清晰脸看着像重影）；右移让脸滑进中央区。纯数学，可单测。
+    pub(crate) fn cover_shifted(screen: egui::Rect, iw: f32, ih: f32, shift_x: f32) -> egui::Rect {
+        let scale = (screen.width() / iw).max(screen.height() / ih);
+        let sized = egui::vec2(iw * scale, ih * scale);
+        egui::Rect::from_center_size(
+            egui::pos2(screen.center().x + shift_x, screen.center().y),
+            sized,
+        )
+    }
 }
+
+/// 背景图右移量（pt，见 `cover_shifted`；216 宽导航，取 180 可调）。
+pub(crate) const BG_SHIFT_X: f32 = 180.0;
 
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -752,13 +760,19 @@ impl eframe::App for App {
 
         // （实时背景在中央面板内容头，见下。）
 
-        // 全窗背景图（glass 自家 `show_backdrop`）：必须在全部面板之前画——
-        // 同层按代码顺序出画，先画的在下。注意不要在这里加全屏半透明纸罩：
-        // 实测半透明全屏矩形会吃掉顶/底/左面板（`noveil` 定位，机制未深究），
-        // 字压在图上靠玻璃 frost 保证可读。twin 遍纸罩保留（只进折射源）。
-        // 纯绘制不占布局。
+        // 全窗背景图（twin 纹理复用，可见遍同画）：必须在全部面板之前画——
+        // 同层按代码顺序出画，先画的在下。右移让脸出导航（见 `cover_shifted`）。
+        // 无纸罩（用户明确不要白色遮罩）。纯绘制不占布局。
         let screen = ui.ctx().viewport_rect();
-        egui_glass::show_backdrop(ui, screen);
+        if let Some(t) = self.twin_photo.as_ref() {
+            let r = Self::cover_shifted(screen, t.w, t.h, BG_SHIFT_X);
+            ui.painter().with_clip_rect(screen).image(
+                t.id,
+                r,
+                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                egui::Color32::WHITE,
+            );
+        }
 
         // 顶栏：文件动作工具条胶囊（误伤恢复：真凶是 Panel 分隔线，现已全关，
         // 胶囊本身圆角无直边）。
@@ -866,12 +880,9 @@ impl eframe::App for App {
                         };
                         live.run(ui, clear, |page| {
                             // twin 图进折射源（native id 自动映射；离屏画不影响可见合成；
-                            // 可见遍纸罩已摘，这里也不加——用户明确不要白色遮罩）。
+                            // 与可见遍同矩形（含右移），折射与所见一致）。
                             if let Some(t) = self.twin_photo.as_ref() {
-                                let scale =
-                                    (screen.width() / t.w).max(screen.height() / t.h);
-                                let sized = egui::vec2(t.w * scale, t.h * scale);
-                                let r = egui::Rect::from_center_size(screen.center(), sized);
+                                let r = Self::cover_shifted(screen, t.w, t.h, BG_SHIFT_X);
                                 page.painter().with_clip_rect(screen).image(
                                     t.id,
                                     r,
@@ -896,5 +907,24 @@ impl eframe::App for App {
             });
 
         self.do_action(ui.ctx(), act);
+    }
+}
+
+#[cfg(test)]
+mod cover_tests {
+    use super::*;
+
+    #[test]
+    fn shifted_face_clears_nav() {
+        // 1024x712 窗 + 1280x720 图 + 右移 180：片源脸（tex x 180..350）
+        // 落窗 x 239..417，右缘出 216 宽导航（左脸颊仍擦边，
+        // 糊区无完整五官，不成重影）；右缘不出窗。
+        let screen = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1024.0, 712.0));
+        let r = App::cover_shifted(screen, 1280.0, 720.0, BG_SHIFT_X);
+        let face = |tx: f32| r.min.x + tx / 1280.0 * r.width();
+        assert!(face(180.0) > 216.0, "face left edge clears nav");
+        assert!(face(350.0) < 1024.0, "face right edge on screen");
+        // 同矩形在 twin/可见两遍共用（折射与所见一致），尺寸恒定。
+        assert!((r.width() - 1265.78).abs() < 0.01 && r.height() == 712.0);
     }
 }

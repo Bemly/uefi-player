@@ -72,20 +72,6 @@ pub(crate) fn decode_bg() -> Option<(u32, u32, Vec<u8>)> {
     Some((img.width(), img.height(), img.into_raw()))
 }
 
-/// `set_backdrop` 吃的 `ColorImage` 版（与 `decode_bg` 同一包，多解一次，
-/// 启动一次性 ~几十毫秒，可接受；换主题重传也走这里）。
-fn load_bg_image() -> egui::ColorImage {
-    match decode_bg() {
-        Some((w, h, px)) => {
-            egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &px)
-        }
-        None => egui::ColorImage::filled([256, 256], egui::Color32::WHITE),
-    }
-}
-
-/// 窗口图标：`assets/icon-256.rgba` 预烘焙 256x256 RGBA，直编二进制零新依赖
-///（Windows 任务栏/Linux 可见；macOS Dock 图标走 bundle 的 `icon.icns`，
-/// 见 `bundle_macos.sh`，运行时设置在 mac 上被忽略）。
 fn app_icon() -> egui::IconData {
     egui::IconData {
         rgba: include_bytes!("../assets/icon-256.rgba").to_vec(),
