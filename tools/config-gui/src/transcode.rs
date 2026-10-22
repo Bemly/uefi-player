@@ -891,6 +891,8 @@ impl App {
         }
         match probe_source(&self.transcode.source) {
             Ok(info) => {
+                // 选片即回填源几何（用户拍板：默认跟源，不放大；手动改完换片会被新源覆盖）。
+                self.transcode.res_text = format!("{}x{}", info.w, info.h);
                 self.transcode.info = info.summary();
                 self.transcode.status.clear();
             }
@@ -2411,6 +2413,15 @@ mod transcode_tests {
         assert_eq!(info.codec, "avc");
         assert_eq!((info.w, info.h), (64, 48));
         assert_eq!(info.n, 2);
+    }
+
+    #[test]
+    fn res_autofill_follows_probe_geometry() {
+        // 选片回填口径：`"{w}x{h}"` 必须能被 `parse_res_wh` 原样吃回。
+        for (w, h) in [(1280, 720), (1920, 1080), (64, 48)] {
+            let s = format!("{w}x{h}");
+            assert_eq!(parse_res_wh(&s), Ok(Some((w, h))), "{s}");
+        }
     }
 
     /// 端到端冒烟：合成小 mp4 落盘 → 走完整 `run_transcode_job`（解复用→
