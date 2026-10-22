@@ -5,6 +5,7 @@ use eframe::egui;
 use rust_i18n::t;
 
 use crate::app::{App, DecodeTab, Page};
+use crate::display::{BarColor, DisplayAlign, DisplayFit};
 use crate::rules::*;
 use crate::schema::*;
 use crate::text::*;
@@ -72,9 +73,10 @@ impl App {
                 if self.cfg.render.mode == RenderMode::Blt {
                     self.content_label(ui, t!("accel.blt_op"));
                     // 一行四个（窄窗自动换行保底，不断尾）。
-                    // 只有 BufferToVideo 能上屏播视频，其余三项置灰展示、不删：
+                    // 只有 BufferToVideo 能上屏播视频，其余三项展示、不删：
                     // 库内件无禁用态（`GlassButton::show` 写死 `Sense::click`，
-                    // 自绘不跟随禁用样式），手动灰字 + `add_enabled_ui(false)` 关交互。
+                    // 自绘不跟随禁用样式），`add_enabled_ui(false)` 关交互，
+                    // 文字不置灰（用户拍板：纯白/纯黑与其他字对齐）。
                     ui.horizontal_wrapped(|ui| {
                         for v in BltOpKind::ALL {
                             if v == BltOpKind::BufferToVideo {
@@ -89,7 +91,11 @@ impl App {
                                         Self::marker(false),
                                         v.file_str()
                                     ))
-                                    .text_color(egui::Color32::GRAY)
+                                    .text_color(if self.dark {
+                                        egui::Color32::WHITE
+                                    } else {
+                                        egui::Color32::BLACK
+                                    })
                                     .show(ui);
                                 });
                             }
@@ -310,6 +316,106 @@ impl App {
                     }
                 });
                 self.content_small(ui, async_desc(self.cfg.r#async.executor));
+                ui.add_space(10.0);
+                // 显示适配 v3（5 档 fit + 5 档 align 全玻璃按钮行；bar 自由 RGB：
+                // v1 命名 4-way 即预设快设行 + R/G/B 0..255 滑杆 + 手绘预览色块；
+                // stretch 忽略 align，cover 按 align 裁切，native 按 align 摆放 1:1）。
+                self.content_label(ui, t!("display.fit"));
+                ui.horizontal_wrapped(|ui| {
+                    for v in DisplayFit::ALL {
+                        if self.option_button(ui, self.cfg.display.fit == v, v.file_str()) {
+                            self.cfg.display.fit = v;
+                        }
+                    }
+                });
+                self.content_small(ui, display_fit_desc(self.cfg.display.fit));
+                ui.add_space(10.0);
+                self.content_label(ui, t!("display.align"));
+                ui.horizontal_wrapped(|ui| {
+                    for v in DisplayAlign::ALL {
+                        if self.option_button(ui, self.cfg.display.align == v, v.file_str()) {
+                            self.cfg.display.align = v;
+                        }
+                    }
+                });
+                self.content_small(ui, display_align_desc(self.cfg.display.align));
+                ui.add_space(10.0);
+                self.content_label(ui, t!("display.bar"));
+                // 预设快设行（v1 4-way 沿用，文案保持 "black"/"white"/"gray"/"navy"）：
+                // 点选即写回 + 同步三滑杆镜像（否则下一帧旧镜像会盖掉新选色）。
+                ui.horizontal_wrapped(|ui| {
+                    for (preset, name) in [
+                        (BarColor::BLACK, "black"),
+                        (BarColor::WHITE, "white"),
+                        (BarColor::GRAY, "gray"),
+                        (BarColor::NAVY, "navy"),
+                    ] {
+                        if self.option_button(ui, self.cfg.display.bar == preset, name) {
+                            self.cfg.display.bar = preset;
+                            self.bar_r_f = preset.r as f32;
+                            self.bar_g_f = preset.g as f32;
+                            self.bar_b_f = preset.b as f32;
+                        }
+                    }
+                });
+                // R/G/B 0..255 步进 1（库内滑杆只吃 `f32`，整数档用 round 镜像，见 Accel 页 `*_f`）。
+                let r_label = format!("{}: {}", t!("display.bar_r"), self.cfg.display.bar.r);
+                Self::content_slider(
+                    ui,
+                    self.dark,
+                    &mut self.bar_r_f,
+                    0.0..=255.0,
+                    r_label,
+                    Some(1.0),
+                );
+                self.cfg.display.bar.r = self.bar_r_f.round().clamp(0.0, 255.0) as u8;
+                let g_label = format!("{}: {}", t!("display.bar_g"), self.cfg.display.bar.g);
+                Self::content_slider(
+                    ui,
+                    self.dark,
+                    &mut self.bar_g_f,
+                    0.0..=255.0,
+                    g_label,
+                    Some(1.0),
+                );
+                self.cfg.display.bar.g = self.bar_g_f.round().clamp(0.0, 255.0) as u8;
+                let b_label = format!("{}: {}", t!("display.bar_b"), self.cfg.display.bar.b);
+                Self::content_slider(
+                    ui,
+                    self.dark,
+                    &mut self.bar_b_f,
+                    0.0..=255.0,
+                    b_label,
+                    Some(1.0),
+                );
+                self.cfg.display.bar.b = self.bar_b_f.round().clamp(0.0, 255.0) as u8;
+                // 预览色块（手绘矩形，非控件：库内无颜色件，`color_edit_button`/`TextEdit`
+                // 全禁，故 `ui.painter` 纯绘制，不占控件语义，见 toast 进度条同式）。
+                self.content_label(ui, t!("display.bar_preview"));
+                ui.add_space(4.0);
+                let bar_col = egui::Color32::from_rgb(
+                    self.cfg.display.bar.r,
+                    self.cfg.display.bar.g,
+                    self.cfg.display.bar.b,
+                );
+                let (rect, _) =
+                    ui.allocate_exact_size(egui::vec2(64.0, 24.0), egui::Sense::hover());
+                ui.painter().rect_filled(rect, 4.0, bar_col);
+                ui.painter().rect_stroke(
+                    rect,
+                    4.0,
+                    egui::Stroke::new(
+                        1.0,
+                        if self.dark {
+                            egui::Color32::WHITE
+                        } else {
+                            egui::Color32::BLACK
+                        },
+                    ),
+                    egui::StrokeKind::Inside,
+                );
+                ui.add_space(4.0);
+                self.content_small(ui, display_bar_desc(self.cfg.display.bar));
             }
             Page::Playlist => {
                 self.playlist_page(ui);
@@ -657,6 +763,18 @@ impl App {
                 self.content_label(ui, self.schedule_measured_line());
                 self.content_label(ui, t!("sum.vsync", v = self.cfg.render.vsync.file_str()));
                 self.content_label(ui, self.render_measured_line());
+                self.content_label(
+                    ui,
+                    t!(
+                        "sum.display",
+                        v = format!(
+                            "{}/{}/{}",
+                            self.cfg.display.fit.file_str(),
+                            self.cfg.display.bar.to_hex(),
+                            self.cfg.display.align.file_str()
+                        )
+                    ),
+                );
                 self.content_label(ui, t!("sum.wallpaper", v = self.wallpaper_text()));
                 self.content_label(
                     ui,

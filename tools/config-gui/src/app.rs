@@ -109,6 +109,11 @@ pub(crate) struct App {
     pub(crate) tune_at_load: RenderTune,
     /// 核心上限滑杆镜像：0..=64（0 = 自动不限，库内滑杆只吃 `f32`，整数档用 round 镜像）。
     pub(crate) sched_cores_f: f32,
+    /// 黑边 RGB 滑杆镜像：0..=255（库内滑杆只吃 `f32`，整数档用 round 镜像；
+    /// 预设行点选后同步三值，滑杆每帧写回 `cfg.display.bar`）。
+    pub(crate) bar_r_f: f32,
+    pub(crate) bar_g_f: f32,
+    pub(crate) bar_b_f: f32,
     pub(crate) glass: bool,
     /// 深色模式：egui visuals + 纯黑 backdrop + 深色玻璃预设三处联动。
     pub(crate) dark: bool,
@@ -239,6 +244,12 @@ impl App {
         rust_i18n::set_locale("en");
         cc.egui_ctx
             .send_viewport_cmd(egui::ViewportCommand::Title(t!("app.title").into_owned()));
+        // 主题偏好显式锁深色（不跟系统）：egui 按 `theme()` 选槽写 visuals，
+        // 偏好默认 `System` 时 `App::new` 执行瞬间系统主题输入还没进内存，
+        // `set_visuals` 会写进 Dark 槽而首帧起 UI 读的是系统浅色对应的 Light 槽
+        // （裸 `ui.label` 全跪，只有走自家 `self.dark` 的描边字是对的；
+        // 切一次浅色再切回来才好就是这个原因）。锁死后两槽各归其位。
+        cc.egui_ctx.set_theme(egui::ThemePreference::Dark);
         cc.egui_ctx.set_visuals(egui::Visuals::dark());
         let mut glass = false;
         let mut live = None;
@@ -328,6 +339,9 @@ impl App {
             tune_buffers_f: default_buffers() as f32,
             tune_at_load: RenderTune::default(),
             sched_cores_f: 0.0,
+            bar_r_f: 0.0,
+            bar_g_f: 0.0,
+            bar_b_f: 0.0,
             glass,
             dark: true,
             zh: false,
@@ -380,6 +394,9 @@ impl App {
         self.tune_vsync_fps_f = self.cfg.render.tune.vsync_fps.clamp(15, 240) as f32;
         self.tune_buffers_f = self.cfg.render.tune.buffers.min(16) as f32;
         self.sched_cores_f = self.cfg.schedule.cores.min(64) as f32;
+        self.bar_r_f = self.cfg.display.bar.r as f32;
+        self.bar_g_f = self.cfg.display.bar.g as f32;
+        self.bar_b_f = self.cfg.display.bar.b as f32;
         // 越界单选回到列表内（删行后旧下标悬空，下一帧点行即覆盖）。
         if let Some(s) = self.playlist_sel {
             if s >= self.cfg.playlist.items.len() {
@@ -950,6 +967,12 @@ impl App {
             }
             Action::ToggleTheme => {
                 self.dark = !self.dark;
+                // 偏好与 visuals 同步换槽（见 `App::new` 注释，不跟系统）。
+                ctx.set_theme(if self.dark {
+                    egui::ThemePreference::Dark
+                } else {
+                    egui::ThemePreference::Light
+                });
                 ctx.set_visuals(if self.dark {
                     egui::Visuals::dark()
                 } else {
@@ -1150,12 +1173,13 @@ impl App {
         next
     }
 
-    /// 中央透明区头的弱化提示行：描边字，不进折射源（折射源只有根部
+    /// 中央透明区头的提示行：描边字，不进折射源（折射源只有根部
     /// `live.run` 的背景图，纯绘制不占布局）。摘要行只放左侧导航卡，
     /// 不在这里重复占右侧空间。
     pub(crate) fn page_backdrop(&self, page: &mut egui::Ui) {
         page.add_space(4.0);
-        self.content_small(page, egui::RichText::new(t!("sum.hint")).weak().small());
+        // 纯白/纯黑（用户拍板：不用 `.weak()` 灰；`outlined` 本来也会剥色，此处明示）。
+        self.content_small(page, egui::RichText::new(t!("sum.hint")).small());
         page.add_space(4.0);
     }
 
@@ -1234,6 +1258,14 @@ impl eframe::App for App {
         // 推进只能在闭包外做（`live.run` 闭包禁写状态/禁时钟，见上游 `live.rs`；
         // 转换提交也在 tick 内同步做完，paint 回调零逻辑，避 nounwind abort）。
         if self.glass {
+            // 图库选中 avc/hevc 片源即接管动态背景（无选中/非编解码即默认片源）。
+            // 会话级，无落盘（转码页状态本就不进 player.toml）。
+            let want = crate::video_bg::VideoBg::resolve_source(
+                &self.gallery.entries,
+                self.gallery.selected,
+                &crate::gallery::gallery_dir(&self.path),
+            );
+            self.video_bg.set_source(want);
             self.video_bg.tick(ui.ctx());
         }
         if let Some(live) = self.live.as_ref() {
@@ -1290,7 +1322,13 @@ impl eframe::App for App {
                 };
                 card.inner_margin(egui::Margin::same(12)).show(ui, |ui| {
                     ui.set_min_size(ui.available_size());
-                    ui.heading(t!("nav.sections"));
+                    // 纯白/纯黑（用户拍板：不用 visuals 默认灰，与中央描边字对齐）。
+                    let nav_fg = if self.dark {
+                        egui::Color32::WHITE
+                    } else {
+                        egui::Color32::BLACK
+                    };
+                    ui.heading(egui::RichText::new(t!("nav.sections")).color(nav_fg));
                     self.nav_button(ui, Page::File, t!("nav.file").into_owned());
                     self.nav_button(ui, Page::Accel, t!("nav.accel").into_owned());
                     self.nav_button(ui, Page::Playlist, t!("nav.playlist").into_owned());
@@ -1301,24 +1339,30 @@ impl eframe::App for App {
                     self.nav_button(ui, Page::Gallery, t!("nav.gallery").into_owned());
                     self.nav_button(ui, Page::Summary, t!("nav.summary").into_owned());
                     ui.add_space(8.0);
-                    ui.small(t!("sum.accel", v = self.cfg.accel.level.file_str()));
-                    ui.small(t!("sum.render", v = self.cfg.render.mode.file_str()));
-                    ui.small(t!("sum.workers", v = self.cfg.schedule.workers.file_str()));
-                    ui.small(t!(
-                        "sum.cores",
-                        v = if self.cfg.schedule.cores == 0 {
-                            String::from("auto")
-                        } else {
-                            self.cfg.schedule.cores.min(64).to_string()
-                        }
-                    ));
-                    ui.small(t!("sum.roles", v = self.cfg.schedule.roles.file_str()));
-                    ui.small(t!("sum.dist", v = self.cfg.schedule.dist.file_str()));
-                    ui.small(t!("sum.vsync", v = self.cfg.render.vsync.file_str()));
-                    ui.small(t!("sum.wallpaper", v = self.wallpaper_text()));
-                    ui.small(t!("sum.play", v = self.play_text()));
-                    ui.small(self.measured_line());
-                    ui.small(t!("sum.version", v = self.cfg.version));
+                    // 摘要小字同样纯白/纯黑（用户拍板：不用 visuals 默认灰）。
+                    for s in [
+                        t!("sum.accel", v = self.cfg.accel.level.file_str()).into_owned(),
+                        t!("sum.render", v = self.cfg.render.mode.file_str()).into_owned(),
+                        t!("sum.workers", v = self.cfg.schedule.workers.file_str()).into_owned(),
+                        t!(
+                            "sum.cores",
+                            v = if self.cfg.schedule.cores == 0 {
+                                String::from("auto")
+                            } else {
+                                self.cfg.schedule.cores.min(64).to_string()
+                            }
+                        )
+                        .into_owned(),
+                        t!("sum.roles", v = self.cfg.schedule.roles.file_str()).into_owned(),
+                        t!("sum.dist", v = self.cfg.schedule.dist.file_str()).into_owned(),
+                        t!("sum.vsync", v = self.cfg.render.vsync.file_str()).into_owned(),
+                        t!("sum.wallpaper", v = self.wallpaper_text()).into_owned(),
+                        t!("sum.play", v = self.play_text()).into_owned(),
+                        self.measured_line(),
+                        t!("sum.version", v = self.cfg.version).into_owned(),
+                    ] {
+                        ui.small(egui::RichText::new(s).color(nav_fg));
+                    }
                 });
                 ui.add_space(8.0);
             });

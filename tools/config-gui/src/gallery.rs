@@ -13,8 +13,9 @@
 //! h263/mpeg2v/theora 解码在固件 vendor 树，ivf 缺 IVF 解析轮子；
 //! 且转码页本来就只产 `video.mp4` + 裸流，mp4 覆盖 avc/hevc/vp9 三轨），
 //! 一律占位块 + 格式大字，不断任何流程。
-//! 卡片只用库内件：`Glass::panel()` 容器 + 图 + 纯文本（无玻璃嵌玻璃，
-//! 点击走 `ui.interact` 原语）；选中态沿用行版 `●/○` + accent 色。
+//! 卡片只用库内件：`Glass::panel()` 容器（半径 28，与侧栏同语言）+ 图 +
+//! 纯文本（无玻璃嵌玻璃，点击走 `ui.interact` 原语）；选中态描边 +
+//! 标题 accent 色（Mirage 式蓝框对标无 ●/○ 字形）。
 //!
 //! 性能纪律：解码/缩放全在后台线程（首帧即发，逐张流式回传），UI 只做
 //! `load_texture` + 缓存；封面宽封顶 320（单张约 230KB）；显示封顶与壁纸同档。
@@ -38,6 +39,9 @@ pub(crate) struct GalleryEntry {
     /// 相对图库根的显示路径（如 `1080p/video.mp4`）。
     pub(crate) size: u64,
     pub(crate) kind: &'static str,
+    /// 探针编解码（`probe_source().codec`，封面线程回填；None = 还没回来/探不动）。
+    /// 动态背景选片门只认 `avc`/`hevc`（见 `video_bg::resolve_source`）。
+    pub(crate) codec: Option<&'static str>,
     /// 封面线程回填（None = 还没回来/不支持）。
     pub(crate) meta: Option<ThumbMeta>,
 }
@@ -60,6 +64,7 @@ enum ThumbMsg {
         gen: u64,
         idx: usize,
         meta: ThumbMeta,
+        codec: Option<&'static str>,
         cover: Option<(u32, u32, Vec<u8>)>,
     },
     Done {
@@ -179,6 +184,7 @@ pub(crate) fn list_gallery(dir: &str) -> Vec<GalleryEntry> {
                 name: format!("{sub}/{name}"),
                 size: meta.len(),
                 kind: media_kind(&name),
+                codec: None,
                 meta: None,
             });
         }
@@ -274,6 +280,7 @@ fn thumb_worker(jobs: Vec<String>, gen: u64, tx: Sender<ThumbMsg>) {
     for (idx, full) in jobs.into_iter().enumerate() {
         // 计时行复用探针（mp4/image/raw 有；裸流无则只剩几何行）。
         let probe = crate::transcode::probe_source(&full).ok();
+        let codec = probe.as_ref().map(|p| p.codec);
         let cover = cover_first_frame(&full);
         let (gw, gh) = cover
             .as_ref()
@@ -295,6 +302,7 @@ fn thumb_worker(jobs: Vec<String>, gen: u64, tx: Sender<ThumbMsg>) {
                 dur_s,
                 has_time,
             },
+            codec,
             cover: cover.map(|(tw, th, px, ..)| (tw, th, px)),
         };
         if tx.send(msg).is_err() {
@@ -364,6 +372,7 @@ impl GalleryState {
                         gen,
                         idx,
                         meta,
+                        codec,
                         cover,
                     }) => {
                         if gen != self.gen {
@@ -371,6 +380,7 @@ impl GalleryState {
                         }
                         if let Some(e) = self.entries.get_mut(idx) {
                             e.meta = Some(meta);
+                            e.codec = codec;
                         }
                         if let Some((tw, th, px)) = cover {
                             if let Some(e) = self.entries.get(idx) {
@@ -478,7 +488,8 @@ impl App {
         });
     }
 
-    /// 单张卡片：玻璃容器 + 封面 + 简介两行；整卡可点（`interact` 原语）。
+    /// 单张卡片：玻璃容器（封面顶满上沿）+ 标题 + 元数据两行（等高）；
+    /// 整卡可点（`interact` 原语），选中描 accent 边。
     fn gallery_card(&mut self, ui: &mut eframe::egui::Ui, idx: usize, dark: bool) {
         use eframe::egui;
         let (name, kind, size, meta, sel) = match self.gallery.entries.get(idx) {
@@ -497,63 +508,105 @@ impl App {
         } else {
             egui_glass::Glass::panel()
         };
-        let inner = card.inner_margin(egui::Margin::same(8)).show(ui, |ui| {
-            ui.set_width(CARD_W - 16.0);
-            // 封面（16:9 裁边；无纹理即占位块 + 格式大字）。
-            let cw = CARD_W - 16.0;
-            let ch = cw * 9.0 / 16.0;
-            if let Some(t) = tex.as_ref() {
-                ui.add(
-                    egui::Image::new(t)
-                        .fit_to_exact_size(egui::vec2(cw, ch))
-                        .sense(egui::Sense::hover()),
-                );
-            } else {
-                let (r, _) = ui.allocate_exact_size(egui::vec2(cw, ch), egui::Sense::hover());
-                ui.painter().rect_filled(
-                    r,
-                    8.0,
-                    if dark {
-                        egui::Color32::from_black_alpha(80)
+        // 封面贴上沿左右沿（与 panel 同半径 28上圆下直），文字区留边。
+        let inner = card
+            .inner_margin(egui::Margin {
+                left: 0,
+                right: 0,
+                top: 0,
+                bottom: 10,
+            })
+            .show(ui, |ui| {
+                // Glass 子 UI 会继承行横向布局此处强制竖排（否则封面与文字横排）。
+                ui.vertical(|ui| {
+                    ui.set_width(CARD_W);
+                    // 封面（16:9 顶满；无纹理即占位块 + 格式大字，同圆角）。
+                    let ch = CARD_W * 9.0 / 16.0;
+                    let top_round = egui::CornerRadius {
+                        nw: 28,
+                        ne: 28,
+                        sw: 0,
+                        se: 0,
+                    };
+                    if let Some(t) = tex.as_ref() {
+                        ui.add(
+                            egui::Image::new(t)
+                                .fit_to_exact_size(egui::vec2(CARD_W, ch))
+                                .corner_radius(top_round)
+                                .sense(egui::Sense::hover()),
+                        );
                     } else {
-                        egui::Color32::from_white_alpha(120)
-                    },
-                );
-                ui.painter().text(
-                    r.center(),
-                    egui::Align2::CENTER_CENTER,
-                    kind.to_uppercase(),
-                    egui::FontId::proportional(28.0),
-                    ui.visuals().text_color(),
-                );
-            }
-            ui.add_space(6.0);
-            // 简介：文件名（●/○ + 截断）+ 元数据行（+ 计时行）。
-            let title = format!("{} {}", Self::marker(sel), truncate_name(&name, 26));
-            if sel {
-                ui.label(
-                    egui::RichText::new(title)
-                        .strong()
-                        .color(Self::accent(dark)),
-                );
-            } else {
-                ui.label(egui::RichText::new(title).strong());
-            }
-            let meta_v = meta.unwrap_or(ThumbMeta {
-                w: 0,
-                h: 0,
-                fps: 0,
-                n: 0,
-                dur_s: 0,
-                has_time: false,
+                        let (r, _) =
+                            ui.allocate_exact_size(egui::vec2(CARD_W, ch), egui::Sense::hover());
+                        ui.painter().rect_filled(
+                            r,
+                            top_round,
+                            if dark {
+                                egui::Color32::from_black_alpha(80)
+                            } else {
+                                egui::Color32::from_white_alpha(120)
+                            },
+                        );
+                        ui.painter().text(
+                            r.center(),
+                            egui::Align2::CENTER_CENTER,
+                            kind.to_uppercase(),
+                            egui::FontId::proportional(28.0),
+                            // 纯白/纯黑（用户拍板：不用灰字，与其他字对齐）。
+                            if dark {
+                                egui::Color32::WHITE
+                            } else {
+                                egui::Color32::BLACK
+                            },
+                        );
+                    }
+                    ui.add_space(6.0);
+                    // 文字区（左右各 8；标题 + 两行元数据恒三行等高，缺计时行垫空格）。
+                    ui.horizontal(|ui| {
+                        ui.add_space(8.0);
+                        ui.vertical(|ui| {
+                            ui.set_width(CARD_W - 16.0);
+                            let title = truncate_name(&name, 26);
+                            if sel {
+                                ui.label(
+                                    egui::RichText::new(title)
+                                        .strong()
+                                        .color(Self::accent(dark)),
+                                );
+                            } else {
+                                // 纯白/纯黑（用户拍板：不用灰字/默认 visuals 灰）。
+                                ui.label(egui::RichText::new(title).strong().color(if dark {
+                                    egui::Color32::WHITE
+                                } else {
+                                    egui::Color32::BLACK
+                                }));
+                            }
+                            let meta_v = meta.unwrap_or(ThumbMeta {
+                                w: 0,
+                                h: 0,
+                                fps: 0,
+                                n: 0,
+                                dur_s: 0,
+                                has_time: false,
+                            });
+                            let (second, third) = meta_lines(kind, &meta_v, size);
+                            // 纯白/纯黑小字（用户拍板：去 `.weak()` 灰，与其他字对齐）。
+                            let meta_fg = if dark {
+                                egui::Color32::WHITE
+                            } else {
+                                egui::Color32::BLACK
+                            };
+                            ui.label(egui::RichText::new(second).small().color(meta_fg));
+                            ui.label(
+                                egui::RichText::new(third.unwrap_or_else(|| String::from(" ")))
+                                    .small()
+                                    .color(meta_fg),
+                            );
+                        });
+                    });
+                });
             });
-            let (second, third) = meta_lines(kind, &meta_v, size);
-            ui.label(egui::RichText::new(second).small().weak());
-            if let Some(t3) = third {
-                ui.label(egui::RichText::new(t3).small().weak());
-            }
-        });
-        // 整卡点击（玻璃只给 hover sense，这里用原语升级；卡内无玻璃件）。
+        // 整卡点击（玻璃只给 hover sense这里用原语升级；卡内无玻璃件）。
         let click = ui.interact(
             inner.response.rect,
             egui::Id::new(("gallery-card", name.as_str())),
@@ -561,6 +614,15 @@ impl App {
         );
         if click.clicked() {
             self.gallery.selected = Some(idx);
+        }
+        // 选中描边（Mirage 式蓝框；半径与 panel 一致）。
+        if sel {
+            ui.painter().rect_stroke(
+                inner.response.rect,
+                28.0,
+                egui::Stroke::new(2.0, Self::accent(dark)),
+                egui::StrokeKind::Outside,
+            );
         }
     }
 }
