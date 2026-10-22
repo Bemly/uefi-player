@@ -323,8 +323,8 @@ impl TrackDecoder {
 }
 
 /// 单组解码（SPS/PPS 前缀只喂首组；HEVC 尾组外不 flush，结束调 finish；
-/// 形状与固件一致）。
-fn decode_group(
+/// 形状与固件一致）。pub(crate)：图库封面复用首帧解码，不另起解码链。
+pub(crate) fn decode_group(
     dec: &mut TrackDecoder,
     d: &DemuxedTrack,
     g: &[RawSample],
