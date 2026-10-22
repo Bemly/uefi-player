@@ -92,6 +92,10 @@ pub(crate) fn clamp_decode(d: &mut DecodeTable) {
     for fmt in DecodeTable::ORDER {
         if let Some(c) = d.get_mut(fmt) {
             c.buffers = c.buffers.min(32);
+            if fmt == MediaFormat::Raw {
+                c.width = c.width.clamp(1, 4096);
+                c.height = c.height.clamp(1, 4096);
+            }
         }
     }
 }
@@ -596,6 +600,8 @@ mod blackbox_matrix {
         clamp_decode(&mut d);
         assert_eq!(d.hevc.buffers, 32);
         assert_eq!(d.avc.buffers, 0);
+        assert_eq!(d.raw.width, 1);
+        assert_eq!(d.raw.height, 4096);
         // `coerce_loaded` 同样钳住（读盘路径）。
         let cfg: FileConfig = toml::from_str("[decode.vp9]\nbuffers = 64\n").unwrap();
         assert_eq!(coerce_loaded(cfg).decode.vp9.buffers, 32);
