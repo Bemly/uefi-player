@@ -90,8 +90,8 @@ fn main() -> eframe::Result<()> {
         // egui_glass 硬性要求 wgpu 渲染器，glow 不可用。
         renderer: eframe::Renderer::Wgpu,
         viewport: egui::ViewportBuilder::default()
-            // 默认打开尺寸（内容区；外框 1229x791，减 macOS 标题栏约 28）。
-            .with_inner_size([1229.0, 763.0])
+            // 默认打开尺寸（内容区；外框 1229x791，减 macOS 标题栏 32）。
+            .with_inner_size([1229.0, 759.0])
             .with_icon(app_icon()),
         ..Default::default()
     };
