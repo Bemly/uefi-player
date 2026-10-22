@@ -86,6 +86,8 @@ pub(crate) fn clamp_schedule(s: &mut ScheduleConfig) {
 
 /// 落盘前钳制解码缓冲（滑杆已钳 0-32，这里防手改文件后的脏值回写；
 /// 0 保留 = 跟随 `tune.window`，只压上界）。
+/// RAW-GEOM：raw 几何钳 1..=4096（手改文件脏值回写；与固件 `store_all` 同口径；
+/// 其余格式键固件侧忽略，不钳）。
 pub(crate) fn clamp_decode(d: &mut DecodeTable) {
     for fmt in DecodeTable::ORDER {
         if let Some(c) = d.get_mut(fmt) {
@@ -112,6 +114,8 @@ pub(crate) fn clamp_tune(t: &mut RenderTune) {
 #[cfg(test)]
 mod blackbox_matrix {
     use super::*;
+    // RAW-GEOM：`DecodeConfig` 已拆到 `decode_cfg`（`schema` 只重导出 `DecodeTable`）。
+    use crate::decode_cfg::DecodeConfig;
 
     fn rc(mode: RenderMode, workers: WorkersMode, dist: DistMode, vsync: VsyncMode) -> FileConfig {
         let mut cfg = FileConfig::default();
@@ -545,6 +549,9 @@ mod blackbox_matrix {
             assert!(!d.streaming);
             assert_eq!(d.buffers, 0);
             assert_eq!(d.fetch, None);
+            // RAW-GEOM：老文件无两键，全格式回 1920x1080（仅 raw 生效）。
+            assert_eq!(d.width, 1920);
+            assert_eq!(d.height, 1080);
         }
         // 缺键部分表：只写 threads，其余按默认照读（含 fetch 继承）。
         let partial: FileConfig =
@@ -555,6 +562,16 @@ mod blackbox_matrix {
         assert!(!h.streaming);
         assert_eq!(h.buffers, 0);
         assert_eq!(h.fetch, None);
+        // RAW-GEOM：显式几何照读照写（1280x720 小分辨率 raw 用）。
+        let rawgeom: FileConfig =
+            toml::from_str("version = 1\n[decode.raw]\nwidth = 1280\nheight = 720\n").unwrap();
+        let r = rawgeom.decode.get(MediaFormat::Raw).unwrap();
+        assert_eq!(r.width, 1280);
+        assert_eq!(r.height, 720);
+        let back: FileConfig = toml::from_str(&toml::to_string(&rawgeom).unwrap()).unwrap();
+        assert_eq!(back.decode.get(MediaFormat::Raw).unwrap().width, 1280);
+        assert_eq!(back.decode.get(MediaFormat::Raw).unwrap().height, 720);
+        assert_eq!(back, rawgeom);
         let a = partial.decode.get(MediaFormat::Avc).unwrap();
         assert_eq!(*a, DecodeConfig::default());
         // 部分表显式 fetch：照读，其余表仍继承。
@@ -573,6 +590,9 @@ mod blackbox_matrix {
         let mut d = DecodeTable::default();
         d.hevc.buffers = 99;
         d.avc.buffers = 0;
+        // RAW-GEOM：raw 几何越界钳住（0 → 1，超大 → 4096）。
+        d.raw.width = 0;
+        d.raw.height = 99999;
         clamp_decode(&mut d);
         assert_eq!(d.hevc.buffers, 32);
         assert_eq!(d.avc.buffers, 0);

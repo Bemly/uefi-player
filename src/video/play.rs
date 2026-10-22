@@ -18,7 +18,7 @@
 
 use super::decoder::Clip;
 use super::demux::{Mp4VideoKind, demux_mp4_track};
-use super::{VIDEO_H, VIDEO_NATIVE_FPS, VIDEO_W, rdtsc};
+use super::{VIDEO_NATIVE_FPS, rdtsc};
 use crate::config::{self, LoopMode, MediaFormat};
 use crate::error::{NyaStatus, Result};
 use crate::fs::Fs;
@@ -173,7 +173,9 @@ pub(crate) fn load_item_clip(
         }
         MediaFormat::Raw => {
             let dir = raw_parent_dir(path);
-            Clip::from_raw_dir(fs, &dir, usize::MAX, VIDEO_W * VIDEO_H * 4, tag)?
+            // RAW-GEOM：帧字节按 `[decode.raw]` 生效几何（缺键 1920x1080x4 照旧）。
+            let (rw, rh) = crate::config::decode_raw_wh();
+            Clip::from_raw_dir(fs, &dir, usize::MAX, rw * rh * 4, tag)?
         }
         MediaFormat::Hevc if is_mp4 => {
             let c = path_cstr16(path)?;

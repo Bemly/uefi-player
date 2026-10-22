@@ -57,6 +57,9 @@ static DEC_FETCH_H263: AtomicU8 = AtomicU8::new(0xFF);
 static DEC_FETCH_MPEG2V: AtomicU8 = AtomicU8::new(0xFF);
 static DEC_FETCH_THEORA: AtomicU8 = AtomicU8::new(0xFF);
 static DEC_FETCH_AVC: AtomicU8 = AtomicU8::new(0xFF);
+// RAW-GEOM：`[decode.raw] width/height`（默认 1920x1080；钳 1..=4096，见 `store_all`）。
+static DEC_RAW_W: AtomicU32 = AtomicU32::new(1920);
+static DEC_RAW_H: AtomicU32 = AtomicU32::new(1080);
 
 /// 开机 `load()` 调用：把 `DecodeTable`（缺表缺键全默认）装进原子存储。
 /// `buffers` 钳 0-32（0 = 跟随 `tune.window`）。
@@ -125,6 +128,21 @@ pub(crate) fn store_all(d: &DecodeTable) {
         d.avc.fetch.map(|f| f.as_u8()).unwrap_or(0xFF),
         Ordering::Relaxed,
     );
+    // RAW-GEOM：仅 raw 两键生效（其余七表残留键 serde 已忽略，不进原子）；
+    // 钳 1..=4096（0/超大钳住 + 警告，不断 boot；缺键 1920x1080 照旧）。
+    let raw_w = d.raw.width.clamp(1, 4096);
+    let raw_h = d.raw.height.clamp(1, 4096);
+    if raw_w != d.raw.width || raw_h != d.raw.height {
+        log::warn!(
+            "cfg: [decode.raw] width/height out of range ({}x{}) -- clamped to {}x{}",
+            d.raw.width,
+            d.raw.height,
+            raw_w,
+            raw_h,
+        );
+    }
+    DEC_RAW_W.store(raw_w, Ordering::Relaxed);
+    DEC_RAW_H.store(raw_h, Ordering::Relaxed);
 }
 
 /// 是否有状态软解（顺序解码，其余三项 yes；`qois`/`raw` 非状态）。
@@ -231,6 +249,14 @@ pub fn decode_window(fmt: MediaFormat) -> usize {
         0 => super::tune_window().clamp(1, 32).max(1) as usize,
         n => n.clamp(1, 32).max(1) as usize,
     }
+}
+
+/// RAW-GEOM：`[decode.raw]` 生效几何（已钳 1..=4096；缺键 1920x1080 照旧）。
+/// 帧字节 = `w*h*4`（BGRA 直存）；几何 preset + mp_slots 步幅同取此处。
+pub fn decode_raw_wh() -> (usize, usize) {
+    let w = DEC_RAW_W.load(Ordering::Relaxed).clamp(1, 4096) as usize;
+    let h = DEC_RAW_H.load(Ordering::Relaxed).clamp(1, 4096) as usize;
+    (w.max(1), h.max(1))
 }
 
 /// 每格式供片覆盖（`[decode.<fmt>] fetch`，默认 None = 继承全局 `[play] feed`；

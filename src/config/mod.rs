@@ -90,8 +90,8 @@ pub use crew::{
     slots_eligible,
 };
 pub use decode::{
-    decode_buffers, decode_effective_feed, decode_fetch, decode_streaming, decode_threads,
-    decode_window, decode_zero_copy, effective_feed,
+    decode_buffers, decode_effective_feed, decode_fetch, decode_raw_wh, decode_streaming,
+    decode_threads, decode_window, decode_zero_copy, effective_feed,
 };
 pub use types::*;
 

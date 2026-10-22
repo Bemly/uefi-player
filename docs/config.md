@@ -71,12 +71,15 @@ path = "1080p/video.qois"  # u32le 帧长 + QOI 串接
 # 完整检测序见 docs/player.md（qois → raws 单文件 → raw 目录扫描 → mp4 探针 → hevc → ivf →
 # h263 → m2v → ogv）。
 
-# 解码表（统一控制平面，八格式各独立五键）：
+# 解码表（统一控制平面，八格式各独立五键 + RAW-GEOM（仅 raw）两键）：
 # threads bsp_only/all（有状态格式 all 解析但警告并驻 bsp_only；qois/raw 即时兑现）；
 # zero_copy/streaming 布尔（全格式可行）；buffers 0=跟随 tune.window/1-32 显式；
 # fetch 缺省继承全局 [play] feed，显式 clip/staged/stream/zero_copy/single 只覆盖本格式
 # （壁纸恒 eager 无视覆盖；串口生效 `video: feed=` + ` fetchovr=<fmt>` 令牌）。
-# 缺表缺键按默认照读（threads=bsp_only，布尔关，buffers=0，fetch 继承全局）。
+# width/height：仅 `[decode.raw]` 生效（小分辨率 raw 直搬，默认 1920x1080 照旧，
+# 钳 1..=4096，越界警告 + 钳住；其余七表残留键忽略）。
+# 缺表缺键按默认照读（threads=bsp_only，布尔关，buffers=0，fetch 继承全局，
+# raw width=1920 height=1080）。
 [decode.qois]
 threads = "bsp_only"    # bsp_only | all（无状态，all 即时兑现 honored 行）
 zero_copy = false       # 单缓冲即时解码开关
@@ -88,6 +91,8 @@ threads = "bsp_only"    # bsp_only | all（零解码，all 即时兑现 honored 
 zero_copy = false
 streaming = false
 buffers = 0
+width = 1920            # raw 帧宽（1-4096；小分辨率如 1280 配 height=720）
+height = 1080           # raw 帧高（1-4096；缺键照旧 1920x1080）
 [decode.hevc]
 threads = "bsp_only"    # bsp_only | all（有状态，all 解析但警告并驻 bsp_only）
 zero_copy = false       # 单缓冲即时解码开关
@@ -229,7 +234,8 @@ bar = "black"           # 黑边填充色（RGB 自由色，默认 "black"=00000
   缺键老文件按 `clip` 照读，现路行为不变。
   feed 是全局默认：每项生效值 = 本项检测格式的 `[decode.<fmt>] fetch`
   显式值，否则全局 feed（串口 `video: feed=` 取生效值）。
-- `[decode.<fmt>]`（八格式 qois/raw/hevc/avc/vp9/h263/mpeg2v/theora，每表五键，缺表缺键按默认照读）：
+- `[decode.<fmt>]`（八格式 qois/raw/hevc/avc/vp9/h263/mpeg2v/theora，每表五键 + RAW-GEOM 两键，
+  缺表缺键按默认照读）：
   按项当前检测格式生效（与 `[play] format` 旧键脱钩，改跟自动检测）；
   `threads=all` 在 qois/raw 上即时兑现（`honored (frame-parallel safe)` 行），
   在有状态软解码上解析但警告并驻 `bsp_only`
@@ -238,6 +244,9 @@ bar = "black"           # 黑边填充色（RGB 自由色，默认 "black"=00000
   显式 1-32 按格式覆盖，`tune.window` 仍是全局默认；`fetch` 缺省（None）继承全局
   `[play] feed`，显式值只覆盖本格式生效供片（串口 `video: feed=` 取覆盖值 +
   ` fetchovr=<fmt>` 令牌行，矩阵断言子串；壁纸恒 eager 无视覆盖）。
+  `width`/`height` 仅 `[decode.raw]` 生效（默认 1920x1080，钳 1..=4096；
+  帧字节 = `w*h*4`，几何 preset + mp_slots 步幅同源；矩阵 `video-decode-raw-720p`
+  断言 `video: fmt=Raw frames=2 1280x720`）。
   串口另有 `decode: fmt=<Dbg> threads=...` 解析行（矩阵断言用）。
 - `[playlist]`（新增正典）：`loop` 三档（`loop_list` 默认回绕 /
   `loop_single` 重播当前项 / `once` 播完最后一项即停回菜单），缺表缺键按默认照读；

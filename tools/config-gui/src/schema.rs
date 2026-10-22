@@ -533,81 +533,10 @@ impl DecodeThreads {
     }
 }
 
-pub(crate) fn default_decode_buffers() -> u32 {
-    0
-}
-
-/// 单格式解码开关（与固件 `[decode.<fmt>]` 同构；`buffers = 0` 跟随
-/// `[render.tune] window`（1-32），显式 1-32 按格式覆盖；`tune.window` 保持全局默认）。
-/// `fetch` 是逐格式供片覆盖（`None` = 继承全局 `[play] feed`，落盘不写键；
-/// `Some` = 显式覆盖五档任一，见 `FeedMode`）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
-pub(crate) struct DecodeConfig {
-    pub(crate) threads: DecodeThreads,
-    pub(crate) zero_copy: bool,
-    pub(crate) streaming: bool,
-    #[serde(default = "default_decode_buffers")]
-    pub(crate) buffers: u32,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) fetch: Option<FeedMode>,
-}
-
-impl Default for DecodeConfig {
-    fn default() -> Self {
-        Self {
-            threads: DecodeThreads::BspOnly,
-            zero_copy: false,
-            streaming: false,
-            buffers: 0,
-            fetch: None,
-        }
-    }
-}
-
-/// `[decode]`：8 格式逐格式开关（与固件 `[decode.<fmt>]` 同构；
-/// `qois`/`raw` 同表（前者帧级并行可兑现，后者零解码占位），缺表/缺键老文件全按默认照读）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(default)]
-pub(crate) struct DecodeTable {
-    pub(crate) qois: DecodeConfig,
-    pub(crate) raw: DecodeConfig,
-    pub(crate) hevc: DecodeConfig,
-    pub(crate) avc: DecodeConfig,
-    pub(crate) vp9: DecodeConfig,
-    pub(crate) h263: DecodeConfig,
-    pub(crate) mpeg2v: DecodeConfig,
-    pub(crate) theora: DecodeConfig,
-}
-
-impl DecodeTable {
-    /// 解码页顺序（与 SPEC `gui_controls` 同序；`MediaFormat::ALL` 全 8 格式）。
-    pub(crate) const ORDER: [MediaFormat; 8] = MediaFormat::ALL;
-    pub(crate) fn get(&self, fmt: MediaFormat) -> Option<&DecodeConfig> {
-        match fmt {
-            MediaFormat::Qois => Some(&self.qois),
-            MediaFormat::Raw => Some(&self.raw),
-            MediaFormat::Hevc => Some(&self.hevc),
-            MediaFormat::Avc => Some(&self.avc),
-            MediaFormat::Vp9 => Some(&self.vp9),
-            MediaFormat::H263 => Some(&self.h263),
-            MediaFormat::Mpeg2v => Some(&self.mpeg2v),
-            MediaFormat::Theora => Some(&self.theora),
-        }
-    }
-    pub(crate) fn get_mut(&mut self, fmt: MediaFormat) -> Option<&mut DecodeConfig> {
-        match fmt {
-            MediaFormat::Qois => Some(&mut self.qois),
-            MediaFormat::Raw => Some(&mut self.raw),
-            MediaFormat::Hevc => Some(&mut self.hevc),
-            MediaFormat::Avc => Some(&mut self.avc),
-            MediaFormat::Vp9 => Some(&mut self.vp9),
-            MediaFormat::H263 => Some(&mut self.h263),
-            MediaFormat::Mpeg2v => Some(&mut self.mpeg2v),
-            MediaFormat::Theora => Some(&mut self.theora),
-        }
-    }
-}
+/// `[decode]` 解码表实现见 `decode_cfg`（`schema` 已到 1000 行上限，子分类拆出；
+/// 本处只重导出 `DecodeTable`（`FileConfig.decode` 字段类型，对外路径不变）；
+/// `DecodeConfig` 请直引 `decode_cfg`（`rules` 等已直引，避免重导出悬空告警）。
+pub(crate) use crate::decode_cfg::DecodeTable;
 
 /// `[play]`：`fps` 是字符串（三态没法用纯数字表达），`measured_max_fps`
 /// 只由固件实测回写（0 = 未测），这里只读展示 + 重测清零。

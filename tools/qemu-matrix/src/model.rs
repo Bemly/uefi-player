@@ -49,6 +49,10 @@ pub(crate) struct Case {
     /// 播片 raw 片源：`1080p/frameNNNN.raw` 黑场 N 帧（`[play] format = "raw"` 用）。
     #[serde(default)]
     pub(crate) needs_rawvideo: u32,
+    // RAW-GEOM：小分辨率 raw 片源：`720p/frameNNNN.raw` 黑场 N 帧（1280x720，
+    // 配 `[decode.raw] width=1280 height=720` 用；目录独立，几何不混）。
+    #[serde(default)]
+    pub(crate) needs_rawvideo720: u32,
     /// 播片 raws 片源：`1080p/video.raws` 黑场 N 帧单文件（`[play] format = "raw"` 的单文件路用）。
     #[serde(default)]
     pub(crate) needs_raws: u32,

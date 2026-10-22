@@ -76,7 +76,6 @@ use crate::video::decoder::{
 };
 use crate::video::rdtsc;
 use crate::video::sync::{SlotRing, SlotState, tsc_now};
-use crate::video::{VIDEO_H, VIDEO_W};
 use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::String;
@@ -559,16 +558,19 @@ fn scan_split(fs: &mut Fs) -> Result<(SlotSource, usize, usize)> {
             }
             let total = names.len();
             let names_leaked: &'static [String] = Box::leak(names.into_boxed_slice());
-            log::info!("mp: slots scan raw frames={} 1920x1080", total);
+            // RAW-GEOM：扫描行几何 + 帧字节 + 步幅全取 `[decode.raw]` 生效值
+            //（缺键 1920x1080 照旧，旧断言行字节一致）。
+            let (rw, rh) = crate::config::decode_raw_wh();
+            log::info!("mp: slots scan raw frames={} {}x{}", total, rw, rh);
             Ok((
                 SlotSource::Raw {
                     dir: "1080p",
                     names: names_leaked,
-                    frame_bytes: VIDEO_W * VIDEO_H * 4,
+                    frame_bytes: rw * rh * 4,
                     total,
                 },
-                VIDEO_W * 4,
-                VIDEO_H,
+                rw * 4,
+                rh,
             ))
         }
     }

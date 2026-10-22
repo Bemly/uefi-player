@@ -669,7 +669,7 @@ pub(crate) fn from_theora_packets(
 }
 
 /// raw 序列目录（`frameNNNN.raw`，BGRA 直存）：`want` 封顶预载数，
-/// 只收恰好 `frame_bytes` 字节的帧（1920x1080x4，见调用方；半帧不上屏）。
+/// 只收恰好 `frame_bytes` 字节的帧（`[decode.raw]` 生效几何x4，见调用方；半帧不上屏）。
 pub(crate) fn from_raw_dir(
     fs: &mut crate::fs::Fs,
     dir: &str,
@@ -745,16 +745,19 @@ pub(crate) fn from_raw_dir(
     if skipped > 0 {
         log::warn!("{}: skipped {} bad frame(s)", tag, skipped);
     }
-    // raw 帧几何定值（1920x1080，见调用方 `frame_bytes`）。
-    Ok(EagerClip::eager(1920, 1080, frames))
+    // RAW-GEOM：帧几何取 `[decode.raw]` 生效值（与调用方 `frame_bytes` 同源，恒一致）。
+    let (rw, rh) = crate::config::decode_raw_wh();
+    Ok(EagerClip::eager(rw, rh, frames))
 }
 
 /// raws 单文件（`video.raws`，BGRA 帧首尾相接无头）：按 `frame_bytes`
 /// 整切，尾部不足一帧即整文件报错（不断言静默跳过，半帧不上屏）。
-/// 几何与目录版同定值（1920x1080）。
+/// 几何与目录版同源（`[decode.raw]` 生效值）。
 pub(crate) fn from_raws_bytes(data: &[u8], tag: &str) -> crate::error::Result<EagerClip> {
     let _ = super::decode_threads(MediaFormat::Raw);
-    let frame_bytes = 1920usize * 1080 * 4;
+    // RAW-GEOM：单文件无目录可推几何，帧字节按生效几何算（缺键 1920x1080x4 照旧）。
+    let (rw, rh) = crate::config::decode_raw_wh();
+    let frame_bytes = rw * rh * 4;
     if data.is_empty() || data.len() % frame_bytes != 0 {
         log::warn!(
             "{}: bad raws size {} (want N*{} = N frames)",
@@ -773,5 +776,5 @@ pub(crate) fn from_raws_bytes(data: &[u8], tag: &str) -> crate::error::Result<Ea
         frames.push(super::bytes_as_pixels(chunk.to_vec()));
     }
     log::info!("{}: predecoded {} raws frames", tag, frames.len());
-    Ok(EagerClip::eager(1920, 1080, frames))
+    Ok(EagerClip::eager(rw, rh, frames))
 }

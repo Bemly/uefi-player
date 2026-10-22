@@ -1,5 +1,5 @@
 # 60-decode.toml：QEMU 黑盒矩阵分组（`matrix/` 目录，解码表 + 零拷×多核槽位路径 + crew/roles）。
-# 共 14 cases（解码 9 + 槽位 2 + crew/roles 3），单文件 ≤1000 行（AGENTS 口径）。
+# 共 15 cases（解码 10 + 槽位 2 + crew/roles 3），单文件 ≤1000 行（AGENTS 口径）。
 #
 # 调度 crew/roles（`[schedule] cores`/`roles`，分发串口行
 # `sched: crew=<n>/<m> roles=<r> workers=<w>`，旧 `play: path=` 行字节不变；
@@ -12,8 +12,10 @@
 # 首轮 sweep 胜者固件回写 `measured_workers_n` 持久化（0=未测，GUI 只读展示，
 # 重测清零），与 `measured_workers/dist/cores` 同机制。
 #
-# 解码表（`[decode.<fmt>]` 八格式各五键：threads bsp_only/all + zero_copy/streaming 布尔 +
-# buffers 0=跟随 tune.window/1-32 显式 + fetch 缺省继承全局 feed）。
+# 解码表（`[decode.<fmt>]` 八格式各五键 + RAW-GEOM（仅 `raw`）两键
+# `width`/`height`（默认 1920x1080，钳 1..=4096）：threads bsp_only/all +
+# zero_copy/streaming 布尔 + buffers 0=跟随 tune.window/1-32 显式 +
+# fetch 缺省继承全局 feed）。
 # 播放列表化后：`[play] format` 旧键已删除，每例以单项 `[[playlist.items]]`
 # 选片（路径自动检测定格式，`play.fmt=` 开机断言随之删除）；断言改为
 # 列表行（`playlist: item 1/1 path=`）+ 解析行（`decode: fmt=`）+ 回退/兑现行 +
@@ -366,6 +368,43 @@ boot_expect = ["cfg: version=1", "play.feed=Clip", "idle: ready"]
 keys = [{ send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 }, { send = "p", wait_after = 3 }, { send = "0", wait_for = ["menu: ready"], wait_after = 5 }]
 expect = ["playlist: item 1/1 path=1080p/video.raws", "video: fmt=Raw", "decode: fmt=Raw", "play: path=direct_loop"]
 soak_sec = 15
+
+# RAW-GEOM：小分辨率 raw（`720p/` 独立目录 1280x720 黑场 2 帧 + `[decode.raw]
+# width=1280 height=720`）：断言几何生效（`video: fmt=Raw frames=2 1280x720` 行
+# 即 preset/frame_bytes 双双走新值）+ 旧三行口径不变，不断言画质。
+[[case]]
+name = "video-decode-raw-720p"
+covers = ["src/video/decoder", "src/video/play.rs", "src/config/decode.rs", "src/config/types.rs"]
+timeout_sec = 180
+needs_rawvideo720 = 2
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+vsync = "off"
+[play]
+fps = "max"
+feed = "clip"
+[playlist]
+loop = "loop_list"
+[[playlist.items]]
+path = "720p/frame0000.raw"
+[wallpaper]
+enable = false
+[schedule]
+backend = "manual"
+workers = "bsp_only"
+dist = "static"
+[decode.raw]
+width = 1280
+height = 720
+"""
+boot_expect = ["cfg: version=1", "play.feed=Clip", "idle: ready"]
+keys = [{ send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 }, { send = "p", wait_after = 3 }, { send = "0", wait_for = ["menu: ready"], wait_after = 5 }]
+expect = ["playlist: item 1/1 path=720p/frame0000.raw", "video: fmt=Raw frames=2 1280x720", "decode: fmt=Raw", "play: path=direct_loop"]
+soak_sec = 10
 
 # 取数覆盖（`[decode.hevc] fetch=stream` 盖全局 feed=clip）：生效 `video: feed=stream` + ` fetchovr=hevc` 令牌；壁纸无视覆盖。
 [[case]]

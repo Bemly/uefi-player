@@ -800,7 +800,17 @@ pub(crate) const fn default_decode_buffers() -> u32 {
     0
 }
 
-/// 每格式解码项（`[decode.<fmt>]` 五键，见 `DecodeTable`）：
+/// RAW-GEOM：`[decode.raw] width` 默认 1920（缺键照旧；钳 1..=4096 见 `decode_raw_wh`）。
+pub(crate) const fn default_raw_width() -> u32 {
+    1920
+}
+
+/// RAW-GEOM：`[decode.raw] height` 默认 1080（缺键照旧；钳 1..=4096 见 `decode_raw_wh`）。
+pub(crate) const fn default_raw_height() -> u32 {
+    1080
+}
+
+/// 每格式解码项（`[decode.<fmt>]` 五键 + RAW-GEOM 两键（仅 `raw` 用），见 `DecodeTable`）：
 /// - `threads`：`bsp_only`（默认，顺序安全）/`all`（qois/raw 立即兑现，
 ///   有状态告警仍顺序）；
 /// - `zero_copy`：单选开关（默认 false；`feed=zero_copy` 照常走零拷复用，
@@ -809,6 +819,8 @@ pub(crate) const fn default_decode_buffers() -> u32 {
 ///   `raw` 逐文件 + `h263` reader 恒流式）；
 /// - `buffers`：滑杆下标（0 = 跟随 `tune.window` 全局默认，1-32 显式覆盖每格式）；
 /// - `fetch`：每格式供片覆盖（默认 None = 继承全局 `[play] feed`；显式值只覆盖本格式，壁纸恒 clip 忽略覆盖）。
+/// - `width`/`height`：RAW-GEOM，仅 `[decode.raw]` 生效（默认 1920x1080 = 老行为；
+///   其它七表残留键按未知键忽略，不断解析）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DecodeEntry {
@@ -822,6 +834,11 @@ pub struct DecodeEntry {
     pub buffers: u32,
     #[serde(default)]
     pub fetch: Option<FeedMode>,
+    // RAW-GEOM：raw 帧几何（其余格式忽略本两键）。
+    #[serde(default = "default_raw_width")]
+    pub width: u32,
+    #[serde(default = "default_raw_height")]
+    pub height: u32,
 }
 
 impl Default for DecodeEntry {
@@ -832,6 +849,9 @@ impl Default for DecodeEntry {
             streaming: false,
             buffers: 0,
             fetch: None,
+            // RAW-GEOM：缺表缺键回 1920x1080，老文件逐字节一致。
+            width: 1920,
+            height: 1080,
         }
     }
 }

@@ -115,7 +115,9 @@ pub fn load() -> Result<Option<Clip>> {
     if frames.is_empty() {
         return Ok(None);
     }
-    let (w, h) = geom.unwrap_or((WP_W, WP_H));
+    // RAW-GEOM：兜底取 `[decode.raw]` 生效几何（实达此处 geom 必为 Some；
+    // 小分辨率画廊几何照收，1080p 门控仍在 idle/boot 侧（现模式非 1080p 照旧跳过）。
+    let (w, h) = geom.unwrap_or_else(crate::config::decode_raw_wh);
     let m = frames.len();
     log::info!(
         "wallpaper: gallery items={} loop={} preloaded {} frames (preload {})",

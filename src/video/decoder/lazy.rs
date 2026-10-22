@@ -626,15 +626,9 @@ pub(crate) fn raw_dir(
         pos: 0,
         frame_bytes,
     };
-    // raw 几何定值（1920x1080，全预解码同值；首帧预解只验可读性）。
-    LazyState::build(
-        tag,
-        mode,
-        source,
-        total,
-        Some((1920, 1080)),
-        MediaFormat::Raw,
-    )
+    // RAW-GEOM：preset 取 `[decode.raw]` 生效几何（与 `frame_bytes` 同源；首帧预解只验可读性）。
+    let (rw, rh) = crate::config::decode_raw_wh();
+    LazyState::build(tag, mode, source, total, Some((rw, rh)), MediaFormat::Raw)
 }
 
 /// `single` 零缓存档（`feed=single`，`render.blt` 同旧环）：分块同懒分支，
@@ -754,7 +748,9 @@ pub(crate) fn raw_single_dir(
         pos: 0,
         frame_bytes,
     };
-    LazyState::build_single(tag, source, total, Some((1920, 1080)))
+    // RAW-GEOM：preset 取 `[decode.raw]` 生效几何（与 `frame_bytes` 同源）。
+    let (rw, rh) = crate::config::decode_raw_wh();
+    LazyState::build_single(tag, source, total, Some((rw, rh)))
 }
 
 // ---------- slots 路 AP 按序号解单块（最小索引入口；BSP 已 scan-split，AP 只解不扫） ----------

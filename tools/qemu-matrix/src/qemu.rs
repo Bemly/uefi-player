@@ -216,6 +216,14 @@ pub(crate) fn run_case(
             vec![0u8; 1920 * 1080 * 4],
         ));
     }
+    for i in 0..case.needs_rawvideo720 {
+        // RAW-GEOM：小分辨率 raw 片源黑场帧（`720p/` 独立目录，1280x720，
+        // 配 `[decode.raw] width=1280 height=720` 用；几何不混）。
+        files.push((
+            Box::leak(format!("720p/frame{i:04}.raw").into_boxed_str()),
+            vec![0u8; 1280 * 720 * 4],
+        ));
+    }
     if case.needs_wallpaper_qois {
         // 壁纸 qois 片源：复用测试视频（真 QOI 帧，验预解码 + 循环）。
         let src = format!("{ROOT}/usb_reports/1080p/video.qois");
