@@ -34,7 +34,6 @@
 //!   真流式取数：`raw` 逐文件读盘 + `h263` reader 免预切，其余保留编码块
 //!   （整文件 demux/扫描必需，内存赢在解码帧侧）+ 窗口增量解码。
 
-use alloc::collections::VecDeque;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::ops::Range;
@@ -506,14 +505,7 @@ pub(crate) fn hevc_bytes(
     let data = data.to_vec();
     let aus = split_annexb_aus(&data, HEVC_VCL, 2);
     let total = aus.len().max(1);
-    let source = Source::Hevc {
-        data,
-        aus,
-        pos: 0,
-        dec: rusty_h265::Decoder::new(),
-        pending: VecDeque::new(),
-        flushed: false,
-    };
+    let source = Source::make_hevc(data, aus);
     LazyState::build(tag, mode, source, total, None, MediaFormat::Hevc)
 }
 
@@ -525,12 +517,7 @@ pub(crate) fn avc_bytes(
     let data = data.to_vec();
     let aus = split_annexb_aus(&data, AVC_VCL, 1);
     let total = aus.len().max(1);
-    let source = Source::Avc {
-        data,
-        aus,
-        pos: 0,
-        dec: rusty_h264_decoder::Decoder::new(),
-    };
+    let source = Source::make_avc(data, aus);
     LazyState::build(tag, mode, source, total, None, MediaFormat::Avc)
 }
 
@@ -541,13 +528,7 @@ pub(crate) fn vp9_bytes(
 ) -> crate::error::Result<super::Clip> {
     let ranges = scan_ivf(data);
     let total = ranges.len();
-    let source = Source::Vp9Ivf {
-        data: data.to_vec(),
-        ranges,
-        pos: 0,
-        dec: vp9dec::Decoder::new(),
-        pending: VecDeque::new(),
-    };
+    let source = Source::make_vp9_ivf(data.to_vec(), ranges);
     LazyState::build(tag, mode, source, total, None, MediaFormat::Vp9)
 }
 
@@ -557,12 +538,7 @@ pub(crate) fn vp9_raw_frames(
     mode: FeedMode,
 ) -> crate::error::Result<super::Clip> {
     let total = samples.len();
-    let source = Source::Vp9Mp4 {
-        frames: samples.to_vec(),
-        pos: 0,
-        dec: vp9dec::Decoder::new(),
-        pending: VecDeque::new(),
-    };
+    let source = Source::make_vp9_mp4(samples.to_vec());
     LazyState::build(tag, mode, source, total, None, MediaFormat::Vp9)
 }
 
@@ -591,15 +567,7 @@ pub(crate) fn mpeg2v_bytes(
     let data = data.to_vec();
     let aus = filmcraft_mpeg2v::access_units(&data);
     let total = aus.len();
-    let source = Source::Mpeg2v {
-        data,
-        aus,
-        pos: 0,
-        dec: filmcraft_mpeg2v::Decoder::new(),
-        pending: VecDeque::new(),
-        flushed: false,
-        pts: 0,
-    };
+    let source = Source::make_mpeg2v(data, aus);
     LazyState::build(tag, mode, source, total, None, MediaFormat::Mpeg2v)
 }
 
@@ -637,11 +605,7 @@ pub(crate) fn theora_packets(
         crate::error::NyaStatus::_Debug(alloc::format!("{}: theora decoder error: {:?}", tag, e))
     })?;
     let total = packets.len().saturating_sub(3);
-    let source = Source::Theora {
-        packets: packets.to_vec(),
-        pos: 3,
-        dec,
-    };
+    let source = Source::make_theora(packets.to_vec(), 3, dec);
     LazyState::build(tag, mode, source, total, None, MediaFormat::Theora)
 }
 
@@ -691,14 +655,7 @@ pub(crate) fn hevc_single_bytes(data: &[u8], tag: &str) -> crate::error::Result<
     let data = data.to_vec();
     let aus = split_annexb_aus(&data, HEVC_VCL, 2);
     let total = aus.len().max(1);
-    let source = Source::Hevc {
-        data,
-        aus,
-        pos: 0,
-        dec: rusty_h265::Decoder::new(),
-        pending: VecDeque::new(),
-        flushed: false,
-    };
+    let source = Source::make_hevc(data, aus);
     LazyState::build_single(tag, source, total, None)
 }
 
@@ -706,25 +663,14 @@ pub(crate) fn avc_single_bytes(data: &[u8], tag: &str) -> crate::error::Result<s
     let data = data.to_vec();
     let aus = split_annexb_aus(&data, AVC_VCL, 1);
     let total = aus.len().max(1);
-    let source = Source::Avc {
-        data,
-        aus,
-        pos: 0,
-        dec: rusty_h264_decoder::Decoder::new(),
-    };
+    let source = Source::make_avc(data, aus);
     LazyState::build_single(tag, source, total, None)
 }
 
 pub(crate) fn vp9_single_bytes(data: &[u8], tag: &str) -> crate::error::Result<super::Clip> {
     let ranges = scan_ivf(data);
     let total = ranges.len();
-    let source = Source::Vp9Ivf {
-        data: data.to_vec(),
-        ranges,
-        pos: 0,
-        dec: vp9dec::Decoder::new(),
-        pending: VecDeque::new(),
-    };
+    let source = Source::make_vp9_ivf(data.to_vec(), ranges);
     LazyState::build_single(tag, source, total, None)
 }
 
@@ -733,12 +679,7 @@ pub(crate) fn vp9_single_raw_frames(
     tag: &str,
 ) -> crate::error::Result<super::Clip> {
     let total = samples.len();
-    let source = Source::Vp9Mp4 {
-        frames: samples.to_vec(),
-        pos: 0,
-        dec: vp9dec::Decoder::new(),
-        pending: VecDeque::new(),
-    };
+    let source = Source::make_vp9_mp4(samples.to_vec());
     LazyState::build_single(tag, source, total, None)
 }
 
@@ -758,15 +699,7 @@ pub(crate) fn mpeg2v_single_bytes(data: &[u8], tag: &str) -> crate::error::Resul
     let data = data.to_vec();
     let aus = filmcraft_mpeg2v::access_units(&data);
     let total = aus.len();
-    let source = Source::Mpeg2v {
-        data,
-        aus,
-        pos: 0,
-        dec: filmcraft_mpeg2v::Decoder::new(),
-        pending: VecDeque::new(),
-        flushed: false,
-        pts: 0,
-    };
+    let source = Source::make_mpeg2v(data, aus);
     LazyState::build_single(tag, source, total, None)
 }
 
@@ -801,11 +734,7 @@ pub(crate) fn theora_single_packets(
         crate::error::NyaStatus::_Debug(alloc::format!("{}: theora decoder error: {:?}", tag, e))
     })?;
     let total = packets.len().saturating_sub(3);
-    let source = Source::Theora {
-        packets: packets.to_vec(),
-        pos: 3,
-        dec,
-    };
+    let source = Source::make_theora(packets.to_vec(), 3, dec);
     LazyState::build_single(tag, source, total, None)
 }
 

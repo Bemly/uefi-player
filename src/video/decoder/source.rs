@@ -15,6 +15,7 @@
 //! 编码保留是 demux/扫描必需（整文件读），内存赢在解码帧侧（窗口/单槽复用，
 //! 稳态零分配）；`single` 每帧 `reset` 重走（零解码缓存）。
 
+use alloc::boxed::Box;
 use alloc::collections::VecDeque;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -34,13 +35,13 @@ pub(crate) enum Source {
         data: Vec<u8>,
         aus: Vec<Range<usize>>,
         pos: usize,
-        dec: rusty_h264_decoder::Decoder,
+        dec: Box<rusty_h264_decoder::Decoder>,
     },
     Hevc {
         data: Vec<u8>,
         aus: Vec<Range<usize>>,
         pos: usize,
-        dec: rusty_h265::Decoder,
+        dec: Box<rusty_h265::Decoder>,
         pending: VecDeque<Vec<BltPixel>>,
         flushed: bool,
     },
@@ -48,13 +49,13 @@ pub(crate) enum Source {
         data: Vec<u8>,
         ranges: Vec<Range<usize>>,
         pos: usize,
-        dec: vp9dec::Decoder,
+        dec: Box<vp9dec::Decoder>,
         pending: VecDeque<Vec<BltPixel>>,
     },
     Vp9Mp4 {
         frames: Vec<Vec<u8>>,
         pos: usize,
-        dec: vp9dec::Decoder,
+        dec: Box<vp9dec::Decoder>,
         pending: VecDeque<Vec<BltPixel>>,
     },
     H263 {
@@ -68,7 +69,7 @@ pub(crate) enum Source {
         data: Vec<u8>,
         aus: Vec<Range<usize>>,
         pos: usize,
-        dec: filmcraft_mpeg2v::Decoder,
+        dec: Box<filmcraft_mpeg2v::Decoder>,
         pending: VecDeque<Vec<BltPixel>>,
         flushed: bool,
         pts: i64,
@@ -76,7 +77,7 @@ pub(crate) enum Source {
     Theora {
         packets: Vec<Vec<u8>>,
         pos: usize,
-        dec: oxideav_theora::FrameDecoder,
+        dec: Box<oxideav_theora::FrameDecoder>,
     },
     Raw {
         dir: String,
@@ -84,6 +85,81 @@ pub(crate) enum Source {
         pos: usize,
         frame_bytes: usize,
     },
+}
+
+/// 有状态 `Source` 构造 helper（`lazy.rs` 唯一入口）：`Decoder::new()` 的值暂存
+/// （vp9 8544B / avc 5088B / hevc 2520B / theora 2072B / mpeg2v 1016B）死在本
+/// helper 帧里，随返回释放；调用方栈上只留分块件（`Vec` 24B）+ 回值（<300B）。
+/// `#[inline(never)]` 是 correctness 要求不是优化：内联会把暂存搬回 load 调用链。
+impl Source {
+    #[inline(never)]
+    pub(crate) fn make_avc(data: Vec<u8>, aus: Vec<Range<usize>>) -> Self {
+        Source::Avc {
+            data,
+            aus,
+            pos: 0,
+            dec: Box::new(rusty_h264_decoder::Decoder::new()),
+        }
+    }
+
+    #[inline(never)]
+    pub(crate) fn make_hevc(data: Vec<u8>, aus: Vec<Range<usize>>) -> Self {
+        Source::Hevc {
+            data,
+            aus,
+            pos: 0,
+            dec: Box::new(rusty_h265::Decoder::new()),
+            pending: VecDeque::new(),
+            flushed: false,
+        }
+    }
+
+    #[inline(never)]
+    pub(crate) fn make_vp9_ivf(data: Vec<u8>, ranges: Vec<Range<usize>>) -> Self {
+        Source::Vp9Ivf {
+            data,
+            ranges,
+            pos: 0,
+            dec: Box::new(vp9dec::Decoder::new()),
+            pending: VecDeque::new(),
+        }
+    }
+
+    #[inline(never)]
+    pub(crate) fn make_vp9_mp4(frames: Vec<Vec<u8>>) -> Self {
+        Source::Vp9Mp4 {
+            frames,
+            pos: 0,
+            dec: Box::new(vp9dec::Decoder::new()),
+            pending: VecDeque::new(),
+        }
+    }
+
+    #[inline(never)]
+    pub(crate) fn make_mpeg2v(data: Vec<u8>, aus: Vec<Range<usize>>) -> Self {
+        Source::Mpeg2v {
+            data,
+            aus,
+            pos: 0,
+            dec: Box::new(filmcraft_mpeg2v::Decoder::new()),
+            pending: VecDeque::new(),
+            flushed: false,
+            pts: 0,
+        }
+    }
+
+    #[inline(never)]
+    pub(crate) fn make_theora(
+        packets: Vec<Vec<u8>>,
+        pos: usize,
+        dec: oxideav_theora::FrameDecoder,
+    ) -> Self {
+        Source::Theora {
+            packets,
+            pos,
+            dec: Box::new(dec),
+        }
+    }
 }
 
 /// 几何裁决（首帧记录，后继必须一致；与全预解码"混入异形帧跳过"同策略）。
@@ -614,7 +690,7 @@ impl Source {
             Source::Qois { pos, .. } => *pos = 0,
             Source::Avc { pos, dec, .. } => {
                 *pos = 0;
-                *dec = rusty_h264_decoder::Decoder::new();
+                **dec = rusty_h264_decoder::Decoder::new();
             }
             Source::Hevc {
                 pos,
@@ -624,7 +700,7 @@ impl Source {
                 ..
             } => {
                 *pos = 0;
-                *dec = rusty_h265::Decoder::new();
+                **dec = rusty_h265::Decoder::new();
                 pending.clear();
                 *flushed = false;
             }
@@ -635,7 +711,7 @@ impl Source {
                 pos, dec, pending, ..
             } => {
                 *pos = 0;
-                *dec = vp9dec::Decoder::new();
+                **dec = vp9dec::Decoder::new();
                 pending.clear();
             }
             Source::H263 {
@@ -655,7 +731,7 @@ impl Source {
                 ..
             } => {
                 *pos = 0;
-                *dec = filmcraft_mpeg2v::Decoder::new();
+                **dec = filmcraft_mpeg2v::Decoder::new();
                 pending.clear();
                 *flushed = false;
                 *pts = 0;
@@ -674,7 +750,7 @@ impl Source {
                     Err(_) => None,
                 };
                 match rebuilt {
-                    Some(d) => *dec = d,
+                    Some(d) => **dec = d,
                     None => *pos = packets.len(),
                 }
             }

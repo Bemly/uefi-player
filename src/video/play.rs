@@ -145,6 +145,14 @@ pub fn detect_clip_format(path: &str) -> Option<MediaFormat> {
 /// `feed_for` 以 tag 裁决忽略每格式 fetch 覆盖）。
 /// 扩展名定读写路（mp4 走容器，裸后缀走裸流，raw 扫同胞目录）；
 /// `eager` 为真无视 `feed` 强制全量（矩阵需全前视路径用）。
+///
+/// 栈纪律（血泪：2026-10-22 三重故障复位根因）：固件栈在 load 点仅剩 ~20KB，
+/// `Source` 枚举（最大变体 vp9 ≈ 8.6KB）与各 vendor `Decoder::new()` 暂存
+/// （vp9 8.5KB / avc 5KB）绝不能以值驻留在 load 调用链上——构造一律经
+/// `Source::make_*`（`#[inline(never)]`，暂存死在 helper 帧里）+ 解码器堆装箱
+/// （`Box<Decoder>`，枚举常驻 <300B）。QEMU 实测：`video-decode-fetch-override`
+/// （lazy hevc）/ `video-decode-avc`（eager avc）在修之前静默复位（串口无 panic、
+/// `-d int` 见 `#PF→#DF→三重故障`，RSP 触栈底 `0x3FE00000`）。
 pub(crate) fn load_item_clip(
     fs: &mut Fs,
     path: &str,
