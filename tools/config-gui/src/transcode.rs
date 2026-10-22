@@ -84,6 +84,8 @@ pub(crate) enum JobStage {
 pub(crate) struct JobOut {
     pub(crate) path: String,
     pub(crate) bytes: usize,
+    /// 本 job 内是否发生过硬解回退 CPU（worker 线程标记，UI 侧弹 toast）。
+    pub(crate) hw_fallback: bool,
 }
 
 pub(crate) struct TranscodeJob {
@@ -372,6 +374,7 @@ impl TrackDecoder {
                 || units[0][0] & 0x1F != 7
                 || crate::codecs::sps_profile_idc(&units[0]) != Some(66)
             {
+                crate::codecs::note_hw_fallback();
                 self.vt_avc_failed = true;
                 return None;
             }
@@ -389,6 +392,7 @@ impl TrackDecoder {
             }) {
                 Ok(dec) => self.vt_avc = Some(dec),
                 Err(_) => {
+                    crate::codecs::note_hw_fallback();
                     self.vt_avc_failed = true;
                     return None;
                 }
@@ -442,11 +446,19 @@ impl TrackDecoder {
             return None;
         }
         if self.vk_dec.is_none() {
-            let dev = crate::codecs::hw_vulkan_device()?;
+            let dev = match crate::codecs::hw_vulkan_device() {
+                Some(d) => d,
+                None => {
+                    crate::codecs::note_hw_fallback();
+                    self.vk_failed = true;
+                    return None;
+                }
+            };
             match dev.create_bytes_decoder_h264(gpu_video::parameters::DecoderParameters::default())
             {
                 Ok(dec) => self.vk_dec = Some(dec),
                 Err(_) => {
+                    crate::codecs::note_hw_fallback();
                     self.vk_failed = true;
                     return None;
                 }
@@ -895,6 +907,11 @@ impl App {
             match r {
                 Ok(out) => {
                     self.transcode.status = format!("done: {} ({} bytes)", out.path, out.bytes);
+                    if out.hw_fallback {
+                        // 回退提示双写：页内状态追加 + App 级 status 触发右上 toast。
+                        self.transcode.status.push_str(" [CPU]");
+                        self.status = t!("transcode.fallback_cpu").into_owned();
+                    }
                 }
                 Err(e) => {
                     self.transcode.status = format!("error: {e}");
@@ -1089,6 +1106,8 @@ pub(crate) fn run_transcode_job(
     mut stage: impl FnMut(JobStage),
     mut progress: impl FnMut(usize, usize),
 ) -> Result<JobOut, String> {
+    // 本 job 的回退标记在本线程清零；收尾时读取（转码 worker 线独占，无串扰）。
+    crate::codecs::take_hw_fallback_hit();
     let bytes = std::fs::read(source).map_err(|e| format!("read source: {e}"))?;
     let lower = source.to_ascii_lowercase();
     stage(JobStage::Decode);
@@ -1219,6 +1238,7 @@ pub(crate) fn run_transcode_job(
     Ok(JobOut {
         path: out_path.to_string(),
         bytes: bytes.len(),
+        hw_fallback: crate::codecs::take_hw_fallback_hit(),
     })
 }
 
@@ -1766,6 +1786,10 @@ mod transcode_tests {
             },
         );
         let out_info = r.expect("run_transcode_job");
+        // mac 上 VideoToolbox 常驻，硬解必成：无回退＝编解码硬解链真跑了。
+        // 非 mac（无 Vulkan 驱动即回退 CPU）不断言，人肉看日志。
+        #[cfg(target_os = "macos")]
+        assert!(!out_info.hw_fallback, "expected HW encode+decode on mac");
         assert!(stages >= 2, "want decode+encode/mux stages");
         assert_eq!(last.0, last.1);
         assert!(last.0 >= 2, "want frame-level progress, got {last:?}");

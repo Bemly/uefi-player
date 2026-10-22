@@ -274,9 +274,20 @@ mod codecs_tests {
     #[test]
     fn profile_gate_spots() {
         assert_eq!(sps_profile_idc(&[0x67, 66, 0x00]), Some(66));
+        // VideoToolbox 编出 nal_ref_idc=1 的 0x27 头，同样认。
+        assert_eq!(sps_profile_idc(&[0x27, 66, 0x00]), Some(66));
         assert_eq!(sps_profile_idc(&[0x67, 100, 0x00]), Some(100));
         assert_eq!(sps_profile_idc(&[]), None);
         assert_eq!(sps_profile_idc(&[0x68, 66]), None);
+    }
+
+    #[test]
+    fn hw_fallback_flag_take_clear() {
+        assert!(!take_hw_fallback_hit());
+        note_hw_fallback();
+        note_hw_fallback();
+        assert!(take_hw_fallback_hit());
+        assert!(!take_hw_fallback_hit());
     }
 
     #[test]
@@ -628,7 +639,10 @@ pub(crate) struct AvcStream {
 pub(crate) fn encode_avc(frames: &[Yuv420]) -> Result<AvcStream, String> {
     match encode_avc_hw(frames) {
         Ok(s) => Ok(s),
-        Err(_) => encode_avc_cpu(frames),
+        Err(_) => {
+            note_hw_fallback();
+            encode_avc_cpu(frames)
+        }
     }
 }
 
@@ -816,7 +830,10 @@ pub(crate) struct HevcStream {
 pub(crate) fn encode_hevc(frames: &[Yuv420]) -> Result<HevcStream, String> {
     match encode_hevc_hw(frames) {
         Ok(s) => Ok(s),
-        Err(_) => encode_hevc_cpu(frames),
+        Err(_) => {
+            note_hw_fallback();
+            encode_hevc_cpu(frames)
+        }
     }
 }
 
@@ -909,6 +926,23 @@ pub(crate) fn encode_mpeg2v(frames: &[Yuv420]) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
+/// 硬解失败回退标记（线程级 sticky：转码 worker 线内只置位不清除；
+/// UI 在起 job 前清零、收 Finished 时读取 → toast；图库封面线程误置无妨，
+/// 它的线程从不被读取，随线程结束丢弃）。
+thread_local! {
+    static HW_FALLBACK_HIT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// 记一次硬解回退（编码/解码 HW 路失败转 CPU 时调用）。
+pub(crate) fn note_hw_fallback() {
+    HW_FALLBACK_HIT.with(|f| f.set(true));
+}
+
+/// 取走并清零回退标记（转码 job 起止各调一次）。
+pub(crate) fn take_hw_fallback_hit() -> bool {
+    HW_FALLBACK_HIT.with(|f| f.replace(false))
+}
+
 /// 硬解编码（avc/hevc；mac VideoToolbox / Win-Linux Vulkan Video）。
 /// 形状与 CPU 版一致（首帧强制关键帧 + 参数集 + 1:1 样片），下游 `to_mp4` 零改；
 /// 任何失败一律 `Err`（调用方回退 CPU，保证不断转码）。
@@ -969,12 +1003,13 @@ fn avcc_to_nalus(data: &[u8]) -> Option<Vec<Vec<u8>>> {
     Some(out)
 }
 
-/// SPS 首字节 profile_idc（Annex-B 裸 NAL：`0x67` 后一字节）。
+/// SPS 首字节 profile_idc（Annex-B 裸 NAL：类型位为 7 即可，
+/// `0x67`/`0x27` 皆可——nal_ref_idc 各家不同，VideoToolbox 编出的是 `0x27`）。
 /// 纯函数（可单测）：mac VT 同步解码无重排缓冲，只敢吃 Baseline（66）；
 /// Main/High（含 B 帧）回退 CPU（rusty 有重排）。
 /// `pub(crate)`：转码硬解 AVC 门控复用。
 pub(crate) fn sps_profile_idc(sps: &[u8]) -> Option<u8> {
-    if sps.len() >= 2 && sps[0] == 0x67 {
+    if sps.len() >= 2 && sps[0] & 0x1F == 7 {
         Some(sps[1])
     } else {
         None
