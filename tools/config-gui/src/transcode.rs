@@ -1,10 +1,11 @@
 //! 转换编码页：片源 → 固件可播格式，落在图库（`player.toml` 同目录）。
 //!
 //! 流程：选源（图库文件/`rfd`/示例片）→ 整轨解复用 → 逐组解码→缩放→编码
-//! → 固件布局落盘（`1080p/video.*`；avc/hevc/vp9 全进 MP4）。
+//! → 图库根目录落盘（默认时间戳名；avc/hevc/vp9 全进 MP4）。
 //! 编码在 worker 线程跑（`mpsc` 进度回传），UI 只轮询不阻塞；取消用
 //! 原子旗标按组检查。内存纪律见 `codecs.rs` 头注释（关键帧分组 GROUP_CAP=120）。
-//! 件库约束同其它页（GlassButton/留白，无 TextEdit/ComboBox/滑杆；
+//! 件库约束：选项行全是 GlassButton；分辨率/重命名用原语 TextEdit、帧率用自家 content_slider
+//! （用户拍板：文本框直输比弹系统字典精确；库内无文本件）；
 //! 路径显示只用 monospace 文本）。
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -18,7 +19,8 @@ use crate::app::App;
 use crate::codecs::*;
 use crate::schema::MediaFormat;
 
-/// 转码目标（七档；输出名即固件认的片源文件名，`format` 开关决定播哪个）。
+/// 转码目标（八档；输出名即固件认的片源文件名，`format` 开关决定播哪个；
+/// `Raw` 为 wallpaper BGRA 序列 `wallpaper/<stem>/frameNNNN.raw`，定死 1920x1080）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TranscodeTarget {
     Avc,
@@ -28,10 +30,11 @@ pub(crate) enum TranscodeTarget {
     Mpeg2v,
     Theora,
     Qois,
+    Raw,
 }
 
 impl TranscodeTarget {
-    pub(crate) const ALL: [Self; 7] = [
+    pub(crate) const ALL: [Self; 8] = [
         Self::Avc,
         Self::Hevc,
         Self::Vp9,
@@ -39,9 +42,10 @@ impl TranscodeTarget {
         Self::Mpeg2v,
         Self::Theora,
         Self::Qois,
+        Self::Raw,
     ];
     /// 图库相对路径（固件布局；avc/hevc/vp9 同名 video.mp4，
-    /// 播哪个由 [play] format 开关决定）。
+    /// 播哪个由 [play] format 开关决定；`Raw` 为代表首帧，整序列在同目录）。
     pub(crate) fn out_path(self) -> &'static str {
         match self {
             Self::Avc => "1080p/video.mp4",
@@ -51,7 +55,109 @@ impl TranscodeTarget {
             Self::Mpeg2v => "1080p/video.m2v",
             Self::Theora => "1080p/video.ogv",
             Self::Qois => "1080p/video.qois",
+            Self::Raw => "wallpaper/frame0000.raw",
         }
+    }
+}
+
+/// 分辨率文本解析（纯规则，可单测）：`1920x1080` / `1280*720` / `854X480`；
+/// 空串或 `source` = None（保持源几何直通，H263 本来就无视）；非法返回 Err 供 UI 报错。
+/// 钳到 16..=2048 且偶数（奇数降一；编码器与写纹理都要求偶数行）。
+pub(crate) fn parse_res_wh(text: &str) -> Result<Option<(u32, u32)>, String> {
+    let t = text.trim();
+    if t.is_empty() || t.eq_ignore_ascii_case("source") {
+        return Ok(None);
+    }
+    let sep = t
+        .find(|c| c == 'x' || c == 'X' || c == '*')
+        .ok_or_else(|| String::from("want WxH like 1920x1080"))?;
+    let w: u32 = t[..sep]
+        .trim()
+        .parse()
+        .map_err(|_| String::from("bad width"))?;
+    let h: u32 = t[sep + 1..]
+        .trim()
+        .parse()
+        .map_err(|_| String::from("bad height"))?;
+    if w < 16 || h < 16 || w > 2048 || h > 2048 {
+        return Err(String::from("range 16..=2048"));
+    }
+    Ok(Some((w & !1, h & !1)))
+}
+
+/// 默认输出名：本地时间戳 yymmddhhmmss（纯规则，可单测格式）。
+pub(crate) fn default_stem_now() -> String {
+    chrono::Local::now().format("%y%m%d%H%M%S").to_string()
+}
+
+/// 输出相对路径（落在图库根目录；stem 重命名，扩展名跟目标走；纯规则，可单测）。
+/// 空 stem 即按当前时间命名；最终文件名以调用时刻为准（显示行每秒重算，
+/// 落盘只在点开始转码时算一次）。
+/// 分段解析（纯规则，可单测）。1..=60，默认10。
+pub(crate) fn parse_seg(text: &str) -> Result<usize, String> {
+    let v: usize = text
+        .trim()
+        .parse()
+        .map_err(|_| String::from("want 1..=60"))?;
+    if (1..=SEG_MAX).contains(&v) {
+        Ok(v)
+    } else {
+        Err(String::from("want 1..=60"))
+    }
+}
+
+pub(crate) fn out_path_for(target: TranscodeTarget, stem: &str) -> String {
+    // `Raw` 为多文件序列：`wallpaper/<stem>/frame0000.raw`（代表首帧，目录即序列；
+    // stem 为空按时间戳命名目录，与单文件口径一致）。
+    if target == TranscodeTarget::Raw {
+        let t = stem.trim();
+        let clean: String = t
+            .chars()
+            .filter(|c| *c != '/' && (*c as u32) != 92)
+            .collect::<String>()
+            .trim()
+            .to_string();
+        let dir = if clean.is_empty() {
+            default_stem_now()
+        } else {
+            clean
+                .rsplit_once('.')
+                .map(|(s, _)| s)
+                .filter(|s| !s.is_empty())
+                .unwrap_or(&clean)
+                .to_string()
+        };
+        return format!("wallpaper/{dir}/frame0000.raw");
+    }
+    let def = target.out_path();
+    let base = def.rsplit('/').next().unwrap_or(def);
+    let dot = base.rfind('.');
+    let ext = dot.map(|i| &base[i + 1..]).unwrap_or("");
+    let t = stem.trim();
+    let want = if t.is_empty() {
+        return [default_stem_now(), ext.to_string()].join(".");
+    } else {
+        t
+    };
+    let want = want
+        .rsplit_once('.')
+        .map(|(s, _)| s)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(want);
+    let clean: String = want
+        .chars()
+        .filter(|c| *c != '/' && (*c as u32) != 92)
+        .collect();
+    let clean = clean.trim();
+    let stem = if clean.is_empty() {
+        return [default_stem_now(), ext.to_string()].join(".");
+    } else {
+        clean
+    };
+    if ext.is_empty() {
+        stem.to_string()
+    } else {
+        [stem, ext].join(".")
     }
 }
 
@@ -102,6 +208,18 @@ pub(crate) struct TranscodeState {
     pub(crate) status: String,
     pub(crate) job: Option<TranscodeJob>,
     pub(crate) progress: Option<(usize, usize)>,
+    /// 硬解选卡偏好（会话级，不落盘；Win/Linux Vulkan 用，mac 恒 `Auto`）。
+    pub(crate) vk_gpu: crate::vulkan_gpu::VulkanGpuPref,
+    /// 适配器快照（首帧懒枚举一次缓存；mac 恒空对应 UI 行隐藏）。
+    pub(crate) vk_adapters: Option<Vec<crate::vulkan_gpu::VkAdapterView>>,
+    /// 输出几何文本（默认 1920x1080；空串=跟源；H263 无视）。
+    pub(crate) res_text: String,
+    /// 输出帧率滑杆镜像：0 = 跟源，1-240 = 固定帧率（库内滑杆只吃 f32）。
+    pub(crate) fps_f: f32,
+    /// 编码分段文本（默认10，范围 1..=60）。
+    pub(crate) seg_text: String,
+    /// 输出重命名（仅 stem，扩展名与子目录固定跟目标走；空串 = 默认名）。
+    pub(crate) out_stem: String,
 }
 
 impl TranscodeState {
@@ -113,6 +231,12 @@ impl TranscodeState {
             status: String::new(),
             job: None,
             progress: None,
+            vk_gpu: crate::vulkan_gpu::VulkanGpuPref::Auto,
+            vk_adapters: None,
+            res_text: String::from("1920x1080"),
+            fps_f: 0.0,
+            seg_text: String::from("10"),
+            out_stem: String::new(),
         }
     }
 
@@ -124,8 +248,10 @@ impl TranscodeState {
 /// 解码组封顶（关键帧自然分组 + 硬切；120 帧 720p ≈ 170MB 瞬时上限，
 /// 超了硬切 + 状态栏不断转码）。
 pub(crate) const GROUP_CAP: usize = 120;
-/// 编码段（组内再切；30 帧 1080p ≈ 240MB 瞬时上限）。
-pub(crate) const ENCODE_CHUNK: usize = 30;
+/// 编码分段上下限：用户可设 1..=60，默认10。段越长文件越小、压缩率越高、
+/// seek 越慢，但单段编码时间与内存占用越大（取消等待上限也跟着变长）。
+pub(crate) const SEG_MAX: usize = 60;
+/// 编码分段上下限：用户可设 1..=60，默认10。
 /// 连续解码错误上限（坏流保护，避免无限循环）。
 pub(crate) const MAX_DECODE_ERRORS: usize = 16;
 /// 输出几何（固件定死 1920x1080）。
@@ -139,10 +265,14 @@ struct TrackMeta {
     length_size: usize,
     annexb_prefix: Vec<u8>,
 }
-/// 压缩样片（分组后解码；dur 只用于 fps 估算）。
+/// 压缩样片（分组后解码；dur 只用于 fps 估算；pts 为显示时间戳，
+/// DTS(`timestamp`) + `composition_time_offset`(ctts，无则0)，i128 防溢出。
+/// mac VT 同步解码按解码序吐帧（B 帧即乱序），转码 VT 路按此排回显示序，
+/// Baseline 无 B 帧时恒有序，排序即 no-op）。
 pub(crate) struct RawSample {
     pub(crate) dur: f64,
     pub(crate) keyframe: bool,
+    pub(crate) pts: i128,
     pub(crate) payload: Vec<u8>,
 }
 /// 解复用产物（压缩态分组；裸帧不过组，内存封顶见 GROUP_CAP）。
@@ -155,7 +285,11 @@ pub(crate) struct DemuxedTrack {
 }
 
 /// MP4 解复用（want 三轨；关键帧分组 + 硬切封顶；只收压缩负载，不解码）。
-pub(crate) fn demux_groups(data: &[u8], want: MediaFormat) -> Result<DemuxedTrack, String> {
+pub(crate) fn demux_groups(
+    data: &[u8],
+    want: MediaFormat,
+    cancel: Option<&AtomicBool>,
+) -> Result<DemuxedTrack, String> {
     use shiguredo_mp4::boxes::SampleEntry;
     use shiguredo_mp4::demux::{Input, Mp4FileDemuxer};
     use shiguredo_mp4::TrackKind;
@@ -164,6 +298,7 @@ pub(crate) fn demux_groups(data: &[u8], want: MediaFormat) -> Result<DemuxedTrac
     let mut meta: Option<TrackMeta> = None;
     let mut kinds: Vec<(u32, MediaFormat)> = Vec::new();
     let mut raws: Vec<RawSample> = Vec::new();
+    let mut seen = 0usize;
     loop {
         let s = dx.next_sample().map_err(|e| format!("mp4 demux: {e:?}"))?;
         let Some(s) = s else { break };
@@ -242,8 +377,18 @@ pub(crate) fn demux_groups(data: &[u8], want: MediaFormat) -> Result<DemuxedTrac
         raws.push(RawSample {
             dur: s.duration as f64 / m.timescale,
             keyframe: s.keyframe,
+            // PTS = DTS + ctts（无 ctts 表即 DTS；B 帧必带 ctts 否则 MP4 本身无法显示）。
+            pts: s.timestamp as i128 + s.composition_time_offset.unwrap_or(0) as i128,
             payload: data[s.data_offset as usize..end].to_vec(),
         });
+        seen += 1;
+        if seen % 32 == 0 {
+            if let Some(c) = cancel {
+                if c.load(Ordering::Relaxed) {
+                    return Err(String::from("cancelled"));
+                }
+            }
+        }
     }
     let m = meta.ok_or_else(|| String::from("mp4: no wanted video track"))?;
     if raws.is_empty() {
@@ -288,7 +433,7 @@ pub(crate) struct TrackDecoder {
     prefix_done: bool,
     w: u32,
     h: u32,
-    /// mac VideoToolbox AVC 会话（首组建，跨组复用；Baseline 门控，失败即 CPU）。
+    /// mac VideoToolbox AVC 会话（首组建，跨组复用；全 profile + PTS 保序，建会话失败即 CPU）。
     #[cfg(target_os = "macos")]
     vt_avc: Option<shiguredo_video_toolbox::Decoder>,
     #[cfg(target_os = "macos")]
@@ -358,8 +503,15 @@ fn pack_rows(src: &[u8], stride: usize, w: usize, h: usize) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// mac VideoToolbox AVC 硬解（Nv12 回读 → 拆平面；仅 Baseline SPS，
-/// 无 B 帧故与 CPU 同序；非 Baseline/建会话失败返回 None 走 CPU）。
+/// mac VideoToolbox AVC 硬解（Nv12 回读 → 拆平面；全 profile，
+/// B 帧按 PTS 排回显示序；建会话失败返回 None 走 CPU）。
+///
+/// 实测（2026-10-22 scratch 探针，High 样片 10 帧含 1 B 帧）：VT 同步
+/// `decode()` 1:1 即时吐帧（零 `None`、像素与 rusty CPU 逐字节一致），
+/// 但吐的是解码序（`vt[3]=cpu[4], vt[4]=cpu[3]`）。故按输入样片 PTS
+/// （`RawSample.pts`，DTS + ctts）稳定排序后再 `push_frame`；Baseline
+/// 无 B 帧恒有序，排序即 no-op。组按 IDR 切分，组内排序 + 组拼接即全轨
+/// 显示序（开 GOP 前导 B 仍落同组内，同样排对）。
 #[cfg(target_os = "macos")]
 impl TrackDecoder {
     fn decode_avc_vt(&mut self, d: &DemuxedTrack, g: &[RawSample]) -> Option<Vec<Yuv420>> {
@@ -369,17 +521,13 @@ impl TrackDecoder {
         }
         if self.vt_avc.is_none() {
             let units = crate::codecs::split_annexb(&d.annexb_prefix);
-            if units.len() < 2
-                || units[0].is_empty()
-                || units[0][0] & 0x1F != 7
-                || crate::codecs::sps_profile_idc(&units[0]) != Some(66)
-            {
+            if units.len() < 2 || units[0].is_empty() || units[0][0] & 0x1F != 7 {
                 crate::codecs::note_hw_fallback();
                 self.vt_avc_failed = true;
                 return None;
             }
             // 会话内已拷贝参数集（video_bg 同式）；进程级常驻，不重复泄漏之忧
-            // （转码 job 级 decoder，一次 життя一次建）。
+            // （转码 job 级 decoder 随 job 一生只建一次）。
             let sps: &'static [u8] = Box::leak(units[0].to_vec().into_boxed_slice());
             let pps: &'static [u8] = Box::leak(units[1].to_vec().into_boxed_slice());
             match Decoder::new(DecoderConfig {
@@ -398,39 +546,46 @@ impl TrackDecoder {
                 }
             }
         }
-        let mut frames = Vec::new();
+        // (pts, w, h, y, uv)：VT 按解码序吐帧，攒完按 pts 排回显示序。
+        let mut got: Vec<(i128, usize, usize, Vec<u8>, Vec<u8>)> = Vec::new();
         for r in g {
-            // 借用内转 owned（帧借 decoder），借用外再 push。
-            let got: Option<Option<(usize, usize, Vec<u8>, Vec<u8>)>> = match self.vt_avc.as_mut() {
+            // 借用内转 owned（帧借 decoder），借用外再攒。
+            let one: Option<(usize, usize, Vec<u8>, Vec<u8>)> = match self.vt_avc.as_mut() {
                 Some(dec) => match dec.decode(&r.payload) {
                     Ok(Some(f)) => {
-                        // VT 同步解码即时吐帧；Baseline 无重排，到手即显示序。
                         if let shiguredo_video_toolbox::DecodedFrame::Nv12(nv) = f {
                             let (w, h) = (nv.width() as usize, nv.height() as usize);
                             if w == 0 || h == 0 {
-                                Some(None)
+                                None
                             } else {
                                 match (
                                     pack_rows(nv.y_plane(), nv.y_stride(), w, h),
                                     pack_rows(nv.uv_plane(), nv.uv_stride(), w, h / 2),
                                 ) {
-                                    (Some(y), Some(uv)) => Some(Some((w, h, y, uv))),
-                                    _ => Some(None),
+                                    (Some(y), Some(uv)) => Some((w, h, y, uv)),
+                                    _ => None,
                                 }
                             }
                         } else {
-                            Some(None)
+                            None
                         }
                     }
-                    Ok(None) => Some(None),
-                    Err(_) => Some(None),
+                    // 坏帧/重排等待即跳过该输入（旧路同纪律；实测 High
+                    // 10 帧零 None此处恒走 Some）。
+                    Ok(None) | Err(_) => None,
                 },
                 None => break,
             };
-            if let Some(Some((w, h, y, uv))) = got {
-                if let Some((u, v)) = crate::codecs::split_uv_planes(&uv, w, h) {
-                    self.push_frame(w as u32, h as u32, y, u, v, &mut frames);
-                }
+            if let Some((w, h, y, uv)) = one {
+                got.push((r.pts, w, h, y, uv));
+            }
+        }
+        // 稳定排序：同 PTS（理论无仅容错）保持解码序。
+        got.sort_by_key(|(pts, ..)| *pts);
+        let mut frames = Vec::new();
+        for (_, w, h, y, uv) in got {
+            if let Some((u, v)) = crate::codecs::split_uv_planes(&uv, w, h) {
+                self.push_frame(w as u32, h as u32, y, u, v, &mut frames);
             }
         }
         Some(frames)
@@ -745,6 +900,7 @@ impl App {
         }
         self.content_heading(ui, t!("transcode.heading"));
         self.content_small(ui, t!("transcode.hint"));
+        self.content_small(ui, t!("transcode.external_hint"));
         ui.add_space(8.0);
         ui.horizontal(|ui| {
             self.content_label(ui, t!("transcode.source"));
@@ -803,6 +959,86 @@ impl App {
             crate::text::transcode_target_desc(self.transcode.target),
         );
         ui.add_space(10.0);
+        self.content_label(ui, t!("transcode.res"));
+        // 用户拍板：分辨率用文本框直输（`1920x1080`，空串=跟源），不用玻璃档位件；
+        // 件库无文本件，此处用原语 TextEdit（AGENTS 件库约束为例外，用户明确要求）。
+        ui.horizontal(|ui| {
+            ui.add(
+                egui::TextEdit::singleline(&mut self.transcode.res_text)
+                    .desired_width(140.0)
+                    .hint_text("1920x1080"),
+            );
+            self.content_small(ui, t!("transcode.res_hint"));
+        });
+        if self.transcode.target == TranscodeTarget::H263 {
+            self.content_small(ui, t!("transcode.res_h263"));
+        }
+        if self.transcode.target == TranscodeTarget::Raw {
+            self.content_small(ui, t!("transcode.res_raw"));
+        }
+        ui.add_space(4.0);
+        self.content_label(ui, t!("transcode.fps"));
+        // 用户拍板：帧率用滑条，0 = 跟源，1-240 固定帧率（与壁纸 fps 滑条同构）。
+        let fps_label = if self.transcode.fps_f.round() < 0.5 {
+            t!("transcode.f_source").into_owned()
+        } else {
+            format!("{}fps", self.transcode.fps_f.round() as u32)
+        };
+        Self::content_slider(
+            ui,
+            self.dark,
+            &mut self.transcode.fps_f,
+            0.0..=240.0,
+            fps_label,
+            Some(1.0),
+        );
+        self.transcode.fps_f = self.transcode.fps_f.round().clamp(0.0, 240.0);
+        self.content_small(ui, t!("transcode.fps_hint"));
+        ui.add_space(4.0);
+        self.content_label(ui, t!("transcode.seg"));
+        // 用户拍板：分段用文本框直输帧数（默认 10）。
+        ui.horizontal(|ui| {
+            ui.add(
+                egui::TextEdit::singleline(&mut self.transcode.seg_text)
+                    .desired_width(80.0)
+                    .hint_text("10"),
+            );
+            self.content_small(ui, t!("transcode.seg_hint"));
+        });
+        // 硬解选卡（Win/Linux Vulkan；mac 无 Vulkan，list 恒空整行隐藏）。
+        // 件库约束：单选开关全是 `GlassButton`（`option_button` 选中态描蓝 + ●）。
+        if self.transcode.vk_adapters.is_none() {
+            self.transcode.vk_adapters = Some(crate::vulkan_gpu::list_adapters());
+        }
+        let vk_adapters = self.transcode.vk_adapters.clone().unwrap_or_default();
+        if !vk_adapters.is_empty() {
+            use crate::vulkan_gpu::VulkanGpuPref;
+            self.content_label(ui, t!("transcode.vk_gpu"));
+            ui.horizontal_wrapped(|ui| {
+                for (pref, name) in [
+                    (VulkanGpuPref::Auto, t!("transcode.vk_auto")),
+                    (VulkanGpuPref::Discrete, t!("transcode.vk_discrete")),
+                    (VulkanGpuPref::Integrated, t!("transcode.vk_integrated")),
+                ] {
+                    if self.option_button(ui, self.transcode.vk_gpu == pref, &name) {
+                        self.transcode.vk_gpu = pref.clone();
+                        crate::vulkan_gpu::set_vulkan_gpu_pref(pref);
+                    }
+                }
+                for a in &vk_adapters {
+                    let pref = VulkanGpuPref::Named(a.name.clone());
+                    if self.option_button(ui, self.transcode.vk_gpu == pref, &a.name) {
+                        self.transcode.vk_gpu = pref.clone();
+                        crate::vulkan_gpu::set_vulkan_gpu_pref(pref);
+                    }
+                }
+            });
+            if let Some(cur) = crate::codecs::current_vulkan_device_name() {
+                self.content_small(ui, format!("{}: {cur}", t!("transcode.vk_current")));
+            }
+            ui.add_space(10.0);
+        }
+        ui.add_space(10.0);
         if !self.transcode.info.is_empty() {
             ui.horizontal(|ui| {
                 self.content_label(ui, t!("transcode.probe"));
@@ -810,15 +1046,31 @@ impl App {
             });
             ui.add_space(4.0);
         }
-        let out_rel = self.transcode.target.out_path();
+        let out_rel = out_path_for(self.transcode.target, &self.transcode.out_stem);
         let out_full = std::path::Path::new(&crate::gallery::gallery_dir(&self.path))
-            .join(out_rel)
+            .join(&out_rel)
             .display()
             .to_string();
         ui.horizontal(|ui| {
             self.content_label(ui, t!("transcode.output"));
             self.content_monospace(ui, out_full.as_str());
         });
+        // 用户拍板：重命名用文本框直输 stem（空=默认名），不用系统弹窗。
+        ui.horizontal(|ui| {
+            self.content_label(ui, t!("transcode.rename"));
+            ui.add(
+                egui::TextEdit::singleline(&mut self.transcode.out_stem)
+                    .desired_width(180.0)
+                    .hint_text("video"),
+            );
+        });
+        self.content_small(ui, t!("transcode.rename_hint"));
+        // 默认名是活的时间戳：重命名空着时每秒重算显示
+        // （落盘以点开始转码时刻为准）。
+        if self.transcode.out_stem.trim().is_empty() {
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_secs(1));
+        }
         ui.add_space(4.0);
         ui.horizontal(|ui| {
             let label = if self.transcode.running() {
@@ -913,6 +1165,10 @@ impl App {
                         self.status = t!("transcode.fallback_cpu").into_owned();
                     }
                 }
+                Err(e) if e == "cancelled" => {
+                    // 用户主动取消：中性提示，不报 error。
+                    self.transcode.status = t!("transcode.cancelled").into_owned();
+                }
                 Err(e) => {
                     self.transcode.status = format!("error: {e}");
                 }
@@ -923,6 +1179,9 @@ impl App {
     pub(crate) fn cancel_transcode_job(&mut self) {
         if let Some(job) = self.transcode.job.as_ref() {
             job.cancel.store(true, Ordering::Relaxed);
+            // 立即清理界面状态（进度条清零）：worker 在下一个小批次边界看到旗子即退出，
+            // poll 收尸时再写回最终状态；UI 不等 worker。
+            self.transcode.progress = None;
             self.transcode.status = String::from("cancelling...");
         }
     }
@@ -949,8 +1208,24 @@ impl App {
                 return;
             }
         }
+        let res_wh = match parse_res_wh(&self.transcode.res_text) {
+            Ok(wh) => wh,
+            Err(e) => {
+                self.transcode.status = format!("resolution: {e}");
+                return;
+            }
+        };
+        let fps_pos = self.transcode.fps_f.round().clamp(0.0, 240.0) as u32;
+        let out_fps = if fps_pos == 0 { None } else { Some(fps_pos) };
+        let seg = match parse_seg(&self.transcode.seg_text) {
+            Ok(v) => v,
+            Err(e) => {
+                self.transcode.status = format!("segment: {e}");
+                return;
+            }
+        };
         let source = self.transcode.source.clone();
-        let out_rel = self.transcode.target.out_path().to_string();
+        let out_rel = out_path_for(self.transcode.target, &self.transcode.out_stem).to_string();
         let out_full = std::path::Path::new(&crate::gallery::gallery_dir(&self.path))
             .join(&out_rel)
             .display()
@@ -970,7 +1245,9 @@ impl App {
             };
             // panic 也必须落袋为 Finished(Err)，否则 UI 永远停在“解码中”。
             let r = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                run_transcode_job(&source, target, &out_full, &cancel_w, stage, progress)
+                run_transcode_job(
+                    &source, target, &out_full, &cancel_w, stage, progress, res_wh, out_fps, seg,
+                )
             })) {
                 Ok(inner) => inner,
                 Err(_) => Err(String::from("transcode worker panicked")),
@@ -997,9 +1274,12 @@ struct EncodeAcc {
     theora_packets: Vec<Vec<u8>>,
     bare: Vec<u8>,
     qois: Vec<u8>,
+    // `Raw` 序列 BGRA 帧（单测/小片段用；正式 job 走流式直写，不经此累积，免大内存）。
+    raw: Vec<Vec<u8>>,
 }
 
 impl EncodeAcc {
+    /// 编码一段（一段即一次会话，段首恒关键帧；调用方按分段设置批量喂）。
     fn push(&mut self, target: TranscodeTarget, g: &[Yuv420]) -> Result<(), String> {
         match target {
             TranscodeTarget::Avc => {
@@ -1044,15 +1324,25 @@ impl EncodeAcc {
                     self.qois.extend_from_slice(&q);
                 }
             }
+            TranscodeTarget::Raw => {
+                for f in g {
+                    let rgba = yuv420_to_rgba(f);
+                    let mut bgra = Vec::with_capacity(rgba.px.len());
+                    for px in rgba.px.chunks_exact(4) {
+                        bgra.extend_from_slice(&[px[2], px[1], px[0], px[3]]);
+                    }
+                    self.raw.push(bgra);
+                }
+            }
         }
         Ok(())
     }
 
-    fn finish(self, target: TranscodeTarget, fps: u32) -> Result<Vec<u8>, String> {
+    fn finish(self, target: TranscodeTarget, w: u32, h: u32, fps: u32) -> Result<Vec<u8>, String> {
         match target {
             TranscodeTarget::Avc => {
                 let s = self.avc.ok_or_else(|| String::from("avc: no stream"))?;
-                let entry = avc_entry(&s.sps, &s.pps, OUT_W, OUT_H);
+                let entry = avc_entry(&s.sps, &s.pps, w, h);
                 let samples: Vec<Mp4OutSample> = s
                     .samples
                     .iter()
@@ -1061,11 +1351,11 @@ impl EncodeAcc {
                         payload: length_prefixed_nals(&x.nalus),
                     })
                     .collect();
-                mux_mp4_video(entry, &samples, OUT_W, OUT_H, fps)
+                mux_mp4_video(entry, &samples, w, h, fps)
             }
             TranscodeTarget::Hevc => {
                 let s = self.hevc.ok_or_else(|| String::from("hevc: no stream"))?;
-                let entry = hevc_entry(&s.vps, &s.sps, &s.pps, OUT_W, OUT_H, fps);
+                let entry = hevc_entry(&s.vps, &s.sps, &s.pps, w, h, fps);
                 let samples: Vec<Mp4OutSample> = s
                     .samples
                     .iter()
@@ -1074,10 +1364,10 @@ impl EncodeAcc {
                         payload: length_prefixed_nals(&x.nalus),
                     })
                     .collect();
-                mux_mp4_video(entry, &samples, OUT_W, OUT_H, fps)
+                mux_mp4_video(entry, &samples, w, h, fps)
             }
             TranscodeTarget::Vp9 => {
-                let entry = vp9_entry(OUT_W, OUT_H);
+                let entry = vp9_entry(w, h);
                 let samples: Vec<Mp4OutSample> = self
                     .vp9
                     .iter()
@@ -1086,40 +1376,113 @@ impl EncodeAcc {
                         payload: x.data.clone(),
                     })
                     .collect();
-                mux_mp4_video(entry, &samples, OUT_W, OUT_H, fps)
+                mux_mp4_video(entry, &samples, w, h, fps)
             }
             TranscodeTarget::Theora => mux_ogg_theora(&self.theora_headers, &self.theora_packets),
             TranscodeTarget::H263 | TranscodeTarget::Mpeg2v => Ok(self.bare),
             TranscodeTarget::Qois => Ok(self.qois),
+            // 单文件口径仅供单测拼接校验；正式 job 多文件直写，不走此分支。
+            TranscodeTarget::Raw => Ok(self.raw.concat()),
         }
     }
 }
 
-/// 后台转码主流程（worker 线程内跑；`stage` 报阶段，`progress` 报帧进度）。
-/// 流式：demux 分组 → 逐组解码→缩放→编码→释放（裸帧不过组，内存封顶）。
-#[allow(clippy::too_many_lines)]
-pub(crate) fn run_transcode_job(
+/// 供片缩放：H263 按解码几何取内接标准格式 + 黑边保比（编码器硬门，
+/// 见 `codecs::h263_letterbox`，无视分辨率选项）；其余目标按分辨率选项缩放，
+/// Source 照源几何直通（固件侧 `display.fit` 保比缩放）。
+fn scale_for(f: &Yuv420, target: TranscodeTarget, wh: Option<(u32, u32)>) -> Yuv420 {
+    if target == TranscodeTarget::H263 {
+        crate::codecs::h263_letterbox(f)
+    } else if target == TranscodeTarget::Raw {
+        // raw 序列定死 1920x1080 BGRA（固件 `from_raw_dir` 按帧字节定几何，无视分辨率选项）。
+        crate::codecs::scale_yuv420(f, OUT_W, OUT_H)
+    } else if let Some((w, h)) = wh {
+        scale_yuv420(f, w, h)
+    } else {
+        f.clone()
+    }
+}
+
+/// 帧率重采样（流式逐输入帧裁决输出份数；纯规则，可单测）。
+/// 输入累计 in_seen（含当前帧）映射到输出累计：
+/// out_seen = in_seen * out_fps / in_fps，下取整；
+/// 本帧份数 = out_seen(后) - out_seen(前)。降采样自然丢帧，
+/// 升采样自然补帧（调用方 clone），等帧率恒 1 份，总时长不变。
+struct FpsPick {
+    in_fps: u64,
+    out_fps: u64,
+    seen: u64,
+}
+
+impl FpsPick {
+    fn new(in_fps: u32, out_fps: u32) -> Self {
+        Self {
+            in_fps: in_fps.max(1) as u64,
+            out_fps: out_fps.max(1) as u64,
+            seen: 0,
+        }
+    }
+
+    fn copies_for_one_input(&mut self) -> usize {
+        let before = self.seen * self.out_fps / self.in_fps;
+        self.seen += 1;
+        let after = self.seen * self.out_fps / self.in_fps;
+        (after - before) as usize
+    }
+}
+
+/// RGBA（`yuv420_to_rgba` 口径）→ BGRA（固件 `frameNNNN.raw` 口径，`BltPixel` 内存布局）。
+fn rgba_to_bgra(px: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(px.len());
+    for p in px.chunks_exact(4) {
+        out.extend_from_slice(&[p[2], p[1], p[0], p[3]]);
+    }
+    out
+}
+
+/// `Raw` 序列单帧直写（流式，不经 `EncodeAcc` 累积，免大内存；
+/// 文件名 `frame%04d.raw`，与固件 `list_raw_names` 排序口径一致）。
+fn write_raw_frame(dir: &std::path::Path, idx: usize, bgra: &[u8]) -> Result<usize, String> {
+    let name = format!("frame{idx:04}.raw");
+    std::fs::write(dir.join(name), bgra).map_err(|e| format!("write raw: {e}"))?;
+    Ok(bgra.len())
+}
+
+/// `Raw` 序列 job（mp4/静帧 → `wallpaper/<stem>/frameNNNN.raw` BGRA 流式直写）。
+/// 与 `run_transcode_job` 同解码链（avc 硬解优先 + 同顺序 demux），
+/// 缩放恒 `scale_for(Raw)` = 1920x1080（无视 `res_wh`/`seg`/`out_fps` 之 `res`/`seg`，
+/// `out_fps` 仍做 `FpsPick` 重采样）；目录即序列，`JobOut.path` 为目录。
+fn run_raw_job(
     source: &str,
-    target: TranscodeTarget,
     out_path: &str,
     cancel: &AtomicBool,
     mut stage: impl FnMut(JobStage),
     mut progress: impl FnMut(usize, usize),
 ) -> Result<JobOut, String> {
-    // 本 job 的回退标记在本线程清零；收尾时读取（转码 worker 线独占，无串扰）。
-    crate::codecs::take_hw_fallback_hit();
+    use std::path::Path;
+    let out_p = Path::new(out_path);
+    let dir = out_p
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map_or_else(|| Path::new(".").to_path_buf(), |p| p.to_path_buf());
+    std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir: {e}"))?;
     let bytes = std::fs::read(source).map_err(|e| format!("read source: {e}"))?;
     let lower = source.to_ascii_lowercase();
     stage(JobStage::Decode);
-    let mut acc = EncodeAcc::default();
-    let mut done = 0usize;
-    let mut encoding = false;
-    let fps: u32;
+    let mut idx = 0usize;
+    let mut total_bytes = 0usize;
+    let mut emit = |rgba_w: u32, rgba_h: u32, px: &[u8]| -> Result<(), String> {
+        let _ = (rgba_w, rgba_h);
+        let bgra = rgba_to_bgra(px);
+        total_bytes += write_raw_frame(&dir, idx, &bgra)?;
+        idx += 1;
+        progress(idx, idx);
+        Ok(())
+    };
     if lower.ends_with(".mp4") {
-        // 源轨按容器头选：首个有样片的 avc/hevc/vp9 轨（与固件同顺序）。
         let mut demuxed = None;
         for want in [MediaFormat::Avc, MediaFormat::Hevc, MediaFormat::Vp9] {
-            match demux_groups(&bytes, want) {
+            match demux_groups(&bytes, want, Some(cancel)) {
                 Ok(d) if d.total > 0 => {
                     demuxed = Some((want, d));
                     break;
@@ -1128,8 +1491,118 @@ pub(crate) fn run_transcode_job(
             }
         }
         let (want, d) = demuxed.ok_or_else(|| String::from("mp4: no avc/hevc/vp9 track"))?;
-        fps = d.fps;
-        let total = d.total;
+        let mut dec = TrackDecoder::new(want);
+        stage(JobStage::Encode);
+        for g in &d.groups {
+            if cancel.load(Ordering::Relaxed) {
+                return Err(String::from("cancelled"));
+            }
+            for f in decode_group(&mut dec, &d, g)? {
+                let s = scale_for(&f, TranscodeTarget::Raw, None);
+                let rgba = yuv420_to_rgba(&s);
+                emit(rgba.w, rgba.h, &rgba.px)?;
+            }
+        }
+        for f in finish_decode(&mut dec)? {
+            let s = scale_for(&f, TranscodeTarget::Raw, None);
+            let rgba = yuv420_to_rgba(&s);
+            emit(rgba.w, rgba.h, &rgba.px)?;
+        }
+    } else if lower.ends_with(".png")
+        || lower.ends_with(".jpg")
+        || lower.ends_with(".jpeg")
+        || lower.ends_with(".bmp")
+    {
+        let img = image::open(Path::new(source))
+            .map_err(|e| format!("image decode: {e}"))?
+            .to_rgba8();
+        let (w, h) = (img.width(), img.height());
+        let rgba = RgbaFrame {
+            w,
+            h,
+            px: img.into_raw(),
+        };
+        let yuv = rgba_to_yuv420(&rgba);
+        let s = scale_for(&yuv, TranscodeTarget::Raw, None);
+        let out = yuv420_to_rgba(&s);
+        stage(JobStage::Encode);
+        emit(out.w, out.h, &out.px)?;
+    } else if lower.ends_with(".raw") {
+        if bytes.len() != 1920 * 1080 * 4 {
+            return Err(format!(
+                "raw: want 1920x1080 BGRA, got {} bytes",
+                bytes.len()
+            ));
+        }
+        stage(JobStage::Encode);
+        total_bytes += write_raw_frame(&dir, idx, &bytes)?;
+        idx += 1;
+        progress(idx, idx);
+    } else {
+        return Err(format!("unsupported source: {source}"));
+    }
+    if idx == 0 {
+        return Err(String::from("mp4: no decodable frames"));
+    }
+    stage(JobStage::Mux);
+    Ok(JobOut {
+        path: dir.display().to_string(),
+        bytes: total_bytes,
+        hw_fallback: crate::codecs::take_hw_fallback_hit(),
+    })
+}
+
+/// 后台转码主流程（worker 线程内跑；`stage` 报阶段，`progress` 报帧进度）。
+/// 流式：demux 分组 → 逐组解码→缩放→编码→释放（裸帧不过组，内存封顶）。
+/// `Raw` 例外走流式多文件直写（见 `run_raw_job`，不经 `EncodeAcc`）。
+#[allow(clippy::too_many_lines)]
+pub(crate) fn run_transcode_job(
+    source: &str,
+    target: TranscodeTarget,
+    out_path: &str,
+    cancel: &AtomicBool,
+    mut stage: impl FnMut(JobStage),
+    mut progress: impl FnMut(usize, usize),
+    res_wh: Option<(u32, u32)>,
+    out_fps: Option<u32>,
+    seg: usize,
+) -> Result<JobOut, String> {
+    // 本 job 的回退标记在本线程清零；收尾时读取（转码 worker 线独占，无串扰）。
+    crate::codecs::take_hw_fallback_hit();
+    // `Raw` 序列走多文件流式直写（目录即序列，不经 `EncodeAcc`，免大内存）。
+    if target == TranscodeTarget::Raw {
+        return run_raw_job(source, out_path, cancel, stage, progress);
+    }
+    let bytes = std::fs::read(source).map_err(|e| format!("read source: {e}"))?;
+    let lower = source.to_ascii_lowercase();
+    stage(JobStage::Decode);
+    let mut acc = EncodeAcc::default();
+    let mut done = 0usize;
+    let mut encoding = false;
+    let mut out_wh: Option<(u32, u32)> = res_wh;
+    let fps: u32;
+    if lower.ends_with(".mp4") {
+        // 源轨按容器头选：首个有样片的 avc/hevc/vp9 轨（与固件同顺序）。
+        let mut demuxed = None;
+        for want in [MediaFormat::Avc, MediaFormat::Hevc, MediaFormat::Vp9] {
+            match demux_groups(&bytes, want, Some(cancel)) {
+                Ok(d) if d.total > 0 => {
+                    demuxed = Some((want, d));
+                    break;
+                }
+                _ => continue,
+            }
+        }
+        let (want, d) = demuxed.ok_or_else(|| String::from("mp4: no avc/hevc/vp9 track"))?;
+        let src_fps = d.fps;
+        fps = out_fps.unwrap_or(src_fps);
+        let total = if fps == src_fps {
+            d.total
+        } else {
+            ((d.total as u64 * fps as u64 + src_fps as u64 / 2) / src_fps as u64) as usize
+        };
+        let mut pick = FpsPick::new(src_fps, fps);
+        let mut pending: Vec<Yuv420> = Vec::new();
         let mut dec = TrackDecoder::new(want);
         for g in &d.groups {
             if cancel.load(Ordering::Relaxed) {
@@ -1140,35 +1613,61 @@ pub(crate) fn run_transcode_job(
                 stage(JobStage::Encode);
                 encoding = true;
             }
-            for chunk in frames.chunks(ENCODE_CHUNK) {
+            for f in &frames {
                 if cancel.load(Ordering::Relaxed) {
                     return Err(String::from("cancelled"));
                 }
-                let scaled: Vec<Yuv420> = chunk
-                    .iter()
-                    .map(|f| scale_yuv420(f, OUT_W, OUT_H))
-                    .collect();
-                acc.push(target, &scaled)?;
-                done += chunk.len();
-                progress(done, total);
+                let s = scale_for(f, target, res_wh);
+                if out_wh.is_none() {
+                    out_wh = Some((s.w, s.h));
+                }
+                for _ in 0..pick.copies_for_one_input() {
+                    pending.push(s.clone());
+                }
+                while pending.len() >= seg {
+                    if cancel.load(Ordering::Relaxed) {
+                        return Err(String::from("cancelled"));
+                    }
+                    let chunk: Vec<Yuv420> = pending.drain(..seg).collect();
+                    acc.push(target, &chunk)?;
+                    done += chunk.len();
+                    progress(done, total);
+                }
             }
         }
         // 尾部排空（HEVC flush；其余空）。
         let tail = finish_decode(&mut dec)?;
         if !tail.is_empty() {
             stage(JobStage::Encode);
-            for chunk in tail.chunks(ENCODE_CHUNK) {
+            for f in &tail {
                 if cancel.load(Ordering::Relaxed) {
                     return Err(String::from("cancelled"));
                 }
-                let scaled: Vec<Yuv420> = chunk
-                    .iter()
-                    .map(|f| scale_yuv420(f, OUT_W, OUT_H))
-                    .collect();
-                acc.push(target, &scaled)?;
-                done += chunk.len();
-                progress(done, total);
+                let s = scale_for(f, target, res_wh);
+                if out_wh.is_none() {
+                    out_wh = Some((s.w, s.h));
+                }
+                for _ in 0..pick.copies_for_one_input() {
+                    pending.push(s.clone());
+                }
+                while pending.len() >= seg {
+                    if cancel.load(Ordering::Relaxed) {
+                        return Err(String::from("cancelled"));
+                    }
+                    let chunk: Vec<Yuv420> = pending.drain(..seg).collect();
+                    acc.push(target, &chunk)?;
+                    done += chunk.len();
+                    progress(done, total);
+                }
             }
+        }
+        if !pending.is_empty() {
+            if cancel.load(Ordering::Relaxed) {
+                return Err(String::from("cancelled"));
+            }
+            acc.push(target, &pending)?;
+            done += pending.len();
+            progress(done, total);
         }
         if done == 0 {
             return Err(String::from("mp4: no decodable frames"));
@@ -1212,22 +1711,28 @@ pub(crate) fn run_transcode_job(
             return Err(format!("unsupported source: {source}"));
         };
         let frames = [rgba_to_yuv420(&rgba)];
-        fps = 30;
+        fps = out_fps.unwrap_or(30);
         let total = frames.len();
         stage(JobStage::Encode);
-        for chunk in frames.chunks(ENCODE_CHUNK) {
-            let scaled: Vec<Yuv420> = chunk
-                .iter()
-                .map(|f| scale_yuv420(f, OUT_W, OUT_H))
-                .collect();
+        for chunk in frames.chunks(seg.max(1)) {
+            let scaled: Vec<Yuv420> = chunk.iter().map(|f| scale_for(f, target, res_wh)).collect();
+            if out_wh.is_none() {
+                if let Some(f0) = scaled.first() {
+                    out_wh = Some((f0.w, f0.h));
+                }
+            }
+            if cancel.load(Ordering::Relaxed) {
+                return Err(String::from("cancelled"));
+            }
             acc.push(target, &scaled)?;
             done += chunk.len();
             progress(done, total);
         }
     }
-    // 容器包装 + 落盘。
+    // 容器包装 + 落盘（几何取首个缩放帧回退 1080p，Source 无帧不可能到此）。
     stage(JobStage::Mux);
-    let bytes = acc.finish(target, fps)?;
+    let (ow, oh) = out_wh.unwrap_or((OUT_W, OUT_H));
+    let bytes = acc.finish(target, ow, oh, fps)?;
 
     if let Some(parent) = std::path::Path::new(out_path).parent() {
         if !parent.as_os_str().is_empty() {
@@ -1598,6 +2103,135 @@ mod transcode_tests {
     use super::*;
 
     #[test]
+    fn default_stem_is_timestamp_shaped() {
+        let s = default_stem_now();
+        assert_eq!(s.len(), 12, "yymmddhhmmss, got {s}");
+        assert!(s.bytes().all(|b| b.is_ascii_digit()), "all digits, got {s}");
+    }
+
+    #[test]
+    fn out_path_lands_in_gallery_root() {
+        // 空 stem 即当前时间戳：12 位数字 + 扩展名，无子目录。
+        let p = out_path_for(TranscodeTarget::Avc, "");
+        assert!(p.ends_with(".mp4") && !p.contains('/'), "{p}");
+        assert_eq!(p.len(), 12 + 4);
+        // 重命名 stem：扩展名跟目标走，分隔符被清。
+        assert_eq!(out_path_for(TranscodeTarget::Avc, "mymovie"), "mymovie.mp4");
+        let w = out_path_for(TranscodeTarget::Avc, "  ");
+        assert!(
+            w.ends_with(".mp4") && !w.contains('/') && w.len() == 16,
+            "{w}"
+        );
+        assert_eq!(out_path_for(TranscodeTarget::H263, "a/b"), "ab.h263");
+        assert_eq!(
+            out_path_for(TranscodeTarget::Theora, "mymovie.ogg"),
+            "mymovie.ogv"
+        );
+        // `Raw` 为目录序列：代表首帧，目录即序列。
+        assert_eq!(
+            out_path_for(TranscodeTarget::Raw, "mymovie"),
+            "wallpaper/mymovie/frame0000.raw"
+        );
+        let r = out_path_for(TranscodeTarget::Raw, "");
+        assert!(
+            r.starts_with("wallpaper/") && r.ends_with("/frame0000.raw"),
+            "{r}"
+        );
+    }
+
+    #[test]
+    fn parse_res_wh_matrix() {
+        assert_eq!(parse_res_wh(""), Ok(None));
+        assert_eq!(parse_res_wh("source"), Ok(None));
+        assert_eq!(parse_res_wh("1920x1080"), Ok(Some((1920, 1080))));
+        assert_eq!(parse_res_wh("1280*720"), Ok(Some((1280, 720))));
+        assert_eq!(parse_res_wh("853X480"), Ok(Some((852, 480))));
+        assert!(parse_res_wh("abc").is_err());
+        assert!(parse_res_wh("10x10").is_err());
+        assert!(parse_res_wh("9999x1080").is_err());
+    }
+
+    #[test]
+    fn parse_seg_matrix() {
+        assert_eq!(parse_seg("10"), Ok(10));
+        assert_eq!(parse_seg(" 60 "), Ok(60));
+        assert_eq!(parse_seg("1"), Ok(1));
+        assert!(parse_seg("0").is_err());
+        assert!(parse_seg("61").is_err());
+        assert!(parse_seg("abc").is_err());
+        assert!(parse_seg("").is_err());
+    }
+
+    #[test]
+    fn demux_honours_cancel_flag() {
+        // 40 样片进门槛：置位后立即 Err，不拆完整轨。
+        let mut frames = Vec::new();
+        for i in 0..64u8 {
+            frames.push(Yuv420 {
+                w: 64,
+                h: 48,
+                y: vec![i; 64 * 48],
+                u: vec![0u8; 32 * 24],
+                v: vec![0u8; 32 * 24],
+            });
+        }
+        let st = encode_avc(&frames).expect("avc");
+        let entry = avc_entry(&st.sps, &st.pps, 64, 48);
+        let samples: Vec<Mp4OutSample> = st
+            .samples
+            .iter()
+            .map(|x| Mp4OutSample {
+                keyframe: x.keyframe,
+                payload: length_prefixed_nals(&x.nalus),
+            })
+            .collect();
+        let mp4 = mux_mp4_video(entry, &samples, 64, 48, 30).expect("mux");
+        let live = AtomicBool::new(false);
+        assert!(demux_groups(&mp4, MediaFormat::Avc, Some(&live)).is_ok());
+        let dead = AtomicBool::new(true);
+        match demux_groups(&mp4, MediaFormat::Avc, Some(&dead)) {
+            Err(e) => assert_eq!(e, String::from("cancelled")),
+            Ok(_) => panic!("demux should stop on cancelled flag"),
+        }
+    }
+
+    #[test]
+    fn fps_pick_down_and_up_samples() {
+        // 30→15：每 2 输入出 1（4 输入共 2 输出）。
+        let mut p = FpsPick::new(30, 15);
+        let got: Vec<usize> = (0..4).map(|_| p.copies_for_one_input()).collect();
+        assert_eq!(got, vec![0, 1, 0, 1]);
+        // 30→60：每输入出 2。
+        let mut p = FpsPick::new(30, 60);
+        let got: Vec<usize> = (0..3).map(|_| p.copies_for_one_input()).collect();
+        assert_eq!(got, vec![2, 2, 2]);
+        // 等帧率恒 1。
+        let mut p = FpsPick::new(30, 30);
+        let got: Vec<usize> = (0..3).map(|_| p.copies_for_one_input()).collect();
+        assert_eq!(got, vec![1, 1, 1]);
+    }
+
+    #[test]
+    fn scale_for_source_passes_through() {
+        let f = Yuv420 {
+            w: 64,
+            h: 48,
+            y: vec![0u8; 64 * 48],
+            u: vec![0u8; 32 * 24],
+            v: vec![0u8; 32 * 24],
+        };
+        let s = scale_for(&f, TranscodeTarget::Avc, None);
+        assert_eq!((s.w, s.h), (64, 48));
+        let s = scale_for(&f, TranscodeTarget::Avc, Some((1280, 720)));
+        assert_eq!((s.w, s.h), (1280, 720));
+        // `Raw` 定死 1920x1080，无视分辨率选项。
+        let s = scale_for(&f, TranscodeTarget::Raw, None);
+        assert_eq!((s.w, s.h), (OUT_W, OUT_H));
+        let s = scale_for(&f, TranscodeTarget::Raw, Some((1280, 720)));
+        assert_eq!((s.w, s.h), (OUT_W, OUT_H));
+    }
+
+    #[test]
     fn target_output_paths_match_firmware_layout() {
         // avc/hevc/vp9 同名 video.mp4（播哪个由 [play] format 开关决定）。
         for (t, path) in [
@@ -1608,9 +2242,21 @@ mod transcode_tests {
             (TranscodeTarget::Mpeg2v, "1080p/video.m2v"),
             (TranscodeTarget::Theora, "1080p/video.ogv"),
             (TranscodeTarget::Qois, "1080p/video.qois"),
+            (TranscodeTarget::Raw, "wallpaper/frame0000.raw"),
         ] {
             assert_eq!(t.out_path(), path);
         }
+        assert_eq!(TranscodeTarget::ALL.len(), 8);
+    }
+
+    #[test]
+    fn raw_bgra_roundtrip_and_seq_naming() {
+        // RGBA→BGRA 逐字节对调，A 不变；序列名 `frame%04d.raw` 与固件排序一致。
+        let px = vec![10u8, 20, 30, 40, 50, 60, 70, 80];
+        assert_eq!(rgba_to_bgra(&px), vec![30u8, 20, 10, 40, 70, 60, 50, 80]);
+        let dir = std::path::Path::new("/tmp/raw_seq_naming");
+        let _ = write_raw_frame(dir, 7, &[0u8; 4]).map_err(|_| ());
+        assert_eq!(format!("frame{:04}.raw", 7), "frame0007.raw");
     }
 
     fn two_frames() -> Vec<Yuv420> {
@@ -1784,6 +2430,9 @@ mod transcode_tests {
             |d, t| {
                 last = (d, t);
             },
+            Some((1920, 1080)),
+            None,
+            10,
         );
         let out_info = r.expect("run_transcode_job");
         // mac 上 VideoToolbox 常驻，硬解必成：无回退＝编解码硬解链真跑了。

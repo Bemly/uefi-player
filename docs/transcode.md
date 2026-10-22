@@ -20,9 +20,9 @@
 ```text
 片源（mp4[h264/hevc/vp9] / png/jpg/bmp / 1920x1080 raw BGRA，全片）
  → demux 分组（关键帧自然分组 + GROUP_CAP=120 硬切）
- → 逐组：解码（单解码器跑完整轨，状态跨组保持）→ 缩到 1920x1080
- → 30 帧一段编码（段首恒关键帧，拼接恒合法）→ 释放（裸帧不过组）
- → 容器包装 → 图库同名落盘（`1080p/video.*`）
+ → 逐组：解码（单解码器跑完整轨，状态跨组保持）→ 缩到目标几何
+ → 按分段设置批量编码（默认10 帧，段首恒关键帧，拼接恒合法）→ 释放（裸帧不过组）
+ → 容器包装 → 图库根目录落盘（默认时间戳名）
 ```
 通用设计，不针对任何片源特化：B 帧内容同样正确（组内重排由
 `decode_stream` 承担，跨组引用由持续解码器状态承担；硬切处至多
@@ -38,21 +38,24 @@
   （`GROUP_CAP` 120 封顶 ≈ 170MB，超了硬切），组内 30 帧一段缩到
   1920x1080 后立即编码、立即释放；压缩包累积（小），裸帧不过组不驻留。
   解码器整轨只建一次（avc/hevc/vp9 各一），状态跨组保持。
-- 几何：固件定死 1920x1080（`1280x720→×1.5` 纯放大）。
+- 几何：默认文本框 `1920x1080`；留空跟源，H263 无视走内接标准尺寸+黑边；跟源时固件侧 `display.fit` 保比适配。
+- 帧率：滑条 0=跟源（原速），1-240 按此时长重采样（降帧丢帧，升帧补帧，流式不断组）。
+- 取消：点取消后界面立即清零（进度条消失），worker 在下一个小批次边界停下来（解复用每 32 样片、编码每分段查一次），状态显示已取消而不是报错。
 - 色彩：YUV↔RGBA 用 BT.601 全范围整数近似（正向与固件
   `Clip::yuv420_to_bgra` 同式，反向标准逆变换，roundtrip 容差 ±2，测试锁死）。
 
-## 七目标（输出名即固件片源名，`format` 开关决定播哪个）
+## 八目标（默认输出名即固件片源名，`format` 开关决定播哪个；转码页文本框可重命名 stem，扩展名与子目录不变）
 
 | 目标 | 编码器 | 容器/布局 |
 |---|---|---|
-| avc → `1080p/video.mp4` | 硬解优先（mac VideoToolbox H.264 Baseline/CAVLC / Win-Linux Vulkan Video Baseline；段首恒关键帧，30 帧一段与 CPU 时代同语义；失败回退 `less-avc` baseline，1080p 裁剪由轮内 `frame_cropping` 兜底） | `shiguredo_mp4::Mp4FileMuxer`（avc1/avcC + 长度前缀；与固件 demux **同轮子**，回读零口径差） |
-| hevc → `1080p/video.mp4` | 硬解优先（mac VideoToolbox HEVC Main 8-bit / Win-Linux Vulkan Video Main；VPS/SPS/PPS 进 hvcc，in-band 参数集照收；失败回退 `oxideav-h265` registry） | 同 muxer（hvc1/hvcC + 长度前缀；Main 8-bit 420 保守值，level 按帧率取 4.0/4.1） |
-| vp9 → `1080p/video.mp4` | `rusty_vp9`（crf32 + lag8 + speed3） | 同 muxer（vp09/vpcC，裸帧样片；stss 按 keyframe 写） |
-| h263 → `1080p/video.h263` | `oxideav-h263` registry（只要 §5.1.3 标准源格式；测试用 QCIF 176x144） | 裸流 PSC 分隔 |
-| mpeg2v → `1080p/video.m2v` | `oxideav-mpeg12video` registry | 裸基本流（`00 00 01 B3` 起始） |
-| theora → `1080p/video.ogv` | `oxideav-theora` registry intra-only（`qi` 32，setup 用 VP3 默认合成） | `ogg` 组 OggS（三头 + 数据包，同一逻辑流，granule 单调） |
-| qois → `1080p/video.qois` | `qoi` 逐帧 | `u32le len + QOI` 串接（固件同布局） |
+| avc → `./<yymmddhhmmss>.mp4` | 硬解优先（mac VideoToolbox H.264 Baseline/CAVLC / Win-Linux Vulkan Video Baseline；段首恒关键帧，30 帧一段与 CPU 时代同语义；失败回退 `less-avc` baseline，1080p 裁剪由轮内 `frame_cropping` 兜底） | `shiguredo_mp4::Mp4FileMuxer`（avc1/avcC + 长度前缀；与固件 demux **同轮子**，回读零口径差） |
+| hevc → `./<yymmddhhmmss>.mp4` | 硬解优先（mac VideoToolbox HEVC Main 8-bit / Win-Linux Vulkan Video Main；VPS/SPS/PPS 进 hvcc，in-band 参数集照收；失败回退 `oxideav-h265` registry） | 同 muxer（hvc1/hvcC + 长度前缀；Main 8-bit 420 保守值，level 按帧率取 4.0/4.1） |
+| vp9 → `./<yymmddhhmmss>.mp4` | `rusty_vp9`（crf32 + lag8 + speed3） | 同 muxer（vp09/vpcC，裸帧样片；stss 按 keyframe 写） |
+| h263 → `./<yymmddhhmmss>.h263` | `oxideav-h263` registry（只收 §5.1.3 五档标准源格式，生产按源取最大内接档 + 黑边保比，如 1440p 源进 16CIF；固件按帧几何 1:1 左上播） | 裸流 PSC 分隔 |
+| mpeg2v → `./<yymmddhhmmss>.m2v` | `oxideav-mpeg12video` registry | 裸基本流（`00 00 01 B3` 起始） |
+| theora → `./<yymmddhhmmss>.ogv` | `oxideav-theora` registry intra-only（`qi` 32，setup 用 VP3 默认合成） | `ogg` 组 OggS（三头 + 数据包，同一逻辑流，granule 单调） |
+| qois → `./<yymmddhhmmss>.qois` | `qoi` 逐帧 | `u32le len + QOI` 串接（固件同布局） |
+| raw → `wallpaper/<yymmddhhmmss>/frameNNNN.raw` | BGRA 直存（`yuv420_to_rgba` + R/B 对调，与固件 `BltPixel` 同布局） | 多文件序列 `frame%04d.raw` 流式直写（不经 `EncodeAcc`，免大内存；定死 1920x1080，无视分辨率/分段，重命名即目录名） |
 
 avc/hevc/vp9 三档同名 `video.mp4`（播哪个由 `[play] format` 开关决定，与固件
 `video.mp4 优先轨` 语义一致）。裸流只留给无 MP4 封装的格式
@@ -83,8 +86,22 @@ avc/hevc/vp9 三档同名 `video.mp4`（播哪个由 `[play] format` 开关决�
   （PTS 自洽，与源 fps 无关，见 `codecs.rs` 头注释）；AVC Baseline + CAVLC
   （与旧 CPU 输出同 profile，固件解码零风险），HEVC Main 8-bit；B 帧全关
   （in-order 输出，与旧管线同序）。
-  解码只动 AVC（mac 仅 Baseline SPS 才走硬解——VT 同步解码无重排缓冲，
-  Main/High 含 B 帧回退 CPU rusty；Vulkan 侧 `FrameSorter` 保序全 profile 可吃）。
+  解码只动 AVC（mac 全 profile 走硬解：VT 同步 `decode()` 1:1 吐解码序，
+  转码按样片 PTS（DTS + ctts）排回显示序，Baseline 无 B 帧时排序即 no-op，
+  旧 Baseline 门已摘；Vulkan 侧 `FrameSorter` 保序全 profile 可吃）。
+  验证：`transcode_hw::avc_high_decodes_hw_with_pts_reorder`
+ （High 样片 `src/diag/data/video-avc.mp4` 复用，零回退 + 帧数 1:1 + 与 CPU
+  显示序逐帧最佳匹配恒等）。
+  选卡（Win/Linux Vulkan，用户拍板 2026-10-22）：`gpu-video 0.4` 的
+  `create_adapter` 是 first-match（作者留 TODO 没做偏好），但
+  `iter_adapters()` + `AdapterInfo{name/device_type}` 全 public，故不用 fork
+  轮子（`vulkan_gpu::select_vulkan_adapter` 即全部选择逻辑；mac 无 Vulkan
+  转码页该行恒空隐藏）。转码页“硬解显卡”行（`GlassButton` 单选组，
+  件库约束同目标格式行）：自动（=现行 first-match，零行为变化）/ 独显 /
+  核显 / 逐适配器名；未命中回退自动（保硬解不断 job，行下另有“当前：”
+  实际设备名）。偏好会话级不落盘（转码页状态本就不进 `player.toml`），
+  device 缓存以偏好为键，换键下次懒重建。覆盖靠 GUI 内单测
+  （`vulkan_gpu_tests` 纯选择四例全平台可跑；真机枚举 Win/Linux 实机自验）。
   真零拷贝不做（VideoToolbox 只收 CPU 切片、无裸句柄；Vulkan 纹理版产的是
   轮子自建 device 的纹理，跨不过 device，必须外部内存导入，无现货轮子；
   NV12 上传 + 平面拼装是 DMA 级搬运，无像素运算，与动态背景 `video_bg` 同纪律）。

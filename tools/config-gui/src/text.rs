@@ -3,6 +3,7 @@
 use rust_i18n::t;
 
 use crate::app::DecodeTab;
+use crate::display::{BarColor, DisplayAlign, DisplayFit};
 use crate::schema::*;
 
 pub(crate) fn level_desc(v: AccelLevel) -> String {
@@ -218,6 +219,46 @@ pub(crate) fn decode_fetch_desc(v: Option<FeedMode>) -> String {
     }
 }
 
+/// 画面适配显示名（存盘仍用 `file_str` 小写串，与固件同构）。
+pub(crate) fn display_fit_desc(v: DisplayFit) -> String {
+    match v {
+        DisplayFit::Stretch => t!("display.desc_fit_stretch"),
+        DisplayFit::Fit => t!("display.desc_fit_fit"),
+        DisplayFit::Cover => t!("display.desc_fit_cover"),
+        DisplayFit::ScaleDown => t!("display.desc_fit_scale_down"),
+        DisplayFit::Native => t!("display.desc_fit_native"),
+    }
+    .into_owned()
+}
+
+/// 黑边填充色说明（预设走本地化，自定义走 `#rrggbb (r,g,b)`；存盘一律 hex 小写无 '#'）。
+pub(crate) fn display_bar_desc(v: BarColor) -> String {
+    if v == BarColor::BLACK {
+        t!("display.desc_bar_black")
+    } else if v == BarColor::WHITE {
+        t!("display.desc_bar_white")
+    } else if v == BarColor::GRAY {
+        t!("display.desc_bar_gray")
+    } else if v == BarColor::NAVY {
+        t!("display.desc_bar_navy")
+    } else {
+        return format!("#{} ({},{},{})", v.to_hex(), v.r, v.g, v.b);
+    }
+    .into_owned()
+}
+
+/// 画面对齐显示名（存盘仍用小写串；stretch 忽略对齐）。
+pub(crate) fn display_align_desc(v: DisplayAlign) -> String {
+    match v {
+        DisplayAlign::Center => t!("display.desc_align_center"),
+        DisplayAlign::Left => t!("display.desc_align_left"),
+        DisplayAlign::Right => t!("display.desc_align_right"),
+        DisplayAlign::Top => t!("display.desc_align_top"),
+        DisplayAlign::Bottom => t!("display.desc_align_bottom"),
+    }
+    .into_owned()
+}
+
 /// 转码目标显示名（输出名见 `TranscodeTarget::out_path`，与固件片源名一致）。
 pub(crate) fn transcode_target_name(v: crate::transcode::TranscodeTarget) -> String {
     use crate::transcode::TranscodeTarget;
@@ -229,6 +270,7 @@ pub(crate) fn transcode_target_name(v: crate::transcode::TranscodeTarget) -> Str
         TranscodeTarget::Mpeg2v => t!("transcode.t_mpeg2v"),
         TranscodeTarget::Theora => t!("transcode.t_theora"),
         TranscodeTarget::Qois => t!("transcode.t_qois"),
+        TranscodeTarget::Raw => t!("transcode.t_raw"),
     }
     .into_owned()
 }
@@ -244,6 +286,7 @@ pub(crate) fn transcode_target_desc(v: crate::transcode::TranscodeTarget) -> Str
         TranscodeTarget::Mpeg2v => t!("transcode.d_mpeg2v"),
         TranscodeTarget::Theora => t!("transcode.d_theora"),
         TranscodeTarget::Qois => t!("transcode.d_qois"),
+        TranscodeTarget::Raw => t!("transcode.d_raw"),
     }
     .into_owned()
 }
