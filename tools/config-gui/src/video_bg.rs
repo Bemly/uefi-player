@@ -12,7 +12,7 @@
 //! `demux_groups`；真零拷贝走不通（VideoToolbox 轮子只给 CPU 切片、无裸句柄；
 //! Vulkan 纹理版产的是轮子自建 device 的纹理，跨不过 device），故 NV12 上传 +
 //! WGSL 转换是本仓轮子下的 GPU 上限。CPU 只剩压缩包搬运 + `write_texture`
-//! 提交，零像素数学；上传量为旧 RGBA 路的 3/8；显示封顶 15fps + 失焦停推。
+//! 提交，零像素数学；上传量为旧 RGBA 路的 3/8；显示与片源同帧率 + 失焦停推。
 //!
 //! `LiveBackdrop::run` 闭包跑两遍（可见 + 离屏），禁写状态/禁推进时钟：推进只
 //! 在 `tick`（闭包外）做，闭包内只读当前 native id 绘制。paint 回调（nounwind，
@@ -32,8 +32,8 @@ pub(crate) const VIDEO_PATH: &str = "/Users/bemly/Movies/input.mp4";
 pub(crate) const LOOP_SECS: f64 = 40.0;
 /// 后台→UI 有界队列（背压节流硬解；NV12 单帧约 1.4MB，4 帧约 5.6MB）。
 pub(crate) const QUEUE_DEPTH: usize = 4;
-/// 显示封顶帧率（与壁纸默认 fps 同档；源 fps 再高也只取这么多，重绘量 1/4）。
-pub(crate) const DISPLAY_FPS_MAX: u32 = 15;
+/// 显示封顶帧率（与片源一致，60fps 全速；CPU 换流畅，见 tick 注释）。
+pub(crate) const DISPLAY_FPS_MAX: u32 = 60;
 
 /// 后台→UI 消息（只传 NV12 压缩平面，解码在 worker 线程，转换在 GPU）。
 pub(crate) enum BgMsg {
@@ -231,12 +231,19 @@ impl VideoBg {
             }
         }
         if self.front.is_some() {
-            // 播放中每节拍重绘（封顶 15fps；eframe 按需重绘，不请求即静帧）。
-            ctx.request_repaint();
+            // 按显示节拍唤醒（与片源同帧率）：无条件 request_repaint 会把 eframe
+            // 顶到显示器刷新率空转——UI 整树 + twin 离屏 + mipgen 每秒跑满 60 次，
+            // 而视频只换 15 帧，这是播放时 +20% CPU 的大头（实测）。
+            // request_repaint_after 让整条管线跟视频同频，不超前空转。
+            let now = Instant::now();
+            match self.next_frame_at {
+                Some(t) if t > now => ctx.request_repaint_after(t - now),
+                _ => ctx.request_repaint(),
+            }
             true
         } else {
-            // 还没首帧：也要重绘等首帧，但画静态底。
-            ctx.request_repaint();
+            // 还没首帧：100ms 轮询等首帧，不 60fps 空转；画静态底。
+            ctx.request_repaint_after(Duration::from_millis(100));
             false
         }
     }
@@ -854,9 +861,10 @@ mod video_bg_tests {
     }
 
     #[test]
-    fn display_capped_at_15fps() {
-        assert!((VideoBg::display_period_secs(60) - 1.0 / 15.0).abs() < 1e-9);
-        assert!((VideoBg::display_period_secs(30) - 1.0 / 15.0).abs() < 1e-9);
+    fn display_follows_source_up_to_60fps() {
+        assert!((VideoBg::display_period_secs(60) - 1.0 / 60.0).abs() < 1e-9);
+        assert!((VideoBg::display_period_secs(120) - 1.0 / 60.0).abs() < 1e-9);
+        assert!((VideoBg::display_period_secs(30) - 1.0 / 30.0).abs() < 1e-9);
         assert!((VideoBg::display_period_secs(10) - 0.1).abs() < 1e-9);
     }
 
