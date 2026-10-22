@@ -49,6 +49,9 @@ pub(crate) struct Case {
     /// 播片 raw 片源：`1080p/frameNNNN.raw` 黑场 N 帧（`[play] format = "raw"` 用）。
     #[serde(default)]
     pub(crate) needs_rawvideo: u32,
+    /// 播片 raws 片源：`1080p/video.raws` 黑场 N 帧单文件（`[play] format = "raw"` 的单文件路用）。
+    #[serde(default)]
+    pub(crate) needs_raws: u32,
     /// 壁纸 qois 片源：把测试视频拷成 `wallpaper/wall.qois`
     ///（`[wallpaper] format = "qois"` 用，验开机预解码 + 循环）。
     #[serde(default)]

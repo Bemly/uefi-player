@@ -89,17 +89,21 @@ fn read_path_bytes(path: &str) -> Option<Vec<u8>> {
 
 /// 片源自动检测（播放列表/画廊共用），按 SPEC 顺序：
 /// 1. 小写路径以 `.qois` 结尾 → qois；
-/// 2. 文件名匹配 `frameNNNN.raw` 模式 → raw（目录扫描）；
-/// 3. 小写路径以 `.mp4` 结尾 → 容器探针（demux 视频轨，hevc > avc > vp9 首中者胜，
+/// 2. 小写路径以 `.raws` 结尾 → raw（单文件 BGRA 序列，`frame_bytes` 整切）；
+/// 3. 文件名匹配 `frameNNNN.raw` 模式 → raw（目录扫描）；
+/// 4. 小写路径以 `.mp4` 结尾 → 容器探针（demux 视频轨，hevc > avc > vp9 首中者胜，
 ///    无匹配轨即 None，不断言静默回退）；
-/// 4. `.hevc`/`.265` → hevc；5. `.ivf` → vp9；6. `.h263` → h263；
-/// 7. `.m2v` → mpeg2v；8. `.ogv` → theora；
+/// 5. `.hevc`/`.265` → hevc；6. `.ivf` → vp9；7. `.h263` → h263；
+/// 8. `.m2v` → mpeg2v；9. `.ogv` → theora；
 ///
 /// 其余一律 None（调用方记 `playlist: skip` + warn，不断播）。
 pub fn detect_clip_format(path: &str) -> Option<MediaFormat> {
     let lower = path.to_ascii_lowercase();
     if lower.ends_with(".qois") {
         return Some(MediaFormat::Qois);
+    }
+    if lower.ends_with(".raws") {
+        return Some(MediaFormat::Raw);
     }
     if config::is_raw_frame_path(path) {
         return Some(MediaFormat::Raw);
@@ -154,6 +158,10 @@ pub(crate) fn load_item_clip(
         MediaFormat::Qois => {
             let c = path_cstr16(path)?;
             Clip::from_qois_file(fs.open_file(&c)?, tag)?
+        }
+        MediaFormat::Raw if lower.ends_with(".raws") => {
+            let c = path_cstr16(path)?;
+            Clip::from_raws_file(fs.open_file(&c)?, tag)?
         }
         MediaFormat::Raw => {
             let dir = raw_parent_dir(path);
@@ -384,10 +392,13 @@ pub(crate) fn resolve_play_target(screen: &mut Screen, tps: u64) -> Result<Optio
 /// 注意这里是单线程 `upload_frame` 推送：workers=all 的真实多核路只会更快，
 /// 测出来是保守下限，auto 取 3/4 本来就有余量。
 /// `tune.buffers > 0` 时走影子缓冲（与播放同路径，half 取半更准）；测完即扔。
+/// `[display]`：源几何取 `Clip::w/h`（旧 `VIDEO_W/H` 常量 1080p 恒等）；不记
+/// `display:` marker（bench 非起播）。
 pub(crate) fn measure_max_fps(screen: &mut Screen, tps: u64) -> Result<u32> {
     screen.draw_str("play: benching max playback fps (one fast pass)...");
     let mut fs = Fs::new()?;
     let mut video = load_video_clip(&mut fs, false)?;
+    let (sw, sh) = (video.w, video.h);
     let frames = video.len().max(1);
     let t0 = rdtsc();
     // 实播计数（懒模式 `len` 是分块上界，h263 甚至未知：以播出帧为准，
@@ -396,7 +407,7 @@ pub(crate) fn measure_max_fps(screen: &mut Screen, tps: u64) -> Result<u32> {
     for _ in 0..frames {
         match video.next_frame() {
             Some(f) => {
-                screen.upload_frame(VIDEO_W, VIDEO_H, f)?;
+                screen.upload_frame(sw, sh, f)?;
                 shown += 1;
             }
             None => break,

@@ -133,6 +133,9 @@ pub(crate) fn from_hevc_bytes(data: &[u8], tag: &str) -> crate::error::Result<Ea
     let mut expect: Option<(usize, usize)> = None;
     let mut w = 0usize;
     let mut h = 0usize;
+    // YUV 暂存跨帧复用（8 格式调研 P2：`write_yuv` 每帧 `Vec` 分配是加载期主分配项；
+    // `w/h` 首帧冻结后 `ybytes + 2*uvbytes` 恒定，`clear` 保容量稳态零分配）。
+    let mut yuv_scratch: Vec<u8> = Vec::new();
     loop {
         let f = match dec.next_frame() {
             Ok(f) => f,
@@ -160,8 +163,12 @@ pub(crate) fn from_hevc_bytes(data: &[u8], tag: &str) -> crate::error::Result<Ea
             }
             _ => {}
         }
-        let mut yuv = Vec::new();
-        f.write_yuv(&mut yuv);
+        // `yuv` 跨帧复用（`w/h` 首帧冻结后长度恒定，`clear` 保容量，稳态零分配；
+        // 首帧前 `w/h == 0` 只走一次短路，见下 `ybytes` 门）。外层 `yuv_scratch`
+        // 由循环外声明（8 格式调研 P2）。
+        yuv_scratch.clear();
+        f.write_yuv(&mut yuv_scratch);
+        let yuv = &yuv_scratch;
         let ybytes = w.saturating_mul(h);
         let uvbytes = w.div_ceil(2).saturating_mul(h.div_ceil(2));
         // YUV420：Y + U + V（两色度平面与 Y 同半尺寸；短写即坏帧）。
@@ -739,5 +746,32 @@ pub(crate) fn from_raw_dir(
         log::warn!("{}: skipped {} bad frame(s)", tag, skipped);
     }
     // raw 帧几何定值（1920x1080，见调用方 `frame_bytes`）。
+    Ok(EagerClip::eager(1920, 1080, frames))
+}
+
+/// raws 单文件（`video.raws`，BGRA 帧首尾相接无头）：按 `frame_bytes`
+/// 整切，尾部不足一帧即整文件报错（不断言静默跳过，半帧不上屏）。
+/// 几何与目录版同定值（1920x1080）。
+pub(crate) fn from_raws_bytes(data: &[u8], tag: &str) -> crate::error::Result<EagerClip> {
+    let _ = super::decode_threads(MediaFormat::Raw);
+    let frame_bytes = 1920usize * 1080 * 4;
+    if data.is_empty() || data.len() % frame_bytes != 0 {
+        log::warn!(
+            "{}: bad raws size {} (want N*{} = N frames)",
+            tag,
+            data.len(),
+            frame_bytes
+        );
+        return Err(crate::error::NyaStatus::_Debug(alloc::format!(
+            "{}: bad raws size {}",
+            tag,
+            data.len()
+        )));
+    }
+    let mut frames = Vec::with_capacity(data.len() / frame_bytes);
+    for chunk in data.chunks_exact(frame_bytes) {
+        frames.push(super::bytes_as_pixels(chunk.to_vec()));
+    }
+    log::info!("{}: predecoded {} raws frames", tag, frames.len());
     Ok(EagerClip::eager(1920, 1080, frames))
 }

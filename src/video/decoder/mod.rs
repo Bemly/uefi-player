@@ -349,6 +349,20 @@ impl Clip {
         eager::from_raw_dir(fs, dir, want, frame_bytes, tag)
     }
 
+    /// raws 单文件字节流解码（`video.raws`，BGRA 帧首尾相接无头）。
+    /// 单文件无目录可扫：恒 eager 全量（懒供片的 `single`/`stream`/`zero_copy`
+    /// 对 raws 回落 eager，不断播；`decode.raw` 其它四键照常用）。
+    pub fn from_raws_bytes(data: &[u8], tag: &str) -> crate::error::Result<Self> {
+        log_decode_plane(MediaFormat::Raw, tag);
+        eager::from_raws_bytes(data, tag)
+    }
+
+    /// 整文件读入后解码（`video.raws`，单文件 BGRA 序列）。
+    pub fn from_raws_file(file: RegularFile, tag: &str) -> crate::error::Result<Self> {
+        let buf = Self::read_whole_file(file, tag)?;
+        Self::from_raws_bytes(&buf, tag)
+    }
+
     /// 极致性能：直接返回当前帧的像素引用，完全无拷贝，无解码。
     /// 懒模式按需解码到窗口后返回（借用契约：调用方须在下次 `next_frame` 前
     /// 用完——`blt/direct_loop` 与 `nano_pump` 都是当帧同步上传，满足）。
@@ -494,6 +508,15 @@ impl Clip {
 
 /// YUV420 → BGRA 复用写（`out` 长度须为 `w*h`，调用方保证；`vflip` 为 theora 行序）。
 /// 与 `Clip::yuv420_to_bgra` 同式，供懒 zero_copy 原地复用（零分配稳态）。
+///
+/// 多分辨率 perf 说明（8 格式调研结论）：1080p 每帧 2M 像素、128x96 小帧每帧
+/// 12k 像素，全走本函数标量转换（`copy_width` 只管搬运，不管 YUV 系数）。
+/// 三处零语义优化（换算式 `r = y + (359*v >> 8)` 等 BT.601 近似、`clamp`、
+/// 缺平面回退 `y=0/uv=128` 全保留）：(1) `vflip` 分支提升为内外双循环
+/// （行内无分支）；(2) 行基址提升，内层每像素只剩 `base + col` 单加
+/// （`saturating_mul/add` 移出行循环）；(3) 平面裸指针访问（调用方已保
+/// `y.len >= w*h`、`uv.len >= uv_stride*h/2` 短写由调用方前置跳过，见
+/// `eager.rs`/`source.rs` 的 `ybytes/uvbytes` 门；`debug_assert` 守卫）。
 pub(crate) fn yuv420_to_bgra_into(
     y: &[u8],
     u: &[u8],
@@ -503,27 +526,81 @@ pub(crate) fn yuv420_to_bgra_into(
     out: &mut [BltPixel],
     vflip: bool,
 ) {
+    if w == 0 || h == 0 {
+        return;
+    }
     let uv_stride = w.div_ceil(2).max(1);
-    for row in 0..h {
-        let src = if vflip {
-            h.saturating_sub(1).saturating_sub(row)
-        } else {
-            row
-        };
+    debug_assert!(out.len() >= w.saturating_mul(h));
+    let y_ptr = y.as_ptr();
+    let u_ptr = u.as_ptr();
+    let v_ptr = v.as_ptr();
+    let y_len = y.len();
+    let u_len = u.len();
+    let v_len = v.len();
+    let out_ptr = out.as_mut_ptr();
+    // 内层单行转换：`y_base/uv_base/out_base` 均为行首偏移，`col` 只做单加。
+    // SAFETY：行窗经调用方 `ybytes/uvbytes` 门保证（短写帧已跳过）；缺尾字节
+    // 按旧语义回退（`y=0/uv=128`），`out` 行窗在 `w*h` 内（入口已断言）。
+    // 本闭包为安全函数，裸指针解引用逐处 `unsafe`（2024 版 `unsafe_op_in_unsafe_fn` 口径）。
+    // 行首偏移 4 个 + 首尾指针/长度 6 个 + 宽 1 个 = 11 个，拆包反而不直观（库内同形先例见 `graphics.rs::blit_rows_direct`）。
+    #[allow(clippy::too_many_arguments)]
+    fn convert_row(
+        y_ptr: *const u8,
+        y_len: usize,
+        u_ptr: *const u8,
+        u_len: usize,
+        v_ptr: *const u8,
+        v_len: usize,
+        y_base: usize,
+        uv_base: usize,
+        out_ptr: *mut BltPixel,
+        out_base: usize,
+        w: usize,
+    ) {
         for col in 0..w {
-            let yy = y
-                .get(src.saturating_mul(w).saturating_add(col))
-                .copied()
-                .unwrap_or(0) as i32;
-            let uv_idx = (src / 2).saturating_mul(uv_stride).saturating_add(col / 2);
-            let uu = u.get(uv_idx).copied().unwrap_or(128) as i32 - 128;
-            let vv = v.get(uv_idx).copied().unwrap_or(128) as i32 - 128;
+            let y_idx = y_base + col;
+            // SAFETY：`y_idx < y_len <= 切片 len`，`uv_idx` 同理，`out` 行窗在界内。
+            let yy = if y_idx < y_len {
+                unsafe { *y_ptr.add(y_idx) as i32 }
+            } else {
+                0
+            };
+            let uv_idx = uv_base + col / 2;
+            let uu = if uv_idx < u_len {
+                unsafe { *u_ptr.add(uv_idx) as i32 - 128 }
+            } else {
+                0
+            };
+            let vv = if uv_idx < v_len {
+                unsafe { *v_ptr.add(uv_idx) as i32 - 128 }
+            } else {
+                0
+            };
             let r = (yy + ((359 * vv) >> 8)).clamp(0, 255) as u8;
             let g = (yy - ((88 * uu + 183 * vv) >> 8)).clamp(0, 255) as u8;
             let b = (yy + ((454 * uu) >> 8)).clamp(0, 255) as u8;
-            if let Some(px) = out.get_mut(row.saturating_mul(w).saturating_add(col)) {
-                *px = BltPixel::new(r, g, b);
+            unsafe {
+                *out_ptr.add(out_base + col) = BltPixel::new(r, g, b);
             }
+        }
+    }
+    if vflip {
+        for row in 0..h {
+            let src = h - 1 - row;
+            let y_base = src * w;
+            let uv_base = (src / 2) * uv_stride;
+            let out_base = row * w;
+            convert_row(
+                y_ptr, y_len, u_ptr, u_len, v_ptr, v_len, y_base, uv_base, out_ptr, out_base, w,
+            );
+        }
+    } else {
+        for row in 0..h {
+            let y_base = row * w;
+            let uv_base = (row / 2) * uv_stride;
+            convert_row(
+                y_ptr, y_len, u_ptr, u_len, v_ptr, v_len, y_base, uv_base, out_ptr, y_base, w,
+            );
         }
     }
 }

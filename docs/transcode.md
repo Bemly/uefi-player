@@ -55,7 +55,7 @@
 | mpeg2v → `./<yymmddhhmmss>.m2v` | `oxideav-mpeg12video` registry | 裸基本流（`00 00 01 B3` 起始） |
 | theora → `./<yymmddhhmmss>.ogv` | `oxideav-theora` registry intra-only（`qi` 32，setup 用 VP3 默认合成） | `ogg` 组 OggS（三头 + 数据包，同一逻辑流，granule 单调） |
 | qois → `./<yymmddhhmmss>.qois` | `qoi` 逐帧 | `u32le len + QOI` 串接（固件同布局） |
-| raw → `wallpaper/<yymmddhhmmss>/frameNNNN.raw` | BGRA 直存（`yuv420_to_rgba` + R/B 对调，与固件 `BltPixel` 同布局） | 多文件序列 `frame%04d.raw` 流式直写（不经 `EncodeAcc`，免大内存；定死 1920x1080，无视分辨率/分段，重命名即目录名） |
+| raw → `./<yymmddhhmmss>.raws` | BGRA 直存（`yuv420_to_rgba` + R/B 对调，与固件 `BltPixel` 同布局） | 单文件序列（帧首尾相接无头，`frame_bytes` 整切，固件 `from_raws_bytes` 同口径；流式追加不经 `EncodeAcc`，免大内存；定死 1920x1080，无视分辨率/分段） |
 
 avc/hevc/vp9 三档同名 `video.mp4`（播哪个由 `[play] format` 开关决定，与固件
 `video.mp4 优先轨` 语义一致）。裸流只留给无 MP4 封装的格式

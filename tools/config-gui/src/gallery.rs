@@ -1,8 +1,8 @@
 //! 图库页：与 `player.toml` 同目录的媒体浏览（N×M 网格卡片：上封面下简介）。
 //!
 //! 图库目录 = 已载入 `player.toml` 的父目录（默认 `"player.toml"` → `"."`），
-//!   与配置同盘同目录，U盘上即插即看。固件认的布局是 `1080p/video.*`（播片）
-//!   + `wallpaper/*`（壁纸），页内只列这两处的文件，不递归整盘。
+//!   与配置同盘同目录，U盘上即插即看。固件认的布局是 `wallpaper/*`（壁纸）
+//!   + 根目录媒体（转码产物默认时间戳名），不递归整盘；1080p/ 不再扫描。
 //!
 //! 轮子结论（见根 `AGENTS.md`「轮子优先」，不复述版本）：封面不引新轮子——
 //! `qois` 首帧走已有 `qoi` 箱，`raw` 首帧直读 BGRA，`mp4` 首显示帧复用转码页
@@ -36,7 +36,7 @@ pub(crate) const COVER_W: u32 = 320;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct GalleryEntry {
     pub(crate) name: String,
-    /// 相对图库根的显示路径（如 `1080p/video.mp4`）。
+    /// 相对图库根的显示路径（如 `261022120000.mp4` 或 `wallpaper/wall.mp4`）。
     pub(crate) size: u64,
     pub(crate) kind: &'static str,
     /// 探针编解码（`probe_source().codec`，封面线程回填；None = 还没回来/探不动）。
@@ -152,6 +152,7 @@ pub(crate) fn media_kind(name: &str) -> &'static str {
         return "raw";
     }
     match base.rsplit('.').next().unwrap_or("") {
+        "raws" => "raws",
         "mp4" => "mp4",
         "hevc" | "265" => "hevc",
         "ivf" => "vp9",
@@ -164,11 +165,42 @@ pub(crate) fn media_kind(name: &str) -> &'static str {
     }
 }
 
-/// 列图库：`1080p/` + `wallpaper/` 下的 regular 文件（大小 + 标签）。
+/// 卡片显示的格式标签（纯规则，可单测）：mp4 容器显示探针编解码
+/// （avc/hevc/vp9），没探到之前先标容器；其余格式直接标 kind。
+pub(crate) fn display_kind(kind: &'static str, codec: Option<&'static str>) -> &'static str {
+    if kind == "mp4" {
+        codec.unwrap_or(kind)
+    } else {
+        kind
+    }
+}
+
+/// 列图库：根目录与 `wallpaper/` 下的 regular 文件（大小 + 标签；1080p/ 不再扫描）。
 /// 缺目录/读错静默空集（图库是装饰，不断任何流程）。
 pub(crate) fn list_gallery(dir: &str) -> Vec<GalleryEntry> {
     let mut out = Vec::new();
-    for sub in ["1080p", "wallpaper"] {
+    // 转码产物直接落在图库根目录（时间戳默认名）：同样列出
+    // 可识别媒体文件（kind != other，player.toml/报告等杂项自然排除）。
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        for ent in rd.flatten() {
+            let meta = match ent.metadata() {
+                Ok(m) if m.is_file() => m,
+                _ => continue,
+            };
+            let name = ent.file_name().to_string_lossy().into_owned();
+            if media_kind(&name) == "other" {
+                continue;
+            }
+            out.push(GalleryEntry {
+                size: meta.len(),
+                kind: media_kind(&name),
+                name,
+                codec: None,
+                meta: None,
+            });
+        }
+    }
+    for sub in ["wallpaper"] {
         let root = std::path::Path::new(dir).join(sub);
         let rd = match std::fs::read_dir(&root) {
             Ok(rd) => rd,
@@ -207,7 +239,7 @@ fn cover_first_frame(full: &str) -> Option<(u32, u32, Vec<u8>, u32, u32)> {
         let (head, px) = qoi::decode_to_vec(frame).ok()?;
         return downscale(head.width, head.height, &px);
     }
-    if lower.ends_with(".raw") {
+    if lower.ends_with(".raw") || lower.ends_with(".raws") {
         // 固件壁纸帧：1920x1080 BGRA 直存，首帧即封面。
         let data = std::fs::read(full).ok()?;
         if data.len() < 1920 * 1080 * 4 {
@@ -248,7 +280,7 @@ fn cover_mp4(full: &str) -> Option<(u32, u32, Vec<u8>, u32, u32)> {
         "vp9" => MediaFormat::Vp9,
         _ => return None,
     };
-    let d = demux_groups(&data, want).ok()?;
+    let d = demux_groups(&data, want, None).ok()?;
     let mut dec = TrackDecoder::new(want);
     for g in d.groups.iter().take(2) {
         let frames = decode_group(&mut dec, &d, g).ok()?;
@@ -275,6 +307,19 @@ fn downscale(w: u32, h: u32, px: &[u8]) -> Option<(u32, u32, Vec<u8>, u32, u32)>
     Some((tw, th, small.into_raw(), w, h))
 }
 
+/// 封面几何取值（纯规则，可单测）：cover 元组前两位是缩略图尺寸
+/// （宽封顶 320），几何取后两位原始尺寸；无封面回落探针几何，再无回 (0, 0)。
+pub(crate) fn cover_geometry(
+    cover: &Option<(u32, u32, Vec<u8>, u32, u32)>,
+    probe_wh: Option<(u32, u32)>,
+) -> (u32, u32) {
+    cover
+        .as_ref()
+        .map(|(_, _, _, w, h)| (*w, *h))
+        .or(probe_wh)
+        .unwrap_or((0, 0))
+}
+
 /// 封面 worker（后台线程；逐张流式回传，失败即占位，不 halt）。
 fn thumb_worker(jobs: Vec<String>, gen: u64, tx: Sender<ThumbMsg>) {
     for (idx, full) in jobs.into_iter().enumerate() {
@@ -282,11 +327,7 @@ fn thumb_worker(jobs: Vec<String>, gen: u64, tx: Sender<ThumbMsg>) {
         let probe = crate::transcode::probe_source(&full).ok();
         let codec = probe.as_ref().map(|p| p.codec);
         let cover = cover_first_frame(&full);
-        let (gw, gh) = cover
-            .as_ref()
-            .map(|(w, h, ..)| (*w, *h))
-            .or_else(|| probe.as_ref().map(|p| (p.w, p.h)))
-            .unwrap_or((0, 0));
+        let (gw, gh) = cover_geometry(&cover, probe.as_ref().map(|p| (p.w, p.h)));
         let (fps, n, dur_s, has_time) = match probe {
             Some(p) => (p.fps, p.n, p.dur_s, p.container == "mp4"),
             None => (0, 0, 0, false),
@@ -492,16 +533,18 @@ impl App {
     /// 整卡可点（`interact` 原语），选中描 accent 边。
     fn gallery_card(&mut self, ui: &mut eframe::egui::Ui, idx: usize, dark: bool) {
         use eframe::egui;
-        let (name, kind, size, meta, sel) = match self.gallery.entries.get(idx) {
+        let (name, kind, codec, size, meta, sel) = match self.gallery.entries.get(idx) {
             Some(e) => (
                 e.name.clone(),
                 e.kind,
+                e.codec,
                 e.size,
                 e.meta,
                 self.gallery.selected == Some(idx),
             ),
             None => return,
         };
+        let dk = display_kind(kind, codec);
         let tex = self.gallery.covers.get(&idx).cloned();
         let card = if dark {
             egui_glass::Glass::panel_dark()
@@ -550,7 +593,7 @@ impl App {
                         ui.painter().text(
                             r.center(),
                             egui::Align2::CENTER_CENTER,
-                            kind.to_uppercase(),
+                            dk.to_uppercase(),
                             egui::FontId::proportional(28.0),
                             // 纯白/纯黑（用户拍板：不用灰字，与其他字对齐）。
                             if dark {
@@ -589,7 +632,7 @@ impl App {
                                 dur_s: 0,
                                 has_time: false,
                             });
-                            let (second, third) = meta_lines(kind, &meta_v, size);
+                            let (second, third) = meta_lines(dk, &meta_v, size);
                             // 纯白/纯黑小字（用户拍板：去 `.weak()` 灰，与其他字对齐）。
                             let meta_fg = if dark {
                                 egui::Color32::WHITE
@@ -644,6 +687,7 @@ mod gallery_tests {
             ("video.qois", "qois"),
             ("wall.qois", "qois"),
             ("frame0001.raw", "raw"),
+            ("video.raws", "raws"),
             ("video.mp4", "mp4"),
             ("wall.mp4", "mp4"),
             ("video.hevc", "hevc"),
@@ -656,6 +700,39 @@ mod gallery_tests {
         ] {
             assert_eq!(media_kind(name), kind, "{name}");
         }
+    }
+
+    #[test]
+    fn list_includes_gallery_root_media() {
+        let dir = std::env::temp_dir().join(format!("uefi-player-gallery-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("wallpaper")).expect("mkdir");
+        std::fs::create_dir_all(dir.join("1080p")).expect("mkdir");
+        std::fs::write(dir.join("261022120000.mp4"), [0u8; 8]).expect("write");
+        std::fs::write(dir.join("wallpaper").join("wall.mp4"), [0u8; 8]).expect("write");
+        std::fs::write(dir.join("1080p").join("old.mp4"), [0u8; 8]).expect("write");
+        std::fs::write(dir.join("player.toml"), b"version = 1").expect("write");
+        std::fs::write(dir.join("note.txt"), b"x").expect("write");
+        let names: Vec<String> = list_gallery(&dir.display().to_string())
+            .into_iter()
+            .map(|e| e.name)
+            .collect();
+        assert!(
+            names.contains(&String::from("261022120000.mp4")),
+            "{names:?}"
+        );
+        assert!(
+            names.contains(&String::from("wallpaper/wall.mp4")),
+            "{names:?}"
+        );
+        assert!(!names.iter().any(|n| n.contains("1080p")), "{names:?}");
+        assert!(
+            !names
+                .iter()
+                .any(|n| n.ends_with(".toml") || n.ends_with(".txt")),
+            "{names:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -695,6 +772,24 @@ mod gallery_tests {
         assert_eq!(truncate_name("abcdef", 5), "abcd…");
         // 中文按字符截，不断字形。
         assert_eq!(truncate_name("图库测试文件名", 4), "图库测…");
+    }
+
+    #[test]
+    fn cover_geometry_uses_original_not_thumb() {
+        // 回归锁死：320x180 封面不能当几何，1920x1080 才是真实尺寸。
+        let cover = Some((320, 180, Vec::new(), 1920, 1080));
+        assert_eq!(cover_geometry(&cover, Some((1, 1))), (1920, 1080));
+        assert_eq!(cover_geometry(&None, Some((640, 360))), (640, 360));
+        assert_eq!(cover_geometry(&None, None), (0, 0));
+    }
+
+    #[test]
+    fn display_kind_prefers_codec_for_mp4() {
+        assert_eq!(display_kind("mp4", Some("avc")), "avc");
+        assert_eq!(display_kind("mp4", Some("hevc")), "hevc");
+        assert_eq!(display_kind("mp4", None), "mp4");
+        assert_eq!(display_kind("qois", Some("rgba")), "qois");
+        assert_eq!(display_kind("raw", None), "raw");
     }
 
     #[test]

@@ -15,13 +15,14 @@
 | 检测序 | 路径规则 | 格式与接线 |
 |---|---|---|
 | 1 | 小写路径以 `.qois` 结尾 | `qois`（默认）：`1080p/video.qois`（`u32le 帧长 + QOI 帧` 串接）→ 开机全量预解码（已接） |
-| 2 | 文件名命中 `frameNNNN.raw` 模式（目录扫描，`.raw` 后缀，`1080p/` 或画廊目录） | `raw`：`1080p/frameNNNN.raw`（1920x1080 BGRA 直存，与壁纸同格式）→ 零解码直读（已接，同下游切分） |
-| 3 | 小写路径以 `.mp4` 结尾 | 容器探针：拆视频轨，`hevc > avc > vp9` 首匹配胜出（avcC/hvcC/vpcC → Annex-B/裸帧；无匹配轨该项跳过并警告，永不静默换源）：`hevc` → vendor `rusty_h265` 软解 → YUV420 转 BGRA（预解码进 `Clip`；坏帧计数跳过，全坏报错；只收 8-bit）；`avc` → vendor `rusty_h264_decoder` 软解（tight 8-bit 4:2:0；MP4-only，无裸流路）；`vp9` → vendor `vp9dec` 软解（只要显示帧，隐藏 altref 跳过；只收 8-bit 4:2:0） |
-| 4 | 小写路径以 `.hevc`/`.265` 结尾 | `hevc`（Annex-B 裸流，无容器回退）→ 同上 vendor 软解 |
-| 5 | 小写路径以 `.ivf` 结尾 | `vp9`（IVF 容器）→ 同上 vendor 软解 |
-| 6 | 小写路径以 `.h263` 结尾 | `h263`（裸 H.263 基线流，无容器）→ vendor `h263-rs`（标准空选项）软解（错位/坏包截断，首帧错即报错；基线 `PictType` 上游反转已修正，见 vendor `VENDOR.md`） |
-| 7 | 小写路径以 `.m2v` 结尾 | `mpeg2v`（裸基本流，接入单元切分）→ vendor `filmcraft-mpeg2v` 软解（只收 4:2:0；422/444 记数跳过；AU 失败计数，`flush` 收尾帧） |
-| 8 | 小写路径以 `.ogv` 结尾 | `theora`（OggS 磁盘原格式，手写拆包 + CRC32 校验）→ vendor `oxideav-theora` 软解（只收 4:2:0；ident/comment/setup 三头缺一即报错） |
+| 2 | 小写路径以 .raws 结尾 | raw：单文件 BGRA 序列 1080p/video.raws（帧首尾相接无头按帧整切）→ 零解码直读（恒 eager） |
+| 3 | 文件名命中 `frameNNNN.raw` 模式（目录扫描，`.raw` 后缀，`1080p/` 或画廊目录） | `raw`：`1080p/frameNNNN.raw`（1920x1080 BGRA 直存，与壁纸同格式）→ 零解码直读（已接，同下游切分） |
+| 4 | 小写路径以 `.mp4` 结尾 | 容器探针：拆视频轨，`hevc > avc > vp9` 首匹配胜出（avcC/hvcC/vpcC → Annex-B/裸帧；无匹配轨该项跳过并警告，永不静默换源）：`hevc` → vendor `rusty_h265` 软解 → YUV420 转 BGRA（预解码进 `Clip`；坏帧计数跳过，全坏报错；只收 8-bit）；`avc` → vendor `rusty_h264_decoder` 软解（tight 8-bit 4:2:0；MP4-only，无裸流路）；`vp9` → vendor `vp9dec` 软解（只要显示帧，隐藏 altref 跳过；只收 8-bit 4:2:0） |
+| 5 | 小写路径以 `.hevc`/`.265` 结尾 | `hevc`（Annex-B 裸流，无容器回退）→ 同上 vendor 软解 |
+| 6 | 小写路径以 `.ivf` 结尾 | `vp9`（IVF 容器）→ 同上 vendor 软解 |
+| 7 | 小写路径以 `.h263` 结尾 | `h263`（裸 H.263 基线流，无容器）→ vendor `h263-rs`（标准空选项）软解（错位/坏包截断，首帧错即报错；基线 `PictType` 上游反转已修正，见 vendor `VENDOR.md`） |
+| 8 | 小写路径以 `.m2v` 结尾 | `mpeg2v`（裸基本流，接入单元切分）→ vendor `filmcraft-mpeg2v` 软解（只收 4:2:0；422/444 记数跳过；AU 失败计数，`flush` 收尾帧） |
+| 9 | 小写路径以 `.ogv` 结尾 | `theora`（OggS 磁盘原格式，手写拆包 + CRC32 校验）→ vendor `oxideav-theora` 软解（只收 4:2:0；ident/comment/setup 三头缺一即报错） |
 
 - 其余路径或探针失败一律该项跳过（`log::warn!`，永不 halt）。
 - MP4 拆包（石雨堂 `Mp4FileDemuxer`，avcC/hvcC/vpcC，长度前缀→Annex-B 起始码；
@@ -94,6 +95,11 @@
   固件 Blt 非线程安全）。引擎失败退回 CPU 整推（同字节，只记一次 warning）。
   四个 `blt_op` 里只有 `buffer_to_video` 能上屏；其余三项矩阵里只单发出数
   （引擎能力对照，不参选播视频）。
+- 呈现（`[display]`，见 `docs/config.md`）：`Clip` 恒存原生几何（解码/预解码不改尺寸，
+  几何不一致照旧拒收）；上屏时按 `fit` 定目标矩形：`stretch` 拉伸铺满（忽略 `align`）/
+  `fit` 缩放最大等比居中 / `cover` 填充=裁切等比放大裁满 / `scale_down` 缩放最小只缩不放 /
+  `native` 原生 1:1 按 `align` 摆放（`center` 默认居中；旧版固定 `0,0` 左上，v2 起居中，行为变更）；
+  留边由 `bar` 纯色填充（black/white/gray/navy）。H.263 编码期 letterbox 与此正交，保持不动。
 
 ## 格式校验 + 掉帧（P3 闭环项）
 

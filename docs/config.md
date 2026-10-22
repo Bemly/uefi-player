@@ -68,7 +68,7 @@ path = "1080p/video.hevc"  # Annex-B 裸流（.hevc/.265）
 path = "1080p/video.qois"  # u32le 帧长 + QOI 串接
 # loop_single 重播当前项；once 播完最后一项即停（回菜单）；
 # 检测失败/探针无匹配轨该项跳过 + 警告（`playlist: skip`），空列表直接报错；
-# 完整检测序见 docs/player.md（qois → raw 目录扫描 → mp4 探针 → hevc → ivf →
+# 完整检测序见 docs/player.md（qois → raws 单文件 → raw 目录扫描 → mp4 探针 → hevc → ivf →
 # h263 → m2v → ogv）。
 
 # 解码表（统一控制平面，八格式各独立五键）：
@@ -165,6 +165,11 @@ strict = false          # 严格模式：BLS 只认本卷 + XBOOTLDR 卷（默�
 [async]
 executor = "all"        # 诊断项 a 跑哪条执行器线：all（默认，都跑）| nano（单核线）| dynamic（多核线）
                         # 只管诊断覆盖，不切生产调度（播片/壁纸仍是手写 MP，迁移另立项）
+
+[display]
+fit = "fit"             # stretch（拉伸铺满）| fit（缩放最大，等比居中，默认）| cover（填充=裁切，等比放大裁满）| scale_down（缩放最小，只缩不放，等比收缩）| native（原生，源分辨率 1:1）
+align = "center"        # center（默认，居中）| left | right | top | bottom（目标矩形在屏幕内的锚位；stretch 忽略 align）
+bar = "black"           # 黑边填充色（RGB 自由色，默认 "black"=000000）：命名 4 色兼容 black（默认）| white | gray | navy（旧文件照读）| "#RRGGBB" hex（大小写不敏感，可带/不带 '#'，如 "#102040"/"102040"/"#FF0000"；串口/落盘统一小写无 '#'，如 102040）；未知回默认 + 警告
 ```
 
 ## 生效规则速查
@@ -255,3 +260,20 @@ executor = "all"        # 诊断项 a 跑哪条执行器线：all（默认，都
   命中即整文件回默认 + 警告（`cfg: parse error` 行），不再静默照读。
 - `async.executor`：只决定诊断项 `a` 跑 `nano`/`dynamic` 哪条线（`all` 都跑）；
   缺表缺键按 `all` 照读；生产调度不受影响。
+- `[display]`（缺表缺键按默认照读：`fit="fit"` + `bar="black"`（=000000） + `align="center"`；未知值警告并回默认，
+  与 `[boot]`/`[play]` 同口径）：`fit` 五档（`stretch` 拉伸铺满 / `fit` 缩放最大等比居中 /
+  `cover` 填充=裁切等比放大裁满 / `scale_down` 缩放最小只缩不放等比收缩 /
+  `native` 原生源分辨率 1:1）；`align` 五档（`center` 默认居中 / `left` / `right` /
+  `top` / `bottom`，目标矩形在屏幕内的锚位；`stretch` 忽略 `align`，`cover` 按 `align`
+  定裁切锚点，`scale_down` 放得下时按 `align` 摆 1:1，`native` 按 `align` 摆 1:1）；
+  `bar` 只管留边填充（RGB 自由色，`BltPixel::new(r,g,b)` 口径；串口 `display:` 行
+  `bar=<hex>` 为小写无 '#' 的 `to_hex()`，如 `bar=000000` / `bar=102040`）：
+  命名 4 色兼容（旧文件照读）| hex `"#RRGGBB"`（大小写不敏感，可带/不带 '#'，
+  如 `"#102040"` / `"102040"` / `"#FF0000"`），对照表：
+  `black (0,0,0)=000000` / `white (255,255,255)=ffffff` /
+  `gray (128,128,128)=808080` / `navy (0,0,128)=000080`；
+  未知/非法串回 `black`（=000000）+ 一行 `cfg:` 警告（既有单键回落口径）；
+  缺 `bar` 键/缺表按 `BLACK` 照读。
+  行为变更：`native` 旧语义为源分辨率 `0,0` 原位（左上），v2 起按 `align` 摆放
+  （默认居中）；旧文件无 `align` 键按 `center` 照读，画面位置与旧版不同属预期。
+  H.263 编码期 letterbox 与此正交，保持不动（互补，见 `docs/player.md` 管线）。

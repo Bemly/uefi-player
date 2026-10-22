@@ -59,7 +59,7 @@ impl TranscodeTarget {
         }
     }
     /// 图库相对路径（固件布局；avc/hevc/vp9 同名 video.mp4，
-    /// 播哪个由 [play] format 开关决定；`Raw` 为代表首帧，整序列在同目录）。
+    /// 播哪个由 [play] format 开关决定；`Raw` 为单文件 BGRA 序列）。
     pub(crate) fn out_path(self) -> &'static str {
         match self {
             Self::Avc => "1080p/video.mp4",
@@ -69,7 +69,7 @@ impl TranscodeTarget {
             Self::Mpeg2v => "1080p/video.m2v",
             Self::Theora => "1080p/video.ogv",
             Self::Qois => "1080p/video.qois",
-            Self::Raw => "wallpaper/frame0000.raw",
+            Self::Raw => "1080p/video.raws",
         }
     }
 }
@@ -121,28 +121,6 @@ pub(crate) fn parse_seg(text: &str) -> Result<usize, String> {
 }
 
 pub(crate) fn out_path_for(target: TranscodeTarget, stem: &str) -> String {
-    // `Raw` 为多文件序列：`wallpaper/<stem>/frame0000.raw`（代表首帧，目录即序列；
-    // stem 为空按时间戳命名目录，与单文件口径一致）。
-    if target == TranscodeTarget::Raw {
-        let t = stem.trim();
-        let clean: String = t
-            .chars()
-            .filter(|c| *c != '/' && (*c as u32) != 92)
-            .collect::<String>()
-            .trim()
-            .to_string();
-        let dir = if clean.is_empty() {
-            default_stem_now()
-        } else {
-            clean
-                .rsplit_once('.')
-                .map(|(s, _)| s)
-                .filter(|s| !s.is_empty())
-                .unwrap_or(&clean)
-                .to_string()
-        };
-        return format!("wallpaper/{dir}/frame0000.raw");
-    }
     let def = target.out_path();
     let base = def.rsplit('/').next().unwrap_or(def);
     let dot = base.rfind('.');
@@ -184,6 +162,7 @@ pub(crate) fn source_accepted(name: &str) -> bool {
         || lower.ends_with(".jpeg")
         || lower.ends_with(".bmp")
         || (lower.starts_with("frame") && lower.ends_with(".raw"))
+        || lower.ends_with(".raws")
 }
 
 /// 进度消息（worker → UI）。
@@ -936,7 +915,10 @@ impl App {
                 let dir = crate::gallery::gallery_dir(&self.path);
                 if let Some(f) = rfd::FileDialog::new()
                     .set_directory(dir)
-                    .add_filter("video/image", &["mp4", "png", "jpg", "jpeg", "bmp", "raw"])
+                    .add_filter(
+                        "video/image",
+                        &["mp4", "png", "jpg", "jpeg", "bmp", "raw", "raws"],
+                    )
                     .pick_file()
                 {
                     self.transcode.source = f.display().to_string();
@@ -1405,7 +1387,7 @@ impl EncodeAcc {
             TranscodeTarget::Theora => mux_ogg_theora(&self.theora_headers, &self.theora_packets),
             TranscodeTarget::H263 | TranscodeTarget::Mpeg2v => Ok(self.bare),
             TranscodeTarget::Qois => Ok(self.qois),
-            // 单文件口径仅供单测拼接校验；正式 job 多文件直写，不走此分支。
+            // 单文件口径（BGRA 帧首尾相接）；正式 job 走流式追加，不经此累积。
             TranscodeTarget::Raw => Ok(self.raw.concat()),
         }
     }
@@ -1455,7 +1437,7 @@ impl FpsPick {
     }
 }
 
-/// RGBA（`yuv420_to_rgba` 口径）→ BGRA（固件 `frameNNNN.raw` 口径，`BltPixel` 内存布局）。
+/// RGBA（`yuv420_to_rgba` 口径）→ BGRA（固件 `BltPixel` 内存布局）。
 fn rgba_to_bgra(px: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(px.len());
     for p in px.chunks_exact(4) {
@@ -1464,18 +1446,18 @@ fn rgba_to_bgra(px: &[u8]) -> Vec<u8> {
     out
 }
 
-/// `Raw` 序列单帧直写（流式，不经 `EncodeAcc` 累积，免大内存；
-/// 文件名 `frame%04d.raw`，与固件 `list_raw_names` 排序口径一致）。
-fn write_raw_frame(dir: &std::path::Path, idx: usize, bgra: &[u8]) -> Result<usize, String> {
-    let name = format!("frame{idx:04}.raw");
-    std::fs::write(dir.join(name), bgra).map_err(|e| format!("write raw: {e}"))?;
+///  单文件帧追加（流式不经  累积，免大内存；
+/// BGRA 帧首尾相接无头，固件  按  整切）。
+fn append_raw_frame(out: &mut std::fs::File, bgra: &[u8]) -> Result<usize, String> {
+    use std::io::Write;
+    out.write_all(bgra).map_err(|e| format!("write raw: {e}"))?;
     Ok(bgra.len())
 }
 
-/// `Raw` 序列 job（mp4/静帧 → `wallpaper/<stem>/frameNNNN.raw` BGRA 流式直写）。
+/// `Raw` 序列 job（mp4/静帧 → 单文件 `1080p/video.raws`，BGRA 帧首尾相接流式追加）。
 /// 与 `run_transcode_job` 同解码链（avc 硬解优先 + 同顺序 demux），
-/// 缩放恒 `scale_for(Raw)` = 1920x1080（无视 `res_wh`/`seg`/`out_fps` 之 `res`/`seg`，
-/// `out_fps` 仍做 `FpsPick` 重采样）；目录即序列，`JobOut.path` 为目录。
+/// 缩放恒 `scale_for(Raw)` = 1920x1080（无视 `res_wh`/`seg` 之 `res`/`seg`）；
+/// 整文件即序列（`frame_bytes` 整切，无头，固件 `from_raws_bytes` 同口径）。
 fn run_raw_job(
     source: &str,
     out_path: &str,
@@ -1483,13 +1465,15 @@ fn run_raw_job(
     mut stage: impl FnMut(JobStage),
     mut progress: impl FnMut(usize, usize),
 ) -> Result<JobOut, String> {
+    use std::io::Write;
     use std::path::Path;
     let out_p = Path::new(out_path);
-    let dir = out_p
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .map_or_else(|| Path::new(".").to_path_buf(), |p| p.to_path_buf());
-    std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir: {e}"))?;
+    if let Some(parent) = out_p.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent).map_err(|e| format!("mkdir: {e}"))?;
+        }
+    }
+    let mut out = std::fs::File::create(out_p).map_err(|e| format!("create: {e}"))?;
     let bytes = std::fs::read(source).map_err(|e| format!("read source: {e}"))?;
     let lower = source.to_ascii_lowercase();
     stage(JobStage::Decode);
@@ -1498,7 +1482,9 @@ fn run_raw_job(
     let mut emit = |rgba_w: u32, rgba_h: u32, px: &[u8]| -> Result<(), String> {
         let _ = (rgba_w, rgba_h);
         let bgra = rgba_to_bgra(px);
-        total_bytes += write_raw_frame(&dir, idx, &bgra)?;
+        out.write_all(&bgra)
+            .map_err(|e| format!("write raw: {e}"))?;
+        total_bytes += bgra.len();
         idx += 1;
         progress(idx, idx);
         Ok(())
@@ -1551,6 +1537,20 @@ fn run_raw_job(
         let out = yuv420_to_rgba(&s);
         stage(JobStage::Encode);
         emit(out.w, out.h, &out.px)?;
+    } else if lower.ends_with(".raws") {
+        let frame = 1920 * 1080 * 4;
+        if bytes.is_empty() || bytes.len() % frame != 0 {
+            return Err(format!(
+                "raws: want N*1920x1080 BGRA, got {} bytes",
+                bytes.len()
+            ));
+        }
+        stage(JobStage::Encode);
+        out.write_all(&bytes)
+            .map_err(|e| format!("write raw: {e}"))?;
+        total_bytes += bytes.len();
+        idx += bytes.len() / frame;
+        progress(idx, idx);
     } else if lower.ends_with(".raw") {
         if bytes.len() != 1920 * 1080 * 4 {
             return Err(format!(
@@ -1559,7 +1559,9 @@ fn run_raw_job(
             ));
         }
         stage(JobStage::Encode);
-        total_bytes += write_raw_frame(&dir, idx, &bytes)?;
+        out.write_all(&bytes)
+            .map_err(|e| format!("write raw: {e}"))?;
+        total_bytes += bytes.len();
         idx += 1;
         progress(idx, idx);
     } else {
@@ -1569,8 +1571,9 @@ fn run_raw_job(
         return Err(String::from("mp4: no decodable frames"));
     }
     stage(JobStage::Mux);
+    drop(out);
     Ok(JobOut {
-        path: dir.display().to_string(),
+        path: out_path.to_string(),
         bytes: total_bytes,
         hw_fallback: crate::codecs::take_hw_fallback_hit(),
     })
@@ -1578,7 +1581,7 @@ fn run_raw_job(
 
 /// 后台转码主流程（worker 线程内跑；`stage` 报阶段，`progress` 报帧进度）。
 /// 流式：demux 分组 → 逐组解码→缩放→编码→释放（裸帧不过组，内存封顶）。
-/// `Raw` 例外走流式多文件直写（见 `run_raw_job`，不经 `EncodeAcc`）。
+/// `Raw` 例外走单文件流式追加（见 `run_raw_job`，不经 `EncodeAcc`）。
 #[allow(clippy::too_many_lines)]
 pub(crate) fn run_transcode_job(
     source: &str,
@@ -1593,7 +1596,7 @@ pub(crate) fn run_transcode_job(
 ) -> Result<JobOut, String> {
     // 本 job 的回退标记在本线程清零；收尾时读取（转码 worker 线独占，无串扰）。
     crate::codecs::take_hw_fallback_hit();
-    // `Raw` 序列走多文件流式直写（目录即序列，不经 `EncodeAcc`，免大内存）。
+    // `Raw` 序列走单文件流式追加（不经 `EncodeAcc`，免大内存）。
     if target == TranscodeTarget::Raw {
         return run_raw_job(source, out_path, cancel, stage, progress);
     }
@@ -1812,6 +1815,25 @@ pub(crate) fn probe_source(path: &str) -> Result<ProbeInfo, String> {
             fps: 30,
             n: 1,
             dur_s: 0,
+        });
+    }
+    if lower.ends_with(".raws") {
+        let len = std::fs::metadata(path)
+            .map_err(|e| format!("stat: {e}"))?
+            .len();
+        let frame = 1920 * 1080 * 4;
+        if len == 0 || len % frame as u64 != 0 {
+            return Err(format!("raws: want N*1920x1080 BGRA, got {len} bytes"));
+        }
+        let n = (len / frame as u64) as usize;
+        return Ok(ProbeInfo {
+            container: "raws",
+            codec: "bgra",
+            w: 1920,
+            h: 1080,
+            fps: 30,
+            n,
+            dur_s: (n as u64 + 29) / 30,
         });
     }
     if lower.ends_with(".raw") {
@@ -2151,16 +2173,13 @@ mod transcode_tests {
             out_path_for(TranscodeTarget::Theora, "mymovie.ogg"),
             "mymovie.ogv"
         );
-        // `Raw` 为目录序列：代表首帧，目录即序列。
+        // `Raw` 为图库根单文件（与 qois 同口径）。
         assert_eq!(
             out_path_for(TranscodeTarget::Raw, "mymovie"),
-            "wallpaper/mymovie/frame0000.raw"
+            "mymovie.raws"
         );
         let r = out_path_for(TranscodeTarget::Raw, "");
-        assert!(
-            r.starts_with("wallpaper/") && r.ends_with("/frame0000.raw"),
-            "{r}"
-        );
+        assert!(r.ends_with(".raws") && !r.contains('/'), "{r}");
     }
 
     #[test]
@@ -2266,7 +2285,7 @@ mod transcode_tests {
             (TranscodeTarget::Mpeg2v, "1080p/video.m2v"),
             (TranscodeTarget::Theora, "1080p/video.ogv"),
             (TranscodeTarget::Qois, "1080p/video.qois"),
-            (TranscodeTarget::Raw, "wallpaper/frame0000.raw"),
+            (TranscodeTarget::Raw, "1080p/video.raws"),
         ] {
             assert_eq!(t.out_path(), path);
         }
@@ -2274,13 +2293,23 @@ mod transcode_tests {
     }
 
     #[test]
-    fn raw_bgra_roundtrip_and_seq_naming() {
-        // RGBA→BGRA 逐字节对调，A 不变；序列名 `frame%04d.raw` 与固件排序一致。
+    fn raw_bgra_roundtrip_and_single_file_layout() {
+        // RGBA→BGRA 逐字节对调，A 不变；单文件即帧首尾相接（固件整切口径）。
         let px = vec![10u8, 20, 30, 40, 50, 60, 70, 80];
         assert_eq!(rgba_to_bgra(&px), vec![30u8, 20, 10, 40, 70, 60, 50, 80]);
-        let dir = std::path::Path::new("/tmp/raw_seq_naming");
-        let _ = write_raw_frame(dir, 7, &[0u8; 4]).map_err(|_| ());
-        assert_eq!(format!("frame{:04}.raw", 7), "frame0007.raw");
+        let dir = std::env::temp_dir().join(format!("uefi-player-raws-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("video.raws");
+        let mut f = std::fs::File::create(&path).expect("create raws");
+        let n = append_raw_frame(&mut f, &[1u8, 2, 3, 4]).expect("append")
+            + append_raw_frame(&mut f, &[5u8, 6, 7, 8]).expect("append");
+        drop(f);
+        assert_eq!(n, 8);
+        assert_eq!(
+            std::fs::read(&path).expect("read raws"),
+            vec![1u8, 2, 3, 4, 5, 6, 7, 8]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn two_frames() -> Vec<Yuv420> {

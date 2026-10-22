@@ -335,6 +335,38 @@ keys = [{ send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2
 expect = ["playlist: item 1/1 path=1080p/frame0000.raw", "video: fmt=Raw", "decode: fmt=Raw", "honored (frame-parallel safe)", "play: path=direct_loop"]
 soak_sec = 15
 
+# 解码 raws 单文件：BGRA 帧首尾相接无头整切（`1080p/video.raws` 只走通路不断言画质）。
+[[case]]
+name = "video-decode-raws"
+covers = ["src/video/decoder", "src/video/play.rs"]
+timeout_sec = 180
+needs_raws = 2
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+vsync = "off"
+[play]
+fps = "max"
+feed = "clip"
+[playlist]
+loop = "loop_list"
+[[playlist.items]]
+path = "1080p/video.raws"
+[wallpaper]
+enable = false
+[schedule]
+backend = "manual"
+workers = "bsp_only"
+dist = "static"
+"""
+boot_expect = ["cfg: version=1", "play.feed=Clip", "idle: ready"]
+keys = [{ send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 }, { send = "p", wait_after = 3 }, { send = "0", wait_for = ["menu: ready"], wait_after = 5 }]
+expect = ["playlist: item 1/1 path=1080p/video.raws", "video: fmt=Raw", "decode: fmt=Raw", "play: path=direct_loop"]
+soak_sec = 15
+
 # 取数覆盖（`[decode.hevc] fetch=stream` 盖全局 feed=clip）：生效 `video: feed=stream` + ` fetchovr=hevc` 令牌；壁纸无视覆盖。
 [[case]]
 name = "video-decode-fetch-override"

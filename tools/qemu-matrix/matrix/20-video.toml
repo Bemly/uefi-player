@@ -1,9 +1,9 @@
 # 20-video.toml：QEMU 黑盒矩阵分组（`matrix/` 目录，按用例前缀分组，合并后等价原 `matrix.toml`）。
-# 共 8 cases（播放 5 + 播放列表 3），单文件 ≤1000 行（AGENTS 口径）。新增 case 按前缀落对应文件（解码/槽位/crew-roles 类进 60-decode.toml），并写 `covers`。
+# 共 12 cases（播放 5 + 播放列表 3 + 显示 4），单文件 ≤1000 行（AGENTS 口径）。新增 case 按前缀落对应文件（解码/槽位/crew-roles 类进 60-decode.toml），并写 `covers`。
 #
 # 播放列表模型（`[playlist] loop` + `[[playlist.items]] path`，见 `docs/player.md`）：
 # 固件不再读 `[play] format`（旧键残留按 serde 默认忽略），每项按路径自动检测
-# （qois 后缀 / frameNNNN.raw 目录扫描 / mp4 容器探针 hevc>avc>vp9 / hevc/.265 /
+# （qois 后缀 / raws 单文件 / frameNNNN.raw 目录扫描 / mp4 容器探针 hevc>avc>vp9 / hevc/.265 /
 # ivf / h263 / m2v / ogv，探针失败该项 `playlist: skip` 警告跳过，不断播）。
 # 旧单格式 case（video-raw/hevc/vp9/h263/mpeg2v/theora/avc/hevc-mp4/vp9-mp4）与
 # 旧供片档位 case（video-feed-* 七例，feed 收敛为全局默认 + per-codec fetch 覆盖）
@@ -307,3 +307,151 @@ keys = [
 ]
 expect = ["playlist: items=2 loop=once", "playlist: item 1/2 path=1080p/video.mp4", "playlist: item 2/2 path=1080p/video.qois", "video: fmt=Hevc", "video: fmt=Qois", "play: path=direct_loop"]
 soak_sec = 10
+
+# 显示适配 fit（默认档）：[display] fit=fit bar=black，qois 单项循环（抄 video-nano 最小形）；
+# clip 起播打 `display: fit=fit bar=000000 ...` 标记（播后 expect 断言前缀，boot_expect 只保开机），soak 保活。
+[[case]]
+name = "video-display-fit"
+covers = ["src/graphics/scale.rs", "src/config/display.rs", "src/video/", "usb_reports/1080p/video.qois"]
+timeout_sec = 180
+needs_video = true
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+vsync = "off"
+[play]
+fps = "max"
+[display]
+fit = "fit"
+bar = "black"
+[playlist]
+loop = "loop_list"
+[[playlist.items]]
+path = "1080p/video.qois"
+[wallpaper]
+enable = false
+[schedule]
+backend = "nano"
+"""
+boot_expect = ["cfg: version=1", "idle: ready"]
+keys = [
+  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
+  { send = "p", wait_after = 3 },
+  { send = "0", wait_for = ["menu: ready"], wait_after = 5 },
+]
+expect = ["play: path=nano_pump", "playlist: items=1 loop=loop_list", "playlist: item 1/1 path=1080p/video.qois", "display: fit=fit bar=000000"]
+soak_sec = 15
+
+# 显示适配 stretch：[display] fit=stretch bar=black（除 fit 外与 fit 例同构，便于隔离变量）；
+# 断言 `display: fit=stretch bar=000000` 前缀 + soak 保活。
+[[case]]
+name = "video-display-stretch"
+covers = ["src/graphics/scale.rs", "src/config/display.rs", "src/video/", "usb_reports/1080p/video.qois"]
+timeout_sec = 180
+needs_video = true
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+vsync = "off"
+[play]
+fps = "max"
+[display]
+fit = "stretch"
+bar = "black"
+[playlist]
+loop = "loop_list"
+[[playlist.items]]
+path = "1080p/video.qois"
+[wallpaper]
+enable = false
+[schedule]
+backend = "nano"
+"""
+boot_expect = ["cfg: version=1", "idle: ready"]
+keys = [
+  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
+  { send = "p", wait_after = 3 },
+  { send = "0", wait_for = ["menu: ready"], wait_after = 5 },
+]
+expect = ["play: path=nano_pump", "playlist: items=1 loop=loop_list", "playlist: item 1/1 path=1080p/video.qois", "display: fit=stretch bar=000000"]
+soak_sec = 15
+
+# 显示适配 cover：[display] fit=cover bar=black（与 fit/stretch 例同构，便于隔离变量）；
+# 等比放大裁满，按 align 定裁切锚点（默认 center）；断言 `display: fit=cover bar=000000` 前缀 + soak 保活。
+[[case]]
+name = "video-display-cover"
+covers = ["src/graphics/scale.rs", "src/config/display.rs", "src/video/", "usb_reports/1080p/video.qois"]
+timeout_sec = 180
+needs_video = true
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+vsync = "off"
+[play]
+fps = "max"
+[display]
+fit = "cover"
+bar = "black"
+[playlist]
+loop = "loop_list"
+[[playlist.items]]
+path = "1080p/video.qois"
+[wallpaper]
+enable = false
+[schedule]
+backend = "nano"
+"""
+boot_expect = ["cfg: version=1", "idle: ready"]
+keys = [
+  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
+  { send = "p", wait_after = 3 },
+  { send = "0", wait_for = ["menu: ready"], wait_after = 5 },
+]
+expect = ["play: path=nano_pump", "playlist: items=1 loop=loop_list", "playlist: item 1/1 path=1080p/video.qois", "display: fit=cover bar=000000"]
+soak_sec = 15
+
+# 显示适配自定义 bar（RGB 自由色）：[display] fit=fit bar="#102040"（与 cover 例同构，仅 fit 回默认 + bar 取自定义 hex，便于隔离 bar 变量）；
+# 断言 `display: fit=fit bar=102040` 前缀（hex 小写无 '#'，`to_hex()` 口径）+ soak 保活。
+[[case]]
+name = "video-display-bar"
+covers = ["src/graphics/scale.rs", "src/config/display.rs", "src/video/", "usb_reports/1080p/video.qois"]
+timeout_sec = 180
+needs_video = true
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+vsync = "off"
+[play]
+fps = "max"
+[display]
+fit = "fit"
+bar = "#102040"
+[playlist]
+loop = "loop_list"
+[[playlist.items]]
+path = "1080p/video.qois"
+[wallpaper]
+enable = false
+[schedule]
+backend = "nano"
+"""
+boot_expect = ["cfg: version=1", "idle: ready"]
+keys = [
+  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
+  { send = "p", wait_after = 3 },
+  { send = "0", wait_for = ["menu: ready"], wait_after = 5 },
+]
+expect = ["play: path=nano_pump", "playlist: items=1 loop=loop_list", "playlist: item 1/1 path=1080p/video.qois", "display: fit=fit bar=102040"]
+soak_sec = 15

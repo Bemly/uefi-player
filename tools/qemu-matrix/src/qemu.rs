@@ -202,6 +202,13 @@ pub(crate) fn run_case(
             vec![0u8; 1920 * 1080 * 4],
         ));
     }
+    if case.needs_raws > 0 {
+        // 播片 raws 片源：`1080p/video.raws` 黑场 N 帧首尾相接（单文件路只走通路）。
+        files.push((
+            "1080p/video.raws",
+            vec![0u8; case.needs_raws as usize * 1920 * 1080 * 4],
+        ));
+    }
     for i in 0..case.needs_rawvideo {
         // 播片 raw 片源黑场帧（`[play] format = "raw"` 用，同上只走通路）。
         files.push((
