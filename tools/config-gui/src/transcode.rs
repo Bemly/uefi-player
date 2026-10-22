@@ -286,6 +286,16 @@ pub(crate) struct TrackDecoder {
     prefix_done: bool,
     w: u32,
     h: u32,
+    /// mac VideoToolbox AVC 会话（首组建，跨组复用；Baseline 门控，失败即 CPU）。
+    #[cfg(target_os = "macos")]
+    vt_avc: Option<shiguredo_video_toolbox::Decoder>,
+    #[cfg(target_os = "macos")]
+    vt_avc_failed: bool,
+    /// Win/Linux Vulkan AVC 会话（首组建，跨组复用；FrameSorter 保序）。
+    #[cfg(not(target_os = "macos"))]
+    vk_dec: Option<gpu_video::BytesDecoder>,
+    #[cfg(not(target_os = "macos"))]
+    vk_failed: bool,
 }
 
 impl TrackDecoder {
@@ -298,6 +308,14 @@ impl TrackDecoder {
             prefix_done: false,
             w: 0,
             h: 0,
+            #[cfg(target_os = "macos")]
+            vt_avc: None,
+            #[cfg(target_os = "macos")]
+            vt_avc_failed: false,
+            #[cfg(not(target_os = "macos"))]
+            vk_dec: None,
+            #[cfg(not(target_os = "macos"))]
+            vk_failed: false,
         }
     }
 
@@ -322,6 +340,163 @@ impl TrackDecoder {
     }
 }
 
+/// stride 平面 → 紧凑行（逐行 memcpy，无像素运算；越界即 None）。
+/// 转码硬解 AVC（VT Nv12 回读行距常大于宽）用。
+fn pack_rows(src: &[u8], stride: usize, w: usize, h: usize) -> Option<Vec<u8>> {
+    if stride < w || src.len() < stride * h {
+        return None;
+    }
+    if stride == w {
+        return Some(src[..w * h].to_vec());
+    }
+    let mut out = Vec::with_capacity(w * h);
+    for row in 0..h {
+        out.extend_from_slice(&src[row * stride..row * stride + w]);
+    }
+    Some(out)
+}
+
+/// mac VideoToolbox AVC 硬解（Nv12 回读 → 拆平面；仅 Baseline SPS，
+/// 无 B 帧故与 CPU 同序；非 Baseline/建会话失败返回 None 走 CPU）。
+#[cfg(target_os = "macos")]
+impl TrackDecoder {
+    fn decode_avc_vt(&mut self, d: &DemuxedTrack, g: &[RawSample]) -> Option<Vec<Yuv420>> {
+        use shiguredo_video_toolbox::{Decoder, DecoderCodec, DecoderConfig, PixelFormat};
+        if self.vt_avc_failed {
+            return None;
+        }
+        if self.vt_avc.is_none() {
+            let units = crate::codecs::split_annexb(&d.annexb_prefix);
+            if units.len() < 2
+                || units[0].is_empty()
+                || units[0][0] & 0x1F != 7
+                || crate::codecs::sps_profile_idc(&units[0]) != Some(66)
+            {
+                self.vt_avc_failed = true;
+                return None;
+            }
+            // 会话内已拷贝参数集（video_bg 同式）；进程级常驻，不重复泄漏之忧
+            // （转码 job 级 decoder，一次 життя一次建）。
+            let sps: &'static [u8] = Box::leak(units[0].to_vec().into_boxed_slice());
+            let pps: &'static [u8] = Box::leak(units[1].to_vec().into_boxed_slice());
+            match Decoder::new(DecoderConfig {
+                codec: DecoderCodec::H264 {
+                    sps,
+                    pps,
+                    nalu_len_bytes: d.length_size as u32,
+                },
+                pixel_format: PixelFormat::Nv12,
+            }) {
+                Ok(dec) => self.vt_avc = Some(dec),
+                Err(_) => {
+                    self.vt_avc_failed = true;
+                    return None;
+                }
+            }
+        }
+        let mut frames = Vec::new();
+        for r in g {
+            // 借用内转 owned（帧借 decoder），借用外再 push。
+            let got: Option<Option<(usize, usize, Vec<u8>, Vec<u8>)>> = match self.vt_avc.as_mut() {
+                Some(dec) => match dec.decode(&r.payload) {
+                    Ok(Some(f)) => {
+                        // VT 同步解码即时吐帧；Baseline 无重排，到手即显示序。
+                        if let shiguredo_video_toolbox::DecodedFrame::Nv12(nv) = f {
+                            let (w, h) = (nv.width() as usize, nv.height() as usize);
+                            if w == 0 || h == 0 {
+                                Some(None)
+                            } else {
+                                match (
+                                    pack_rows(nv.y_plane(), nv.y_stride(), w, h),
+                                    pack_rows(nv.uv_plane(), nv.uv_stride(), w, h / 2),
+                                ) {
+                                    (Some(y), Some(uv)) => Some(Some((w, h, y, uv))),
+                                    _ => Some(None),
+                                }
+                            }
+                        } else {
+                            Some(None)
+                        }
+                    }
+                    Ok(None) => Some(None),
+                    Err(_) => Some(None),
+                },
+                None => break,
+            };
+            if let Some(Some((w, h, y, uv))) = got {
+                if let Some((u, v)) = crate::codecs::split_uv_planes(&uv, w, h) {
+                    self.push_frame(w as u32, h as u32, y, u, v, &mut frames);
+                }
+            }
+        }
+        Some(frames)
+    }
+}
+
+/// Win/Linux Vulkan AVC 硬解（BytesDecoder NV12 回读 → 拆平面；
+/// FrameSorter 保序，全 profile 可吃；失败返回 None 走 CPU）。
+#[cfg(not(target_os = "macos"))]
+impl TrackDecoder {
+    fn decode_avc_vk(&mut self, d: &DemuxedTrack, g: &[RawSample]) -> Option<Vec<Yuv420>> {
+        if self.vk_failed {
+            return None;
+        }
+        if self.vk_dec.is_none() {
+            let dev = crate::codecs::hw_vulkan_device()?;
+            match dev.create_bytes_decoder_h264(gpu_video::parameters::DecoderParameters::default())
+            {
+                Ok(dec) => self.vk_dec = Some(dec),
+                Err(_) => {
+                    self.vk_failed = true;
+                    return None;
+                }
+            }
+        }
+        let mut frames = Vec::new();
+        for r in g {
+            let mut annexb = Vec::new();
+            if !self.prefix_done {
+                annexb.extend_from_slice(&d.annexb_prefix);
+                self.prefix_done = true;
+            }
+            annexb.extend(crate::codecs::length_prefixed_to_annexb(
+                &r.payload,
+                d.length_size,
+            ));
+            // 借用内转 owned，借用外再 push。
+            let got: Vec<(usize, usize, Vec<u8>, Vec<u8>, Vec<u8>)> = match self.vk_dec.as_mut() {
+                Some(dec) => match dec.decode(gpu_video::EncodedInputChunk {
+                    data: &annexb,
+                    pts: None,
+                }) {
+                    Ok(fs) => fs
+                        .iter()
+                        .filter_map(|f| {
+                            let (w, h) = (f.data.width as usize, f.data.height as usize);
+                            if w == 0 || h == 0 {
+                                return None;
+                            }
+                            let expect = w * h * 3 / 2;
+                            if f.data.frame.len() < expect {
+                                return None;
+                            }
+                            let (y, rest) = f.data.frame.split_at(w * h);
+                            let (u, v) = crate::codecs::split_uv_planes(rest, w, h)?;
+                            Some((w, h, y.to_vec(), u, v))
+                        })
+                        .collect(),
+                    Err(_) => Vec::new(),
+                },
+                None => break,
+            };
+            for (w, h, y, u, v) in got {
+                self.push_frame(w as u32, h as u32, y, u, v, &mut frames);
+            }
+        }
+        Some(frames)
+    }
+}
+
 /// 单组解码（SPS/PPS 前缀只喂首组；HEVC 尾组外不 flush，结束调 finish；
 /// 形状与固件一致）。pub(crate)：图库封面复用首帧解码，不另起解码链。
 pub(crate) fn decode_group(
@@ -338,6 +513,15 @@ pub(crate) fn decode_group(
     let mut errs = 0usize;
     match dec.kind {
         MediaFormat::Avc => {
+            // 硬解优先（mac VT Nv12 / 非 mac Vulkan NV12；失败回 CPU，不报错）。
+            #[cfg(target_os = "macos")]
+            if let Some(frames) = dec.decode_avc_vt(d, g) {
+                return Ok(frames);
+            }
+            #[cfg(not(target_os = "macos"))]
+            if let Some(frames) = dec.decode_avc_vk(d, g) {
+                return Ok(frames);
+            }
             for r in g {
                 annexb.extend(length_prefixed_to_annexb(&r.payload, d.length_size));
             }
@@ -447,9 +631,31 @@ pub(crate) fn decode_group(
     }
 }
 
-/// 收尾（HEVC flush 后排空；avc/vp9 无缓冲，直接空）。
+/// 收尾（HEVC flush 后排空；Vulkan AVC 解码器同理排空；avc/vp9 CPU 无缓冲）。
 fn finish_decode(dec: &mut TrackDecoder) -> Result<Vec<Yuv420>, String> {
     let mut frames = Vec::new();
+    #[cfg(not(target_os = "macos"))]
+    if dec.kind == MediaFormat::Avc {
+        // Vulkan BytesDecoder 内 FrameSorter 可能滞留 B 帧重排尾巴，flush 吐完。
+        if let Some(b) = dec.vk_dec.as_mut() {
+            match b.flush() {
+                Ok(fs) => {
+                    for f in &fs {
+                        let (w, h) = (f.data.width as usize, f.data.height as usize);
+                        if w == 0 || h == 0 || f.data.frame.len() < w * h * 3 / 2 {
+                            continue;
+                        }
+                        let (y, rest) = f.data.frame.split_at(w * h);
+                        if let Some((u, v)) = crate::codecs::split_uv_planes(rest, w, h) {
+                            dec.push_frame(w as u32, h as u32, y.to_vec(), u, v, &mut frames);
+                        }
+                    }
+                }
+                Err(_) => {}
+            }
+        }
+        return Ok(frames);
+    }
     if dec.hevc.is_none() {
         return Ok(frames);
     }

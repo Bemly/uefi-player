@@ -5,11 +5,20 @@
 //!   `rusty_h264-decoder 0.16` / `rusty_h265 0.6.2` / `vp9dec 0.1.1`
 //!   （与固件 pin 同版；h263/mpeg2v 上游无 crates.io，源解码暂只走 mp4 三轨 +
 //!   静帧/裸帧，后继再接；绝不为解码新增 path 依赖，保持 GUI 与 submodule 解耦）。
-//! - 编码七路：`less-avc`（AVC baseline）/ `oxideav-theora`（intra theora）/
-//!   `rusty_vp9` / `oxideav-h265` / `oxideav-h263` / `oxideav-mpeg12video` /
-//!   `qoi`（qois 直出）。OxideAV 四家走统一 registry 形态
-//!   （`make_encoder(&CodecParameters)` + `send_frame`/`receive_packet`/`flush`，
-//!   见 oxideav-theora 树内 `make_encoder_synthesizes_setup_from_ident_only` 用法）。
+//! - 编码七路：avc/hevc 走硬解（mac VideoToolbox / Win-Linux Vulkan Video，
+//!   段首恒关键帧 + 30 帧一段与 CPU 时代同语义；失败回退 CPU，保证不断转码）。
+//!   CPU 回退链保留：`less-avc`（AVC baseline）/ `oxideav-h265`（registry）
+//!   原样不动，只当兜底。`oxideav-theora`（intra）/ `rusty_vp9` / `oxideav-h263` /
+//!   `oxideav-mpeg12video` / `qoi`（qois 直出）维持纯 CPU。OxideAV 四家走统一
+//!   registry 形态（`make_encoder(&CodecParameters)` + `send_frame`/`receive_packet`/
+//!   `flush`，见 oxideav-theora 树内 `make_encoder_synthesizes_setup_from_ident_only` 用法）。
+//!   硬解参数口径：1080p 8Mbps VBR 上限（两家统一；nominal 30fps 只定码控时钟，
+//!   PTS 自洽与源 fps 无关）；AVC Baseline + CAVLC（与旧 CPU 输出同 profile，
+//!   固件解码零风险），HEVC Main 8-bit；B 帧全关（in-order，与旧管线同序）。
+//!   真零拷贝不做：VideoToolbox 只收 CPU 切片（无裸句柄可导 Metal），
+//!   Vulkan 侧纹理版产的是轮子自建 device 的纹理（跨不过 device，必须外部
+//!   内存导入，无现货轮子）；NV12 上传 + CPU 平面拼装是 DMA 级搬运，
+//!   无像素运算（与动态背景 `video_bg` 同纪律）。
 //! - 容器：AVC 走 `shiguredo_mp4::Mp4FileMuxer`（与固件 demux 同轮子，
 //!   回读零口径差）；theora 走 `ogg` 组 OggS；vp9 裸帧直装 vpcC。
 //! - 内存纪律：40s@60fps 全预解码要 ~19GB，不可能；按关键帧分组
@@ -247,6 +256,58 @@ mod codecs_tests {
         let units = split_annexb(&annexb);
         assert_eq!(units.len(), 2);
         assert_eq!(units[0], &[0x65, 0x88]);
+    }
+
+    #[test]
+    fn avcc_split_shapes() {
+        // 两个 4 字节 BE 长度 NAL。
+        let data = [0, 0, 0, 2, 0x65, 0x88, 0, 0, 0, 1, 0x41];
+        let units = avcc_to_nalus(&data).expect("avcc");
+        assert_eq!(units, vec![vec![0x65, 0x88], vec![0x41]]);
+        // 截断/空包即 None（调用方回退 CPU）。
+        assert!(avcc_to_nalus(&[]).is_none());
+        assert!(avcc_to_nalus(&[0, 0, 0]).is_none());
+        assert!(avcc_to_nalus(&[0, 0, 0, 5, 0x65]).is_none());
+        assert!(avcc_to_nalus(&[0, 0, 0, 0, 0x65]).is_none());
+    }
+
+    #[test]
+    fn profile_gate_spots() {
+        assert_eq!(sps_profile_idc(&[0x67, 66, 0x00]), Some(66));
+        assert_eq!(sps_profile_idc(&[0x67, 100, 0x00]), Some(100));
+        assert_eq!(sps_profile_idc(&[]), None);
+        assert_eq!(sps_profile_idc(&[0x68, 66]), None);
+    }
+
+    #[test]
+    fn nv12_roundtrip_is_memcpy() {
+        // 交错 ↔ 平面互逆，逐字节一致（零运算）。
+        let f = Yuv420 {
+            w: 6,
+            h: 4,
+            y: (0..24u8).collect(),
+            u: vec![10, 11, 12, 13, 14, 15],
+            v: vec![20, 21, 22, 23, 24, 25],
+        };
+        let nv = yuv420_to_nv12(&f).expect("nv12");
+        assert_eq!(nv.len(), 6 * 4 + 3 * 2 * 2);
+        // Y 整拷。
+        assert_eq!(&nv[..24], &(0..24u8).collect::<Vec<_>>()[..]);
+        // UV 交错序：U0V0 U1V1…
+        assert_eq!(&nv[24..], &[10, 20, 11, 21, 12, 22, 13, 23, 14, 24, 15, 25]);
+        let (u, v) = split_uv_planes(&nv[24..], 6, 4).expect("split");
+        assert_eq!(u, vec![10, 11, 12, 13, 14, 15]);
+        assert_eq!(v, vec![20, 21, 22, 23, 24, 25]);
+        // 坏输入即 None。
+        assert!(yuv420_to_nv12(&Yuv420 {
+            w: 0,
+            h: 0,
+            y: vec![],
+            u: vec![],
+            v: vec![]
+        })
+        .is_none());
+        assert!(split_uv_planes(&[1, 2, 3], 6, 4).is_none());
     }
 
     #[test]
@@ -562,10 +623,19 @@ pub(crate) struct AvcStream {
     pub(crate) samples: Vec<AvcSample>,
 }
 
-/// AVC 编码（`less-avc` baseline；组内逐帧，首帧出 SPS/PPS）。
+/// AVC 编码（硬解优先，失败回退 CPU；段首恒关键帧，30 帧一段语义不变）。
+/// 硬解输出与 CPU 同形状（SPS/PPS + 样片），下游 `to_mp4` 零改。
+pub(crate) fn encode_avc(frames: &[Yuv420]) -> Result<AvcStream, String> {
+    match encode_avc_hw(frames) {
+        Ok(s) => Ok(s),
+        Err(_) => encode_avc_cpu(frames),
+    }
+}
+
+/// AVC 编码 CPU 兜底（`less-avc` baseline；组内逐帧，首帧出 SPS/PPS）。
 /// 非 16 对齐几何（如 1920x1080）先补齐缓冲、pic 报原尺寸，
 /// 轮内 `frame_cropping` 写 SPS 裁剪（见 `AvcInputFrame`）。
-pub(crate) fn encode_avc(frames: &[Yuv420]) -> Result<AvcStream, String> {
+fn encode_avc_cpu(frames: &[Yuv420]) -> Result<AvcStream, String> {
     if frames.is_empty() {
         return Err(String::from("avc: no frames"));
     }
@@ -741,9 +811,18 @@ pub(crate) struct HevcStream {
     pub(crate) samples: Vec<HevcSample>,
 }
 
-/// H.265 编码（`oxideav-h265` registry；包负载按 Annex-B 拼，
+/// H.265 编码（硬解优先，失败回退 CPU；包负载按 Annex-B 拼，
 /// NAL 类型 32/33/34 收进参数集，19/20/21 判关键帧）。
 pub(crate) fn encode_hevc(frames: &[Yuv420]) -> Result<HevcStream, String> {
+    match encode_hevc_hw(frames) {
+        Ok(s) => Ok(s),
+        Err(_) => encode_hevc_cpu(frames),
+    }
+}
+
+/// H.265 编码 CPU 兜底（`oxideav-h265` registry；包负载按 Annex-B 拼，
+/// NAL 类型 32/33/34 收进参数集，19/20/21 判关键帧）。
+fn encode_hevc_cpu(frames: &[Yuv420]) -> Result<HevcStream, String> {
     if frames.is_empty() {
         return Err(String::from("hevc: no frames"));
     }
@@ -828,6 +907,521 @@ pub(crate) fn encode_mpeg2v(frames: &[Yuv420]) -> Result<Vec<u8>, String> {
         return Err(String::from("mpeg2v: no packets"));
     }
     Ok(out)
+}
+
+/// 硬解编码（avc/hevc；mac VideoToolbox / Win-Linux Vulkan Video）。
+/// 形状与 CPU 版一致（首帧强制关键帧 + 参数集 + 1:1 样片），下游 `to_mp4` 零改；
+/// 任何失败一律 `Err`（调用方回退 CPU，保证不断转码）。
+/// 码控口径（两家统一，写死）：1080p 8Mbps 上限；nominal 30fps 只定码控时钟
+/// （输入输出 PTS 自洽，与源 fps 无关）；AVC Baseline + CAVLC（与旧 CPU 输出
+/// 同 profile，固件解码零风险），HEVC Main 8-bit；B 帧全关（in-order 输出，
+/// 与旧管线同序，无需重排）。
+/// CPU 参与仅 DMA 级搬运（平面拷贝/NV12 交错），无像素运算。
+fn encode_avc_hw(frames: &[Yuv420]) -> Result<AvcStream, String> {
+    if frames.is_empty() {
+        return Err(String::from("avc: no frames"));
+    }
+    #[cfg(target_os = "macos")]
+    {
+        return encode_avc_vt(frames);
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        return encode_avc_vk(frames);
+    }
+}
+
+fn encode_hevc_hw(frames: &[Yuv420]) -> Result<HevcStream, String> {
+    if frames.is_empty() {
+        return Err(String::from("hevc: no frames"));
+    }
+    #[cfg(target_os = "macos")]
+    {
+        return encode_hevc_vt(frames);
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        return encode_hevc_vk(frames);
+    }
+}
+
+/// AVCC（4 字节 BE 长度前缀，VideoToolbox 编码输出口径）→ 裸 NAL 切分。
+/// 纯函数（可单测）：长度越界即 None（调用方回退 CPU）。
+fn avcc_to_nalus(data: &[u8]) -> Option<Vec<Vec<u8>>> {
+    let mut out = Vec::new();
+    let mut off = 0usize;
+    while off < data.len() {
+        if data.len() - off < 4 {
+            return None;
+        }
+        let len =
+            u32::from_be_bytes([data[off], data[off + 1], data[off + 2], data[off + 3]]) as usize;
+        off += 4;
+        if len == 0 || data.len() - off < len {
+            return None;
+        }
+        out.push(data[off..off + len].to_vec());
+        off += len;
+    }
+    if out.is_empty() {
+        return None;
+    }
+    Some(out)
+}
+
+/// SPS 首字节 profile_idc（Annex-B 裸 NAL：`0x67` 后一字节）。
+/// 纯函数（可单测）：mac VT 同步解码无重排缓冲，只敢吃 Baseline（66）；
+/// Main/High（含 B 帧）回退 CPU（rusty 有重排）。
+/// `pub(crate)`：转码硬解 AVC 门控复用。
+pub(crate) fn sps_profile_idc(sps: &[u8]) -> Option<u8> {
+    if sps.len() >= 2 && sps[0] == 0x67 {
+        Some(sps[1])
+    } else {
+        None
+    }
+}
+
+/// YUV420 紧凑平面 → NV12 连续块（纯搬运：Y 整拷 + UV 交错，无像素运算）。
+/// 纯函数（可单测）：几何/长度对不上即 None。
+/// Win/Linux 硬编码输入用；mac 下仅单测引用（`cfg_attr` 免 dead_code 告警）。
+#[cfg_attr(all(not(test), target_os = "macos"), allow(dead_code))]
+fn yuv420_to_nv12(f: &Yuv420) -> Option<Vec<u8>> {
+    let (w, h) = (f.w as usize, f.h as usize);
+    if w == 0 || h == 0 {
+        return None;
+    }
+    let uvw = w.div_ceil(2);
+    let uvh = h.div_ceil(2);
+    if f.y.len() < w * h || f.u.len() < uvw * uvh || f.v.len() < uvw * uvh {
+        return None;
+    }
+    let mut out = Vec::with_capacity(w * h + uvw * uvh * 2);
+    out.extend_from_slice(&f.y[..w * h]);
+    for row in 0..uvh {
+        for col in 0..uvw {
+            out.push(f.u[row * uvw + col]);
+            out.push(f.v[row * uvw + col]);
+        }
+    }
+    Some(out)
+}
+
+/// 交错 UV → U/V 平面（纯搬运；`yuv420_to_nv12` 的逆操作，可单测）。
+/// `pub(crate)`：转码硬解 AVC（Nv12 回读拆平面）复用。
+pub(crate) fn split_uv_planes(uv: &[u8], w: usize, h: usize) -> Option<(Vec<u8>, Vec<u8>)> {
+    if w % 2 != 0 || h % 2 != 0 {
+        return None;
+    }
+    let (uvw, uvh) = (w / 2, h / 2);
+    if uv.len() < uvw * uvh * 2 {
+        return None;
+    }
+    let mut u = Vec::with_capacity(uvw * uvh);
+    let mut v = Vec::with_capacity(uvw * uvh);
+    for p in uv[..uvw * uvh * 2].chunks_exact(2) {
+        u.push(p[0]);
+        v.push(p[1]);
+    }
+    Some((u, v))
+}
+
+/// mac VideoToolbox 编码（AVC Baseline/CAVLC 或 HEVC Main；段内独立会话，
+/// 首帧强制关键帧；形状与 CPU 版一致）。
+#[cfg(target_os = "macos")]
+fn vt_encode(frames: &[Yuv420], hevc: bool) -> Result<Vec<VtFrame>, String> {
+    use shiguredo_video_toolbox::{
+        CodecConfig, EncodeOptions, Encoder, EncoderConfig, FrameData, H264EncoderConfig,
+        H264EntropyMode, H264Profile, HevcEncoderConfig, HevcProfile, PixelFormat,
+    };
+    let (w, h) = (frames[0].w, frames[0].h);
+    if w == 0 || h == 0 {
+        return Err(String::from("vt encode: bad geometry"));
+    }
+    let yb = w as usize * h as usize;
+    let uvb = (w as usize).div_ceil(2) * (h as usize).div_ceil(2);
+    let codec = if hevc {
+        CodecConfig::Hevc(HevcEncoderConfig {
+            profile: HevcProfile::Main,
+            allow_open_gop: false,
+        })
+    } else {
+        CodecConfig::H264(H264EncoderConfig {
+            profile: H264Profile::Baseline,
+            entropy_mode: H264EntropyMode::Cavlc,
+        })
+    };
+    let mut enc = Encoder::new(EncoderConfig {
+        width: w,
+        height: h,
+        codec,
+        pixel_format: PixelFormat::I420,
+        average_bitrate: Some(8_000_000),
+        fps_numerator: 30,
+        fps_denominator: 1,
+        prioritize_encoding_speed_over_quality: false,
+        real_time: false,
+        maximize_power_efficiency: false,
+        allow_frame_reordering: false,
+        allow_temporal_compression: true,
+        max_key_frame_interval: None,
+        max_key_frame_interval_duration: None,
+        max_frame_delay_count: None,
+    })
+    .map_err(|e| format!("vt enc init: {e:?}"))?;
+    let mut outs = Vec::new();
+    let mut fed = 0usize;
+    for (i, f) in frames.iter().enumerate() {
+        if (f.w, f.h) != (w, h) || f.y.len() < yb || f.u.len() < uvb || f.v.len() < uvb {
+            continue;
+        }
+        enc.encode(
+            &FrameData::I420 {
+                y: &f.y[..yb],
+                u: &f.u[..uvb],
+                v: &f.v[..uvb],
+            },
+            &EncodeOptions {
+                force_key_frame: i == 0,
+            },
+        )
+        .map_err(|e| format!("vt encode: {e:?}"))?;
+        fed += 1;
+        drain_vt(&mut enc, &mut outs)?;
+    }
+    enc.finish().map_err(|e| format!("vt finish: {e:?}"))?;
+    for _ in 0..fed + 16 {
+        if outs.len() >= fed {
+            break;
+        }
+        drain_vt(&mut enc, &mut outs)?;
+    }
+    if outs.len() < fed {
+        return Err(String::from("vt encode: short drain"));
+    }
+    Ok(outs)
+}
+
+/// VideoToolbox 单帧（AVCC → NAL；参数集 out-of-band 兜底帧内 lists）。
+#[cfg(target_os = "macos")]
+struct VtFrame {
+    keyframe: bool,
+    nalus: Vec<Vec<u8>>,
+    sps: Vec<Vec<u8>>,
+    pps: Vec<Vec<u8>>,
+    vps: Vec<Vec<u8>>,
+}
+
+/// VideoToolbox 排空一次（`next_frame` 吐完即 None；nounwind 外无 paint，无 abort 风险）。
+#[cfg(target_os = "macos")]
+fn drain_vt(
+    enc: &mut shiguredo_video_toolbox::Encoder,
+    outs: &mut Vec<VtFrame>,
+) -> Result<(), String> {
+    loop {
+        match enc.next_frame().map_err(|e| format!("vt drain: {e:?}"))? {
+            Some(f) => {
+                let nalus =
+                    avcc_to_nalus(&f.data).ok_or_else(|| String::from("vt drain: bad avcc"))?;
+                outs.push(VtFrame {
+                    keyframe: f.keyframe,
+                    nalus,
+                    sps: f.sps_list,
+                    pps: f.pps_list,
+                    vps: f.vps_list,
+                });
+            }
+            None => break,
+        }
+    }
+    Ok(())
+}
+
+/// mac VideoToolbox AVC（Baseline/CAVLC；与旧 CPU 输出同 profile）。
+#[cfg(target_os = "macos")]
+fn encode_avc_vt(frames: &[Yuv420]) -> Result<AvcStream, String> {
+    let outs = vt_encode(frames, false)?;
+    let (mut sps, mut pps) = (Vec::new(), Vec::new());
+    let mut samples = Vec::new();
+    for o in outs {
+        if sps.is_empty() {
+            if let Some(s) = o.sps.first() {
+                sps = s.clone();
+            }
+        }
+        if pps.is_empty() {
+            if let Some(p) = o.pps.first() {
+                pps = p.clone();
+            }
+        }
+        let mut nalus = Vec::new();
+        let mut keyframe = o.keyframe;
+        for u in &o.nalus {
+            if u.is_empty() {
+                continue;
+            }
+            match u[0] & 0x1F {
+                7 if sps.is_empty() => sps = u.clone(),
+                8 if pps.is_empty() => pps = u.clone(),
+                5 => {
+                    keyframe = true;
+                    nalus.push(u.clone());
+                }
+                _ => nalus.push(u.clone()),
+            }
+        }
+        samples.push(AvcSample { keyframe, nalus });
+    }
+    if sps.is_empty() || pps.is_empty() || samples.is_empty() {
+        return Err(String::from("avc vt: missing sps/pps/samples"));
+    }
+    samples[0].keyframe = true;
+    Ok(AvcStream { sps, pps, samples })
+}
+
+/// mac VideoToolbox HEVC（Main 8-bit）。
+#[cfg(target_os = "macos")]
+fn encode_hevc_vt(frames: &[Yuv420]) -> Result<HevcStream, String> {
+    let outs = vt_encode(frames, true)?;
+    let (mut vps, mut sps, mut pps) = (Vec::new(), Vec::new(), Vec::new());
+    let mut samples = Vec::new();
+    for o in outs {
+        if vps.is_empty() {
+            if let Some(v) = o.vps.first() {
+                vps = v.clone();
+            }
+        }
+        if sps.is_empty() {
+            if let Some(s) = o.sps.first() {
+                sps = s.clone();
+            }
+        }
+        if pps.is_empty() {
+            if let Some(p) = o.pps.first() {
+                pps = p.clone();
+            }
+        }
+        let mut nalus = Vec::new();
+        let mut keyframe = o.keyframe;
+        for u in &o.nalus {
+            if u.is_empty() {
+                continue;
+            }
+            match (u[0] >> 1) & 0x3F {
+                32 if vps.is_empty() => vps = u.clone(),
+                33 if sps.is_empty() => sps = u.clone(),
+                34 if pps.is_empty() => pps = u.clone(),
+                19..=21 => {
+                    keyframe = true;
+                    nalus.push(u.clone());
+                }
+                _ => nalus.push(u.clone()),
+            }
+        }
+        samples.push(HevcSample { keyframe, nalus });
+    }
+    if vps.is_empty() || sps.is_empty() || pps.is_empty() || samples.is_empty() {
+        return Err(String::from("hevc vt: missing param sets/samples"));
+    }
+    samples[0].keyframe = true;
+    Ok(HevcStream {
+        vps,
+        sps,
+        pps,
+        samples,
+    })
+}
+
+/// Win/Linux 共用 Vulkan 设备（job 间复用；缺驱动即 None，永久回退 CPU）。
+/// worker 线程内建（`video_bg` 同式，`Send` 已实锤）。
+#[cfg(not(target_os = "macos"))]
+static HW_VULKAN_DEV: std::sync::OnceLock<Option<std::sync::Arc<gpu_video::VulkanDevice>>> =
+    std::sync::OnceLock::new();
+
+/// Win/Linux 共用 Vulkan 设备（转码编码 + AVC 解码共用；`pub(crate)` 供转码侧复用）。
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn hw_vulkan_device() -> Option<std::sync::Arc<gpu_video::VulkanDevice>> {
+    HW_VULKAN_DEV
+        .get_or_init(|| {
+            let inst = gpu_video::VulkanInstance::new().ok()?;
+            let adapter = inst
+                .create_adapter(&gpu_video::parameters::VulkanAdapterDescriptor {
+                    supports_decoding: true,
+                    supports_encoding: true,
+                })
+                .ok()?;
+            adapter
+                .create_device(&gpu_video::parameters::VulkanDeviceDescriptor::default())
+                .ok()
+        })
+        .clone()
+}
+
+/// Win/Linux Vulkan AVC（Baseline；inline 参数集；与 VT 版同形状）。
+#[cfg(not(target_os = "macos"))]
+fn encode_avc_vk(frames: &[Yuv420]) -> Result<AvcStream, String> {
+    use gpu_video::parameters as P;
+    let dev = hw_vulkan_device().ok_or_else(|| String::from("avc vk: no device"))?;
+    let (w, h) = (frames[0].w, frames[0].h);
+    if w == 0 || h == 0 {
+        return Err(String::from("avc vk: bad geometry"));
+    }
+    let mut enc = dev
+        .create_bytes_encoder_h264(P::EncoderParametersH264 {
+            input_parameters: P::VideoParameters {
+                width: std::num::NonZeroU32::new(w)
+                    .ok_or_else(|| String::from("avc vk: bad width"))?,
+                height: std::num::NonZeroU32::new(h)
+                    .ok_or_else(|| String::from("avc vk: bad height"))?,
+                target_framerate: P::Rational {
+                    numerator: 30,
+                    denominator: std::num::NonZeroU32::new(1).expect("nonzero 1"),
+                },
+            },
+            output_parameters: P::EncoderOutputParameters {
+                idr_period: None,
+                rate_control: P::RateControl::EncoderDefault,
+                max_references: None,
+                profile: gpu_video::parameters::H264Profile::Baseline,
+                quality_level: 0,
+                usage_flags: None,
+                tuning_mode: None,
+                content_flags: None,
+                inline_stream_params: Some(true),
+                color_space: None,
+                color_range: None,
+            },
+        })
+        .map_err(|e| format!("avc vk init: {e:?}"))?;
+    let (mut sps, mut pps) = (Vec::new(), Vec::new());
+    let mut samples = Vec::new();
+    for (i, f) in frames.iter().enumerate() {
+        if (f.w, f.h) != (w, h) {
+            continue;
+        }
+        let nv12 = yuv420_to_nv12(f).ok_or_else(|| String::from("avc vk: bad planes"))?;
+        let chunk = enc
+            .encode(
+                &gpu_video::InputFrame {
+                    data: gpu_video::RawFrameData {
+                        frame: nv12,
+                        width: w,
+                        height: h,
+                    },
+                    pts: None,
+                },
+                i == 0,
+            )
+            .map_err(|e| format!("avc vk encode: {e:?}"))?;
+        let mut nalus = Vec::new();
+        let mut keyframe = chunk.is_keyframe;
+        for u in split_annexb(&chunk.data) {
+            if u.is_empty() {
+                continue;
+            }
+            match u[0] & 0x1F {
+                7 if sps.is_empty() => sps = u.to_vec(),
+                8 if pps.is_empty() => pps = u.to_vec(),
+                5 => {
+                    keyframe = true;
+                    nalus.push(u.to_vec());
+                }
+                _ => nalus.push(u.to_vec()),
+            }
+        }
+        samples.push(AvcSample { keyframe, nalus });
+    }
+    if sps.is_empty() || pps.is_empty() || samples.is_empty() {
+        return Err(String::from("avc vk: missing sps/pps/samples"));
+    }
+    samples[0].keyframe = true;
+    Ok(AvcStream { sps, pps, samples })
+}
+
+/// Win/Linux Vulkan HEVC（Main 8-bit；inline 参数集）。
+#[cfg(not(target_os = "macos"))]
+fn encode_hevc_vk(frames: &[Yuv420]) -> Result<HevcStream, String> {
+    use gpu_video::parameters as P;
+    let dev = hw_vulkan_device().ok_or_else(|| String::from("hevc vk: no device"))?;
+    let (w, h) = (frames[0].w, frames[0].h);
+    if w == 0 || h == 0 {
+        return Err(String::from("hevc vk: bad geometry"));
+    }
+    let mut enc = dev
+        .create_bytes_encoder_h265(P::EncoderParametersH265 {
+            input_parameters: P::VideoParameters {
+                width: std::num::NonZeroU32::new(w)
+                    .ok_or_else(|| String::from("hevc vk: bad width"))?,
+                height: std::num::NonZeroU32::new(h)
+                    .ok_or_else(|| String::from("hevc vk: bad height"))?,
+                target_framerate: P::Rational {
+                    numerator: 30,
+                    denominator: std::num::NonZeroU32::new(1).expect("nonzero 1"),
+                },
+            },
+            output_parameters: P::EncoderOutputParameters {
+                idr_period: None,
+                rate_control: P::RateControl::EncoderDefault,
+                max_references: None,
+                profile: gpu_video::parameters::H265Profile::Main,
+                quality_level: 0,
+                usage_flags: None,
+                tuning_mode: None,
+                content_flags: None,
+                inline_stream_params: Some(true),
+                color_space: None,
+                color_range: None,
+            },
+        })
+        .map_err(|e| format!("hevc vk init: {e:?}"))?;
+    let (mut vps, mut sps, mut pps) = (Vec::new(), Vec::new(), Vec::new());
+    let mut samples = Vec::new();
+    for (i, f) in frames.iter().enumerate() {
+        if (f.w, f.h) != (w, h) {
+            continue;
+        }
+        let nv12 = yuv420_to_nv12(f).ok_or_else(|| String::from("hevc vk: bad planes"))?;
+        let chunk = enc
+            .encode(
+                &gpu_video::InputFrame {
+                    data: gpu_video::RawFrameData {
+                        frame: nv12,
+                        width: w,
+                        height: h,
+                    },
+                    pts: None,
+                },
+                i == 0,
+            )
+            .map_err(|e| format!("hevc vk encode: {e:?}"))?;
+        let mut nalus = Vec::new();
+        let mut keyframe = chunk.is_keyframe;
+        for u in split_annexb(&chunk.data) {
+            if u.is_empty() {
+                continue;
+            }
+            match (u[0] >> 1) & 0x3F {
+                32 if vps.is_empty() => vps = u.to_vec(),
+                33 if sps.is_empty() => sps = u.to_vec(),
+                34 if pps.is_empty() => pps = u.to_vec(),
+                19..=21 => {
+                    keyframe = true;
+                    nalus.push(u.to_vec());
+                }
+                _ => nalus.push(u.to_vec()),
+            }
+        }
+        samples.push(HevcSample { keyframe, nalus });
+    }
+    if vps.is_empty() || sps.is_empty() || pps.is_empty() || samples.is_empty() {
+        return Err(String::from("hevc vk: missing param sets/samples"));
+    }
+    samples[0].keyframe = true;
+    Ok(HevcStream {
+        vps,
+        sps,
+        pps,
+        samples,
+    })
 }
 
 /// 固件侧回读：GUI 产出必须被固件同款解码器接受（异箱，同 API）。

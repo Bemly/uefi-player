@@ -19,9 +19,15 @@ description = "player.toml 跨平台可视化编辑器（host 工具，与 UEFI 
 #   v2026.10.16，约 4MB），`include_bytes!` 编进二进制。字体禁止子集化
 #   （根 AGENTS.md 有令：子集漏字只能事后补，体积换完整）。
 # - 转码页编码器（host std，无 no_std 约束；固件侧不受影响）：
+#   avc/hevc 编码 + avc 解码走硬解（用户拍板 2026-10-22）：mac 同门
+#   `shiguredo_video_toolbox 2026.1`（与动态背景同轮子，VideoToolbox 编码
+#   `Encoder` + 解码 `Decoder`，I420/NV12 平面直传）/ Win-Linux `gpu-video 0.4`
+#   （Vulkan Video `BytesDecoder` NV12 回读 + `BytesEncoderH264/H265`，轮子 verdict
+#   见 `docs/transcode.md`；`default-features = false` 关 wgpu 互操作——经 CPU 侧
+#   NV12 搬运上下屏，无版本耦合）；CPU 链（`less-avc`/`oxideav-h265`/rusty 系）
+#   保留为失败兜底，不断转码。
 #   `less-avc 0.1`（strawlab，MIT/Apache-2.0，纯 Rust H.264 baseline 编码器；
-#   `AvcEncoder::new/encode` 吃 YCbCrImage 出 Annex-B；固件树里已有同版本，
-#   见根 Cargo.toml，但固件只借名未用，GUI 侧真用）；
+#   AVC CPU 兜底；固件树里已有同版本，见根 Cargo.toml，但固件只借名未用）；
 #   `shiguredo_mp4 2026.5`（与固件同版本同用法：demux 复用 + `Mp4FileMuxer`
 #   打包 avc1/hvc1/vp09，读写同轮子，固件回读零风险；不另选 oxideav-mp4，
 #   免跨解析器口径差）；
@@ -30,7 +36,7 @@ description = "player.toml 跨平台可视化编辑器（host 工具，与 UEFI 
 #   `ogg 0.9`（RustAudio，BSD-3，1100 万下载，OggS 组包）装 theora 三头+数据包；
 #   `oxideav-h263 0.0.10`（MIT，`H263StreamEncoder` + `H263EncoderOptions`）；
 #   `oxideav-h265 0.0.15`（MIT，`H265Encoder` inter/intra/pcm + `make_encoder`；
-#   固件解码用 rusty_h265，跨箱 roundtrip 靠 host 测试锁死）；
+#   现为 HEVC CPU 兜底；固件解码用 rusty_h265，跨箱 roundtrip 靠 host 测试锁死）；
 #   `oxideav-mpeg12video 0.0.13`（MIT，MPEG-1/2 encoder + runtime；
 #   固件解码用 filmcraft-mpeg2v，跨箱 roundtrip 同上）；
 #   `rusty_vp9 0.1`（Remade-With-Rust，Apache-2.0，零依赖，`Vp9Encoder` +
@@ -39,7 +45,8 @@ description = "player.toml 跨平台可视化编辑器（host 工具，与 UEFI 
 #   `Packet` 公共类型，已在 oxideav-theora 传递依赖里）；
 #   `image 0.25`（大轮子：静帧源 png/jpeg 解码 + `Triangle` 缩放到 1920x1080 +
 #   QOI 编码出 qois；手写三份不如一个现货，见 transcode.rs 头注释）。
-#   解码复用：mp4 源走 shiguredo_mp4 + rusty_h264-decoder 0.16/rusty_h265 0.6.2/
+#   解码复用：mp4 源走 shiguredo_mp4 + avc 硬解优先（mac VT Baseline 门控/
+#   Vulkan FrameSorter 保序；失败回退 rusty_h264-decoder 0.16）+ rusty_h265 0.6.2/
 #   vp9dec 0.1.1（与固件同版本；h263/mpeg2v 源暂只走裸流直通，后继再接）。
 # - 列表拖拽排序（host std，播放列表/壁纸画廊行重排；固件侧不受影响）：
 #   `egui_dnd 0.16`（lucasmerlin/hello_egui，MIT，

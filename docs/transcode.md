@@ -46,8 +46,8 @@
 
 | 目标 | 编码器 | 容器/布局 |
 |---|---|---|
-| avc → `1080p/video.mp4` | `less-avc` baseline（1080p 裁剪由轮内 `frame_cropping` 兜底） | `shiguredo_mp4::Mp4FileMuxer`（avc1/avcC + 长度前缀；与固件 demux **同轮子**，回读零口径差） |
-| hevc → `1080p/video.mp4` | `oxideav-h265` registry（`params.width/height` 必填；VPS/SPS/PPS 进 hvcc，in-band 参数集照收） | 同 muxer（hvc1/hvcC + 长度前缀；Main 8-bit 420 保守值，level 按帧率取 4.0/4.1） |
+| avc → `1080p/video.mp4` | 硬解优先（mac VideoToolbox H.264 Baseline/CAVLC / Win-Linux Vulkan Video Baseline；段首恒关键帧，30 帧一段与 CPU 时代同语义；失败回退 `less-avc` baseline，1080p 裁剪由轮内 `frame_cropping` 兜底） | `shiguredo_mp4::Mp4FileMuxer`（avc1/avcC + 长度前缀；与固件 demux **同轮子**，回读零口径差） |
+| hevc → `1080p/video.mp4` | 硬解优先（mac VideoToolbox HEVC Main 8-bit / Win-Linux Vulkan Video Main；VPS/SPS/PPS 进 hvcc，in-band 参数集照收；失败回退 `oxideav-h265` registry） | 同 muxer（hvc1/hvcC + 长度前缀；Main 8-bit 420 保守值，level 按帧率取 4.0/4.1） |
 | vp9 → `1080p/video.mp4` | `rusty_vp9`（crf32 + lag8 + speed3） | 同 muxer（vp09/vpcC，裸帧样片；stss 按 keyframe 写） |
 | h263 → `1080p/video.h263` | `oxideav-h263` registry（只要 §5.1.3 标准源格式；测试用 QCIF 176x144） | 裸流 PSC 分隔 |
 | mpeg2v → `1080p/video.m2v` | `oxideav-mpeg12video` registry | 裸基本流（`00 00 01 B3` 起始） |
@@ -68,9 +68,26 @@ avc/hevc/vp9 三档同名 `video.mp4`（播哪个由 `[play] format` 开关决�
 - 搜过 theora/h263/h265/mpeg2v 编码器：`oxideav-theora` 上游即带 `FrameEncoder`
   （本仓 patch 只加了 `encoder` 特性门，crates.io 默认特性即有）；
   `oxideav-h263` 有 `H263StreamEncoder`（docs 实锤，非纯解码器）；
-  `oxideav-h265` 有 `H265Encoder`（inter/intra/pcm + registry）；
+  `oxideav-h265` 有 `H265Encoder`（inter/intra/pcm + registry，现为 HEVC 硬解失败兜底）；
   `oxideav-mpeg12video` 有 MPEG-1/2 双编码器 + runtime。
-  `rusty_h264`（同门 H.264 编码器）存在，但用户点名 `less-avc`，故不用。
+  `rusty_h264`（同门 H.264 编码器）存在，但用户点名 `less-avc`，故 CPU 兜底仍用它。
+- 硬编码器（avc/hevc 转码 + avc 解码，用户拍板 2026-10-22）：mac
+  `shiguredo_video_toolbox`（与动态背景同轮子，已在依赖里，不新增；
+  编码 `Encoder` + 解码 `Decoder` 同箱，I420/NV12 平面直传）/ Win-Linux
+  `gpu-video 0.4`（`BytesDecoder` NV12 回读 + `BytesEncoderH264/H265`，`default-features`
+  关 wgpu 互操作——经 CPU 侧 NV12 搬运上下屏，无版本耦合；与动态背景不同，
+  这里不要纹理互操作，只要字节流）。
+  搜过不用：`ffmpeg-next 9`（系统动态库，brew 升版即断 ABI）；内置 ffmpeg 二进制
+  （30~80MB + 进程开销）；`egui-video` 系（播放件，不是编码轮子）。
+  码控口径：1080p 8Mbps 上限（两家统一）；nominal 30fps 只定码控时钟
+  （PTS 自洽，与源 fps 无关，见 `codecs.rs` 头注释）；AVC Baseline + CAVLC
+  （与旧 CPU 输出同 profile，固件解码零风险），HEVC Main 8-bit；B 帧全关
+  （in-order 输出，与旧管线同序）。
+  解码只动 AVC（mac 仅 Baseline SPS 才走硬解——VT 同步解码无重排缓冲，
+  Main/High 含 B 帧回退 CPU rusty；Vulkan 侧 `FrameSorter` 保序全 profile 可吃）。
+  真零拷贝不做（VideoToolbox 只收 CPU 切片、无裸句柄；Vulkan 纹理版产的是
+  轮子自建 device 的纹理，跨不过 device，必须外部内存导入，无现货轮子；
+  NV12 上传 + 平面拼装是 DMA 级搬运，无像素运算，与动态背景 `video_bg` 同纪律）。
 - `less-avc` 要调用方给 16 对齐缓冲：GUI 侧补齐（边缘复制）+ pic 报原尺寸，
   轮内 `frame_cropping` 写 SPS 裁剪（`AvcInputFrame`；64x40 回读裁回原几何，
   测试锁死，故 1920x1080 同理可播）。
@@ -84,9 +101,9 @@ avc/hevc/vp9 三档同名 `video.mp4`（播哪个由 `[play] format` 开关决�
 ## 验证链（100% Rust，host 内闭环）
 
 - `codecs_tests`：色彩 roundtrip ±2、Annex-B 切分/长度前缀互转、缩放恒等、
-  七目标冒烟（avc 回 rusty_h264_decoder；vp9 回 vp9dec 跳隐藏帧；
-  theora 三头 + 解码器回读；hevc Annex-B 回 rusty_h265；h263 PSC 头；
-  mpeg2v sequence_header 头；qois `qoi` 编解回读）。
+  纯搬运单测（AVCC 切分/SPS 门控/NV12 互逆）、七目标冒烟（avc 硬解→rusty_h264_decoder
+  回读；vp9 回 vp9dec 跳隐藏帧；theora 三头 + 解码器回读；hevc 硬解→rusty_h265
+  Annex-B 回读；h263 PSC 头；mpeg2v sequence_header 头；qois `qoi` 编解回读）。
 - `codecs_readback_tests`（固件侧视角）：GUI 产出被**固件同款解码器**接受——
   vp9→`vp9dec`（同解码器跨帧引用，解码器复用）、hevc→`rusty_h265`、
   theora→`oxideav-theora` 解码器、qois→`qoi`。
