@@ -195,6 +195,9 @@ fn drain_hevc(
     skipped: &mut u32,
     pending: &mut VecDeque<Vec<BltPixel>>,
 ) {
+    // YUV 暂存跨帧复用（懒窗热路径：每显示帧一次 `drain`，`clear` 保容量稳态零分配；
+    // 几何经 `check_geom` 首帧冻结，容量恒定；与 `eager.rs` 同口径）。
+    let mut yuv_scratch: Vec<u8> = Vec::new();
     loop {
         let f = match dec.next_frame() {
             Ok(f) => f,
@@ -209,8 +212,9 @@ fn drain_hevc(
             continue;
         }
         let (w, h) = (f.width, f.height);
-        let mut yuv = Vec::new();
-        f.write_yuv(&mut yuv);
+        yuv_scratch.clear();
+        f.write_yuv(&mut yuv_scratch);
+        let yuv = &yuv_scratch;
         let ybytes = w.saturating_mul(h);
         let uvbytes = w.div_ceil(2).saturating_mul(h.div_ceil(2));
         if yuv.len() < ybytes.saturating_add(uvbytes.saturating_mul(2)) {
