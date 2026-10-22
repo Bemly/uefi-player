@@ -81,6 +81,7 @@ use crate::fs::Fs;
 
 mod crew;
 mod decode;
+mod display;
 mod types;
 
 pub use crew::persist_measured_workers_n;
@@ -93,6 +94,7 @@ pub use decode::{
     decode_buffers, decode_effective_feed, decode_fetch, decode_raw_wh, decode_streaming,
     decode_threads, decode_window, decode_zero_copy, effective_feed,
 };
+pub use display::{BarColor, DisplayConfig, DisplayFit};
 pub use types::*;
 
 /// 解析结果：配置 + 可选的屏显警告（文件不存在不算错，返回 None）。

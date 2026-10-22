@@ -56,13 +56,17 @@ mod app;
 mod codecs;
 // RAW-GEOM：`[decode]` 子分类（`schema` 已到行数上限，拆出；重导出路径不变）。
 mod decode_cfg;
+mod display;
 mod gallery;
 mod pages;
 mod rules;
 mod schema;
 mod text;
 mod transcode;
+#[cfg(test)]
+mod transcode_hw;
 mod video_bg;
+mod vulkan_gpu;
 
 /// 背景图：片源第一帧（构建时用 ffmpeg 从片源抽好，见 `assets/bg.png`；
 /// `ffmpeg -i input.mp4 -vframes 1 assets/bg.png`，1280x720，约 600KB）。
@@ -91,6 +95,7 @@ fn main() -> eframe::Result<()> {
     let opts = eframe::NativeOptions {
         // egui_glass 硬性要求 wgpu 渲染器，glow 不可用。
         renderer: eframe::Renderer::Wgpu,
+        // 主题自管（见 `App::new` 的 `set_theme`）：不跟系统，桌面是多少都不影响。
         viewport: egui::ViewportBuilder::default()
             // 默认打开尺寸（内容区；外框 1229x791，减 macOS 标题栏 32）。
             .with_inner_size([1229.0, 759.0])

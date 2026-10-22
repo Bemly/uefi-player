@@ -1,6 +1,7 @@
 //! 动态背景 GPU 转换版：硬解在 GPU，CPU 只搬运不算像素，玻璃在 live 内采样。
 //!
-//! 链路（`input.mp4` 前 40s 循环，缺片/失败静默回静态底，不断任何流程）：
+//! 链路（默认 `input.mp4` 前 40s 循环，缺片/失败静默回静态底，不断任何流程；
+//! 图库选中 avc/hevc 片源即接管背景（`resolve_source`，切源杀旧 worker 重起）：
 //! worker 线程硬解（mac VideoToolbox / Win-Linux Vulkan `BytesDecoder`）→
 //! 只传 NV12（Y + 交错 UV，不做 BT.601，不转 RGBA）→ UI 线程 DMA 直传两张
 //! R8/RG GPU 纹理 → 自研 20 行 WGSL 全屏三角转 RGBA（与转码页
@@ -64,6 +65,8 @@ pub(crate) struct VideoBg {
     rs: Option<egui_wgpu::RenderState>,
     gpu: Option<GpuYuv>,
     front: Option<(egui::TextureId, f32, f32)>,
+    /// 当前片源（None = 默认 `VIDEO_PATH`；`set_source` 换源即杀旧 worker 重起）。
+    source: Option<String>,
 }
 
 impl VideoBg {
@@ -80,6 +83,7 @@ impl VideoBg {
             rs,
             gpu: None,
             front: None,
+            source: None,
         }
     }
 
@@ -93,12 +97,57 @@ impl VideoBg {
         path_exists
     }
 
+    /// 选中接管背景的纯规则（可单测，无 IO）：选中项编解码在集内才接管，
+    /// 否则 None（=默认片源）。集：mac `avc/hevc`（VT 双解）；Win/Linux 仅
+    /// `avc`（`gpu-video` 0.4 无 HEVC 解码器）。`codec` 由图库封面线程探针回填。
+    pub(crate) fn resolve_source(
+        entries: &[crate::gallery::GalleryEntry],
+        selected: Option<usize>,
+        dir: &str,
+    ) -> Option<String> {
+        let e = selected.and_then(|i| entries.get(i))?;
+        let ok = matches!(e.codec, Some("avc"))
+            || (cfg!(target_os = "macos") && matches!(e.codec, Some("hevc")));
+        if !ok {
+            return None;
+        }
+        Some(
+            std::path::Path::new(dir)
+                .join(&e.name)
+                .display()
+                .to_string(),
+        )
+    }
+
+    /// 切源（App 每帧调；变化才重建 worker；旧 worker 随 rx 丢弃 EPIPE 退出，
+    /// 在途帧不污染新源因为通道按 worker 独立）。
+    /// 新源清掉旧失败毒丸（`fallback`）与旧末帧（`front`）。
+    pub(crate) fn set_source(&mut self, want: Option<String>) {
+        if self.source != want {
+            self.source = want;
+            self.rx = None;
+            self.started = false;
+            self.fallback = None;
+            self.front = None;
+            self.playing = false;
+            self.next_frame_at = None;
+        }
+    }
+
     /// 循环预算帧数（40s × fps，原片 720p60 即 2400；纯规则，可测）。
     pub(crate) fn loop_budget_frames(fps: u32) -> u64 {
         (LOOP_SECS * fps.max(1) as f64).round() as u64
     }
 
     /// 是否该回绕（pts 秒数 ≥40 即绕；纯规则，可测）。
+    pub(crate) fn pace_sleep_ms(elapsed_secs: f64, wall_secs: f64) -> u64 {
+        if elapsed_secs > wall_secs {
+            ((elapsed_secs - wall_secs) * 1000.0).round() as u64
+        } else {
+            0
+        }
+    }
+
     pub(crate) fn should_loop(elapsed_secs: f64) -> bool {
         elapsed_secs >= LOOP_SECS
     }
@@ -135,7 +184,11 @@ impl VideoBg {
         }
         if !self.started {
             self.started = true;
-            if !Self::should_try_start(std::path::Path::new(VIDEO_PATH).exists()) {
+            let src = self
+                .source
+                .clone()
+                .unwrap_or_else(|| VIDEO_PATH.to_string());
+            if !Self::should_try_start(std::path::Path::new(&src).exists()) {
                 self.fallback = Some(String::from("video bg: no file, fallback solid"));
                 self.playing = false;
                 return false;
@@ -144,7 +197,7 @@ impl VideoBg {
             self.rx = Some(rx);
             std::thread::Builder::new()
                 .name(String::from("video-bg"))
-                .spawn(move || decode_loop(VIDEO_PATH, tx))
+                .spawn(move || decode_loop(&src, tx))
                 .ok();
         }
         // 非阻塞收完本帧到达的全部消息（只留最新帧，旧帧丢弃跟上节拍）。
@@ -310,13 +363,10 @@ impl GpuYuv {
     /// 建转换器 + 双槽池并登记 native id（必须在 `LiveBackdrop::new` 之后调，
     /// twin 自动镜像；尺寸非法/超限返回 None，调用方回静态底，不断流程）。
     fn new(rs: &egui_wgpu::RenderState, w: u32, h: u32) -> Option<Self> {
-        // 几何门：偶数 + 上限 2048 + 行距 256 对齐（`write_texture` 硬件要求，
-        // 1280x720 天然满足；不满足即回静态底，不炸不断）。
+        // 几何门：偶数 + 上限 2048。`write_texture` 的 256 字节行距要求用填充行搞定
+        // （见 `upload_convert` 内 `padded_pitch`），不再拒绝非 256 宽（320x180 等图库小片必须可播）。
         if w < 16 || h < 16 || w > 2048 || h > 2048 || !w.is_multiple_of(2) || !h.is_multiple_of(2)
         {
-            return None;
-        }
-        if !w.is_multiple_of(256) {
             return None;
         }
         let device = rs.device.clone();
@@ -483,11 +533,29 @@ impl GpuYuv {
         })
     }
 
+    /// 行距填充到 256 字节（`write_texture` 硬件要求）：纯规则，可单测。
+    pub(crate) fn padded_pitch(w: u32) -> u32 {
+        ((w + 255) / 256) * 256
+    }
+
     /// 上传 NV12 + GPU 转换进后槽并换前（返回显示槽 native id；坏尺寸 None）。
     fn upload_convert(&mut self, y: &[u8], uv: &[u8]) -> Option<egui::TextureId> {
         let (w, h) = (self.w as usize, self.h as usize);
         if y.len() < w * h || uv.len() < w * h / 2 {
             return None;
+        }
+        // 256 字节行距填充：`write_texture` 要求 `bytes_per_row` 对齐，纹理宽保持原值即可。
+        let pitch = Self::padded_pitch(self.w) as usize;
+        let y_src: &[u8];
+        let mut y_pad;
+        if pitch == w {
+            y_src = &y[..w * h];
+        } else {
+            y_pad = vec![0u8; pitch * h];
+            for row in 0..h {
+                y_pad[row * pitch..row * pitch + w].copy_from_slice(&y[row * w..row * w + w]);
+            }
+            y_src = &y_pad;
         }
         self.queue.write_texture(
             wgpu::TexelCopyTextureInfo {
@@ -496,10 +564,10 @@ impl GpuYuv {
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
-            &y[..w * h],
+            y_src,
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
-                bytes_per_row: Some(self.w),
+                bytes_per_row: Some(pitch as u32),
                 rows_per_image: Some(self.h),
             },
             wgpu::Extent3d {
@@ -508,6 +576,17 @@ impl GpuYuv {
                 depth_or_array_layers: 1,
             },
         );
+        let uv_src: &[u8];
+        let mut uv_pad;
+        if pitch == w {
+            uv_src = &uv[..w * h / 2];
+        } else {
+            uv_pad = vec![0u8; pitch * h / 2];
+            for row in 0..h / 2 {
+                uv_pad[row * pitch..row * pitch + w].copy_from_slice(&uv[row * w..row * w + w]);
+            }
+            uv_src = &uv_pad;
+        }
         self.queue.write_texture(
             wgpu::TexelCopyTextureInfo {
                 texture: &self.uv_tex,
@@ -515,10 +594,10 @@ impl GpuYuv {
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
-            &uv[..w * h / 2],
+            uv_src,
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
-                bytes_per_row: Some(self.w),
+                bytes_per_row: Some(pitch as u32),
                 rows_per_image: Some(self.h / 2),
             },
             wgpu::Extent3d {
@@ -572,13 +651,16 @@ fn decode_loop(path: &str, tx: SyncSender<BgMsg>) {
             return;
         }
     };
-    // 只收 AVC 轨（input.mp4 即 h264；hev/vp9 样片后继按需再接，不偏离本次需求）。
-    let demuxed = match demux_groups(&data, MediaFormat::Avc) {
-        Ok(d) => d,
-        Err(e) => {
-            let _ = tx.send(BgMsg::Finished(Err(format!("video bg demux: {e}"))));
-            return;
-        }
+    // 只收 AVC 轨优先无则 HEVC（选中门保证至少其一；vp9 永不进本函数）。
+    let (demuxed, hevc) = match demux_groups(&data, MediaFormat::Avc, None) {
+        Ok(d) => (d, false),
+        Err(_) => match demux_groups(&data, MediaFormat::Hevc, None) {
+            Ok(d) => (d, true),
+            Err(e) => {
+                let _ = tx.send(BgMsg::Finished(Err(format!("video bg demux: {e}"))));
+                return;
+            }
+        },
     };
     let fps = demuxed.fps.clamp(1, 120);
     let _ = tx.send(BgMsg::Ready {
@@ -587,19 +669,39 @@ fn decode_loop(path: &str, tx: SyncSender<BgMsg>) {
         fps,
     });
     // 外层即 40s 回绕：SPS/PPS 固化一次，每轮重建硬解器（干净 IDR，无跨轮参考）。
-    let units = crate::codecs::split_annexb(&demuxed.annexb_prefix);
-    if units.len() < 2 {
-        let _ = tx.send(BgMsg::Finished(Err(String::from("video bg: no sps/pps"))));
-        return;
-    }
-    // 约定：prefix = SPS + PPS（见 `demux_groups` Avc 分支组装序）。
-    // `DecoderCodec<'a>` 借 `sps/pps`，但会话内已拷贝 FormatDescription，故用
-    // `Box::leak` 固化一次（进程级常驻，40s 循环不重复泄漏）。
-    let sps_static: &'static [u8] = Box::leak(units[0].to_vec().into_boxed_slice());
-    let pps_static: &'static [u8] = Box::leak(units[1].to_vec().into_boxed_slice());
+    let params = if hevc {
+        match split_hevc_param_sets(&demuxed.annexb_prefix) {
+            Some((v, sv, p)) => BgParams::Hevc {
+                vps: Box::leak(v.into_boxed_slice()),
+                sps: Box::leak(sv.into_boxed_slice()),
+                pps: Box::leak(p.into_boxed_slice()),
+            },
+            None => {
+                let _ = tx.send(BgMsg::Finished(Err(String::from(
+                    "video bg: no vps/sps/pps",
+                ))));
+                return;
+            }
+        }
+    } else {
+        let units = crate::codecs::split_annexb(&demuxed.annexb_prefix);
+        if units.len() < 2 {
+            let _ = tx.send(BgMsg::Finished(Err(String::from("video bg: no sps/pps"))));
+            return;
+        }
+        BgParams::Avc {
+            sps: Box::leak(units[0].to_vec().into_boxed_slice()),
+            pps: Box::leak(units[1].to_vec().into_boxed_slice()),
+        }
+    };
     let nalu_len = demuxed.length_size as u32;
     loop {
-        let mut dec = match make_decoder(sps_static, pps_static, nalu_len) {
+        let wall_start = std::time::Instant::now();
+        let dec = match &params {
+            BgParams::Avc { sps, pps } => make_decoder(sps, pps, nalu_len),
+            BgParams::Hevc { vps, sps, pps } => make_decoder_hevc(vps, sps, pps, nalu_len),
+        };
+        let mut dec = match dec {
             Ok(d) => d,
             Err(e) => {
                 let _ = tx.send(BgMsg::Finished(Err(e)));
@@ -626,6 +728,11 @@ fn decode_loop(path: &str, tx: SyncSender<BgMsg>) {
                                 return;
                             }
                             sent += 1;
+                            let wall_secs = wall_start.elapsed().as_secs_f64();
+                            let sleep_ms = VideoBg::pace_sleep_ms(elapsed, wall_secs);
+                            if sleep_ms > 0 {
+                                std::thread::sleep(std::time::Duration::from_millis(sleep_ms));
+                            }
                         }
                         // `None`（隐藏帧/重排等待）不计帧，继续喂。
                     }
@@ -640,6 +747,44 @@ fn decode_loop(path: &str, tx: SyncSender<BgMsg>) {
         }
         // 一轮播完（40s 窗满）即回绕；整文件不足 40s 则从头再播（同 loop 语义）。
         let _ = elapsed;
+    }
+}
+
+/// VideoToolbox 解码器构造（SPS/PPS/length_size 直给会话；NV12 输出，CPU 只搬运）。
+#[cfg(target_os = "macos")]
+/// 背景解码参数集（Avc/Hevc 会话二选一；`'static` 泄漏固化进程级常驻，
+/// 40s 回绕重建会话只借用不重复泄漏）。
+#[cfg(target_os = "macos")]
+enum BgParams {
+    Avc {
+        sps: &'static [u8],
+        pps: &'static [u8],
+    },
+    Hevc {
+        vps: &'static [u8],
+        sps: &'static [u8],
+        pps: &'static [u8],
+    },
+}
+
+/// HEVC 参数集切分（纯函数可单测）：Annex-B 前缀 → VPS(32)/SPS(33)/PPS(34)。
+/// 缺任一即 None（调用方 Finished(Err) 静默回退）。
+pub(crate) fn split_hevc_param_sets(prefix: &[u8]) -> Option<(Vec<u8>, Vec<u8>, Vec<u8>)> {
+    let (mut vps, mut sps, mut pps) = (None, None, None);
+    for u in crate::codecs::split_annexb(prefix) {
+        if u.is_empty() {
+            continue;
+        }
+        match (u[0] >> 1) & 0x3F {
+            32 if vps.is_none() => vps = Some(u.to_vec()),
+            33 if sps.is_none() => sps = Some(u.to_vec()),
+            34 if pps.is_none() => pps = Some(u.to_vec()),
+            _ => {}
+        }
+    }
+    match (vps, sps, pps) {
+        (Some(v), Some(sp), Some(pp)) => Some((v, sp, pp)),
+        _ => None,
     }
 }
 
@@ -660,6 +805,27 @@ fn make_decoder(
         pixel_format: PixelFormat::Nv12,
     })
     .map_err(|e| format!("video bg decoder: {e:?}"))
+}
+
+/// VideoToolbox HEVC 解码器构造（VPS/SPS/PPS/length_size 直给会话；余同 AVC）。
+#[cfg(target_os = "macos")]
+fn make_decoder_hevc(
+    vps: &'static [u8],
+    sps: &'static [u8],
+    pps: &'static [u8],
+    nalu_len: u32,
+) -> Result<shiguredo_video_toolbox::Decoder, String> {
+    use shiguredo_video_toolbox::{Decoder, DecoderCodec, DecoderConfig, PixelFormat};
+    Decoder::new(DecoderConfig {
+        codec: DecoderCodec::Hevc {
+            vps,
+            sps,
+            pps,
+            nalu_len_bytes: nalu_len,
+        },
+        pixel_format: PixelFormat::Nv12,
+    })
+    .map_err(|e| format!("video bg hevc decoder: {e:?}"))
 }
 
 /// Nv12 帧（stride 可能 > 宽）→ 紧凑 Y + 交错 UV（纯搬运，无像素运算）。
@@ -707,7 +873,7 @@ fn decode_loop(path: &str, tx: SyncSender<BgMsg>) {
         }
     };
     // 只收 AVC 轨（input.mp4 即 h264；`gpu-video` 解码侧只支持 H.264，见上游兼容表）。
-    let demuxed = match demux_groups(&data, MediaFormat::Avc) {
+    let demuxed = match demux_groups(&data, MediaFormat::Avc, None) {
         Ok(d) => d,
         Err(e) => {
             let _ = tx.send(BgMsg::Finished(Err(format!("video bg demux: {e}"))));
@@ -748,6 +914,7 @@ fn decode_loop(path: &str, tx: SyncSender<BgMsg>) {
         };
     // 外层即 40s 回绕：每轮重建 `BytesDecoder`（干净 IDR，无跨轮参考）。
     loop {
+        let wall_start = std::time::Instant::now();
         let mut dec = match device
             .create_bytes_decoder_h264(gpu_video::parameters::DecoderParameters::default())
         {
@@ -788,6 +955,11 @@ fn decode_loop(path: &str, tx: SyncSender<BgMsg>) {
                                     return;
                                 }
                                 sent += 1;
+                                let wall_secs = wall_start.elapsed().as_secs_f64();
+                                let sleep_ms = VideoBg::pace_sleep_ms(elapsed, wall_secs);
+                                if sleep_ms > 0 {
+                                    std::thread::sleep(std::time::Duration::from_millis(sleep_ms));
+                                }
                                 if sent >= budget {
                                     break 'groups;
                                 }
@@ -847,6 +1019,21 @@ mod video_bg_tests {
     use super::*;
 
     #[test]
+    fn pitch_pads_to_256() {
+        assert_eq!(GpuYuv::padded_pitch(320), 512);
+        assert_eq!(GpuYuv::padded_pitch(1280), 1280);
+        assert_eq!(GpuYuv::padded_pitch(1920), 2048);
+        assert_eq!(GpuYuv::padded_pitch(180), 256);
+    }
+
+    #[test]
+    fn pace_sleep_is_realtime() {
+        assert_eq!(VideoBg::pace_sleep_ms(1.0, 0.2), 800);
+        assert_eq!(VideoBg::pace_sleep_ms(1.0, 1.0), 0);
+        assert_eq!(VideoBg::pace_sleep_ms(0.5, 1.0), 0);
+    }
+
+    #[test]
     fn loop_window_is_40s() {
         assert_eq!(VideoBg::loop_budget_frames(60), 2400);
         assert_eq!(VideoBg::loop_budget_frames(30), 1200);
@@ -887,6 +1074,79 @@ mod video_bg_tests {
         // 纯红近似（Y≈76, U≈84, V≈255 量级）：R 明显最大。
         let r = VideoBg::nv12_pixel_to_rgba(76, 84, 255);
         assert!(r[0] > 200 && r[0] > r[1] + 100 && r[0] > r[2] + 100);
+    }
+
+    fn bg_entry(name: &str, codec: Option<&'static str>) -> crate::gallery::GalleryEntry {
+        crate::gallery::GalleryEntry {
+            name: name.to_string(),
+            size: 100,
+            kind: "mp4",
+            codec,
+            meta: None,
+        }
+    }
+
+    #[test]
+    fn selection_takes_over_only_for_avc_hevc() {
+        let entries = vec![
+            bg_entry("1080p/a.mp4", Some("avc")),
+            bg_entry("1080p/h.mp4", Some("hevc")),
+            bg_entry("1080p/v.mp4", Some("vp9")),
+            bg_entry("wallpaper/w.qois", None),
+        ];
+        assert_eq!(
+            VideoBg::resolve_source(&entries, Some(0), "/usb"),
+            Some(String::from("/usb/1080p/a.mp4"))
+        );
+        // hevc 在 mac 接管，Win/Linux 回默认（轮子无 HEVC 解码器）。
+        let h = VideoBg::resolve_source(&entries, Some(1), "/usb");
+        #[cfg(target_os = "macos")]
+        assert_eq!(h, Some(String::from("/usb/1080p/h.mp4")));
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(h, None);
+        // vp9/无探针/越界/未选一律不接管（=默认片源）。
+        assert_eq!(VideoBg::resolve_source(&entries, Some(2), "/usb"), None);
+        assert_eq!(VideoBg::resolve_source(&entries, Some(3), "/usb"), None);
+        assert_eq!(VideoBg::resolve_source(&entries, Some(9), "/usb"), None);
+        assert_eq!(VideoBg::resolve_source(&entries, None, "/usb"), None);
+        assert_eq!(VideoBg::resolve_source(&[], Some(0), "/usb"), None);
+    }
+
+    #[test]
+    fn set_source_restarts_worker_and_clears_poison() {
+        let mut bg = VideoBg::new(None);
+        assert_eq!(bg.source, None);
+        // 同值不变（started 保持，worker 不重建）。
+        bg.started = true;
+        bg.set_source(None);
+        assert!(bg.started);
+        // 换源：杀 worker 状态 + 清失败毒丸与旧末帧。
+        bg.fallback = Some(String::from("boom"));
+        bg.front = Some((egui::TextureId::default(), 1.0, 1.0));
+        bg.set_source(Some(String::from("/usb/1080p/a.mp4")));
+        assert_eq!(bg.source, Some(String::from("/usb/1080p/a.mp4")));
+        assert!(!bg.started);
+        assert_eq!(bg.fallback, None);
+        assert_eq!(bg.front, None);
+        assert!(!bg.playing);
+    }
+
+    #[test]
+    fn hevc_param_sets_split_by_nal_type() {
+        // VPS(32)/SPS(33)/PPS(34) + 一个 IDR(19) 干扰项。
+        let mut prefix = vec![0, 0, 0, 1, 0x40, 1, 2];
+        prefix.extend_from_slice(&[0, 0, 0, 1, 0x42, 3, 4, 5]);
+        prefix.extend_from_slice(&[0, 0, 1, 0x26, 9, 9]);
+        prefix.extend_from_slice(&[0, 0, 0, 1, 0x44, 6]);
+        let (v, sp, pp) = split_hevc_param_sets(&prefix).expect("splits");
+        assert_eq!(v, vec![0x40, 1, 2]);
+        assert_eq!(sp, vec![0x42, 3, 4, 5]);
+        assert_eq!(pp, vec![0x44, 6]);
+        // 缺 PPS 即 None；空输入即 None。
+        let mut short = vec![0, 0, 0, 1, 0x40, 1];
+        short.extend_from_slice(&[0, 0, 0, 1, 0x42, 3]);
+        assert!(split_hevc_param_sets(&short).is_none());
+        assert!(split_hevc_param_sets(&[]).is_none());
     }
 
     #[test]

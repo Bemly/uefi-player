@@ -96,15 +96,18 @@ pub fn video_run(screen: &mut Screen) -> Result {
     //   direct + all   → 原来的多核直写
     // 调度后端（[schedule] backend）：manual 走下面三路；nano 是单核执行器泵
     // （render 全 honoring）；dynamic 是多核 steal 泵（只直写前台，见 exec）。
+    // `[display]`：源几何以 `Clip::w/h` 为准（`VIDEO_W/H` 仅 1080p 常量；
+    // 小尺寸片源仍按 clip 几何打标/缩放，见 `loops`/`graphics::present`）。
+    let (cw, ch) = (clip.w, clip.h);
     match crate::config::schedule_backend() {
         crate::config::ScheduleBackend::Nano => {
             log::info!(
                 "play: path=nano_pump (single executor task; schedule workers/dist ignored)"
             );
-            exec::nano_pump(screen, clip, VIDEO_W, VIDEO_H, target, tps)
+            exec::nano_pump(screen, clip, cw, ch, target, tps)
         }
         crate::config::ScheduleBackend::Dynamic => {
-            exec::dynamic_draw(screen, clip, VIDEO_W, VIDEO_H, target, tps)
+            exec::dynamic_draw(screen, clip, cw, ch, target, tps)
         }
         crate::config::ScheduleBackend::Manual => manual_run(screen, clip, target, tps),
     }
@@ -113,19 +116,20 @@ pub fn video_run(screen: &mut Screen) -> Result {
 /// 手写调度（`[schedule] backend=manual`，也是执行器后端的回退落点）：
 /// blt 单线程引擎 / direct BSP 单核直写 / direct 全核 `mp_draw`，`workers`/`dist` 生效。
 pub(crate) fn manual_run(screen: &mut Screen, clip: Clip, target: Option<u32>, tps: u64) -> Result {
+    let (cw, ch) = (clip.w, clip.h);
     match crate::config::effective_render() {
         crate::config::RenderMode::Blt => {
             log::info!("play: path=blt_loop");
-            blt_loop(screen, clip, VIDEO_W, VIDEO_H, target, tps)
+            blt_loop(screen, clip, cw, ch, target, tps)
         }
         _ => match crate::config::effective_workers() {
             crate::config::WorkersMode::BspOnly => {
                 log::info!("play: path=direct_loop");
-                direct_loop(screen, clip, VIDEO_W, VIDEO_H, target, tps)
+                direct_loop(screen, clip, cw, ch, target, tps)
             }
             _ => {
                 log::info!("play: path=mp_draw");
-                mp_draw(screen, clip, VIDEO_W, VIDEO_H, target, tps)
+                mp_draw(screen, clip, cw, ch, target, tps)
             }
         },
     }

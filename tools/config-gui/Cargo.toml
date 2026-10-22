@@ -48,6 +48,9 @@ description = "player.toml 跨平台可视化编辑器（host 工具，与 UEFI 
 #   解码复用：mp4 源走 shiguredo_mp4 + avc 硬解优先（mac VT Baseline 门控/
 #   Vulkan FrameSorter 保序；失败回退 rusty_h264-decoder 0.16）+ rusty_h265 0.6.2/
 #   vp9dec 0.1.1（与固件同版本；h263/mpeg2v 源暂只走裸流直通，后继再接）。
+# - 本地时间戳命名（host std，转码输出默认名 yymmddhhmmss；会话级，不落盘）：
+#   `chrono 0.4`（标准轮子，`Local::now().format("%y%m%d%H%M%S")`；搜过手写
+#   `libc::localtime`（平台相关时区坑）与系统 `date` 子进程（测试不可控），故用现货。
 # - 列表拖拽排序（host std，播放列表/壁纸画廊行重排；固件侧不受影响）：
 #   `egui_dnd 0.16`（lucasmerlin/hello_egui，MIT，
 #   crates.io 现货，持续维护，MSRV >= 1.80 < 本仓 1.92；
@@ -109,6 +112,7 @@ oxideav-mpeg12video = "0.0.13"
 ogg = "0.9"
 qoi = "0.4"
 serde = { version = "1", features = ["derive"] }
+chrono = "0.4"
 toml = "1"
 
 [target.'cfg(target_os = "macos")'.dependencies]

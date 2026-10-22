@@ -154,6 +154,75 @@ pub(crate) fn scale_yuv420(f: &Yuv420, dw: u32, dh: u32) -> Yuv420 {
     }
 }
 
+/// H.263 §5.1.3 五档标准源格式（`oxideav-h263` 编码器硬门，非此即 Err；
+/// 轮子内同表私有此处复刻，改表以轮子为准，见 `docs/transcode.md`）。
+const H263_STANDARD_FORMATS: [(u32, u32); 5] =
+    [(128, 96), (176, 144), (352, 288), (704, 576), (1408, 1152)];
+
+/// H.263 目标尺寸：源能装下的最大标准档（不浪费不放大）；
+/// 超小源取最小档（sub-QCIF，放大）。
+/// 纯函数（可单测）：转码 H263 供片缩放用，其余目标不走这里。
+pub(crate) fn h263_target_size(sw: u32, sh: u32) -> (u32, u32) {
+    if sw == 0 || sh == 0 {
+        return H263_STANDARD_FORMATS[0];
+    }
+    H263_STANDARD_FORMATS
+        .iter()
+        .rev()
+        .find(|&&(w, h)| w <= sw && h <= sh)
+        .copied()
+        .unwrap_or(H263_STANDARD_FORMATS[0])
+}
+
+/// 等比内接 + 黑边居中（Y=0/U=V=128 全范围黑）→ 精确标准尺寸。
+/// 固件播片按帧几何 1:1 左上（不拉伸，见 `Screen::upload_frame`），
+/// 黑边保比后屏上不变形；输出即编码器吃的形状。
+/// 纯函数（可单测）。
+pub(crate) fn h263_letterbox(f: &Yuv420) -> Yuv420 {
+    let (dw, dh) = h263_target_size(f.w, f.h);
+    let (dwu, dhu) = (dw as usize, dh as usize);
+    if f.w == 0 || f.h == 0 || f.y.is_empty() {
+        // 空帧即纯黑标准画布（不断转码）。
+        let (duvw, duvh) = (dwu.div_ceil(2), dhu.div_ceil(2));
+        return Yuv420 {
+            w: dw,
+            h: dh,
+            y: vec![0u8; dwu * dhu],
+            u: vec![128u8; duvw * duvh],
+            v: vec![128u8; duvw * duvh],
+        };
+    }
+    let (sw, sh) = (f.w as u64, f.h as u64);
+    let (dw64, dh64) = (dw as u64, dh as u64);
+    // 内接：fw/fh 取 min（u64 防 4K 源乘法溢出，至少 2px 偶数给 420）。
+    let mut fw = (sw * dh64 / sh.max(1)).min(dw64).max(2) as usize;
+    let mut fh = (sh * dw64 / sw.max(1)).min(dh64).max(2) as usize;
+    fw -= fw % 2;
+    fh -= fh % 2;
+    let scaled = scale_yuv420(f, fw as u32, fh as u32);
+    let (ox, oy) = ((dwu - fw) / 2, (dhu - fh) / 2);
+    let mut y = vec![0u8; dwu * dhu];
+    let (duvw, duvh) = (dwu.div_ceil(2), dhu.div_ceil(2));
+    let mut u = vec![128u8; duvw * duvh];
+    let mut v = vec![128u8; duvw * duvh];
+    fn blit(dst: &mut [u8], dst_w: usize, src: &[u8], sw: usize, sh: usize, ox: usize, oy: usize) {
+        for row in 0..sh {
+            dst[(oy + row) * dst_w + ox..][..sw].copy_from_slice(&src[row * sw..][..sw]);
+        }
+    }
+    blit(&mut y, dwu, &scaled.y, fw, fh, ox, oy);
+    let (suvw, suvh) = (fw.div_ceil(2), fh.div_ceil(2));
+    blit(&mut u, duvw, &scaled.u, suvw, suvh, ox / 2, oy / 2);
+    blit(&mut v, duvw, &scaled.v, suvw, suvh, ox / 2, oy / 2);
+    Yuv420 {
+        w: dw,
+        h: dh,
+        y,
+        u,
+        v,
+    }
+}
+
 /// Annex-B 切 NAL（`00 00 01` / `00 00 00 01` 分隔；返回不含起始码的负载）。
 pub(crate) fn split_annexb(data: &[u8]) -> Vec<&[u8]> {
     let mut units = Vec::new();
@@ -1005,9 +1074,10 @@ fn avcc_to_nalus(data: &[u8]) -> Option<Vec<Vec<u8>>> {
 
 /// SPS 首字节 profile_idc（Annex-B 裸 NAL：类型位为 7 即可，
 /// `0x67`/`0x27` 皆可——nal_ref_idc 各家不同，VideoToolbox 编出的是 `0x27`）。
-/// 纯函数（可单测）：mac VT 同步解码无重排缓冲，只敢吃 Baseline（66）；
-/// Main/High（含 B 帧）回退 CPU（rusty 有重排）。
-/// `pub(crate)`：转码硬解 AVC 门控复用。
+/// 纯函数（可单测）：转码 VT 解码曾以此做 Baseline（66）门控
+/// （Main/High 含 B 帧回退 CPU）；2026-10-22 起 VT 路按 PTS 保序，全 profile
+/// 硬解此门已摘现仅测试用（生产无调用方）。
+#[cfg(test)]
 pub(crate) fn sps_profile_idc(sps: &[u8]) -> Option<u8> {
     if sps.len() >= 2 && sps[0] & 0x1F == 7 {
         Some(sps[1])
@@ -1266,29 +1336,72 @@ fn encode_hevc_vt(frames: &[Yuv420]) -> Result<HevcStream, String> {
     })
 }
 
-/// Win/Linux 共用 Vulkan 设备（job 间复用；缺驱动即 None，永久回退 CPU）。
+/// Win/Linux 共用 Vulkan 设备（转码编码 + AVC 解码共用；`pub(crate)` 供转码侧复用）。
+/// 以 `vulkan_gpu` 偏好为键懒缓存（换偏好下次重建；在途 job 的旧 `Arc` 不受影响）。
 /// worker 线程内建（`video_bg` 同式，`Send` 已实锤）。
 #[cfg(not(target_os = "macos"))]
-static HW_VULKAN_DEV: std::sync::OnceLock<Option<std::sync::Arc<gpu_video::VulkanDevice>>> =
-    std::sync::OnceLock::new();
+static HW_VULKAN_DEV: std::sync::Mutex<
+    Option<(
+        crate::vulkan_gpu::VulkanGpuPref,
+        std::sync::Arc<gpu_video::VulkanDevice>,
+        String,
+    )>,
+> = std::sync::Mutex::new(None);
 
-/// Win/Linux 共用 Vulkan 设备（转码编码 + AVC 解码共用；`pub(crate)` 供转码侧复用）。
+/// Win/Linux 共用 Vulkan 设备（`vulkan_gpu::select_vulkan_adapter` 同口径选择；
+/// 建失败即 `None`，调用方记回退走 CPU）。
 #[cfg(not(target_os = "macos"))]
 pub(crate) fn hw_vulkan_device() -> Option<std::sync::Arc<gpu_video::VulkanDevice>> {
-    HW_VULKAN_DEV
-        .get_or_init(|| {
-            let inst = gpu_video::VulkanInstance::new().ok()?;
-            let adapter = inst
-                .create_adapter(&gpu_video::parameters::VulkanAdapterDescriptor {
-                    supports_decoding: true,
-                    supports_encoding: true,
-                })
-                .ok()?;
-            adapter
-                .create_device(&gpu_video::parameters::VulkanDeviceDescriptor::default())
-                .ok()
+    use crate::vulkan_gpu::{select_vulkan_adapter, vulkan_gpu_pref, VkAdapterView};
+    let pref = vulkan_gpu_pref();
+    if let Ok(g) = HW_VULKAN_DEV.lock() {
+        if let Some((p, d, _)) = g.as_ref() {
+            if *p == pref {
+                return Some(d.clone());
+            }
+        }
+    }
+    // 枚举 + 纯选择（与 UI 行同一函数，同口径）；建 device 时重枚举同序取下标。
+    let inst = gpu_video::VulkanInstance::new().ok()?;
+    let views: Vec<VkAdapterView> = inst
+        .iter_adapters()
+        .ok()?
+        .map(|a| {
+            let info = a.info();
+            VkAdapterView {
+                name: info.name.clone(),
+                discrete: format!("{:?}", info.device_type) == "DISCRETE_GPU",
+                dec: info.supports_decoding,
+                enc: info.supports_encoding,
+            }
         })
-        .clone()
+        .collect();
+    let i = select_vulkan_adapter(&views, &pref)?;
+    let name = views[i].name.clone();
+    let adapter = inst.iter_adapters().ok()?.nth(i)?;
+    let dev = adapter
+        .create_device(&gpu_video::parameters::VulkanDeviceDescriptor::default())
+        .ok()?;
+    if let Ok(mut g) = HW_VULKAN_DEV.lock() {
+        *g = Some((pref, dev.clone(), name));
+    }
+    Some(dev)
+}
+
+/// 当前实际 Vulkan 设备名（UI“当前：”行；未建即 `None`）。
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn current_vulkan_device_name() -> Option<String> {
+    HW_VULKAN_DEV
+        .lock()
+        .ok()?
+        .as_ref()
+        .map(|(_, _, n)| n.clone())
+}
+
+/// mac 无 Vulkan（桩供 UI 行统一调用，恒 `None`）。
+#[cfg(target_os = "macos")]
+pub(crate) fn current_vulkan_device_name() -> Option<String> {
+    None
 }
 
 /// Win/Linux Vulkan AVC（Baseline；inline 参数集；与 VT 版同形状）。

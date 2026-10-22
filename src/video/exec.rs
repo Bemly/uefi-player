@@ -76,14 +76,26 @@ fn draw_str_raw(fb_base: *mut u32, stride: usize, x: u32, y: u32, s: &[u8], colo
 }
 
 /// 单核执行器泵：`blt_loop`/`direct_loop` 的执行器形态（单 task、无 OSD）。
+/// `[display]`：起播记一笔 `display:` marker（源取 `Clip::w/h`）；上屏同取
+/// clip 几何（形参旧 `VIDEO_W/H` 常量，1080p 恒等，小尺寸以 clip 为准）。
 pub fn nano_pump(
     screen: &mut Screen,
     mut clip: Clip,
-    width: usize,
-    height: usize,
+    _width: usize,
+    _height: usize,
     target: Option<u32>,
     tps: u64,
 ) -> Result {
+    {
+        let (dw, dh) = screen.get_gop().current_mode_info().resolution();
+        crate::graphics::present::note_clip_start(
+            clip.w as u32,
+            clip.h as u32,
+            dw as u32,
+            dh as u32,
+        );
+    }
+    let (sw, sh) = (clip.w, clip.h);
     let mut drops = 0u64;
     let err: Rc<RefCell<Option<NyaStatus>>> = Rc::new(RefCell::new(None));
     let eflag = Rc::clone(&err);
@@ -93,7 +105,7 @@ pub fn nano_pump(
             let fstart = rdtsc();
             match clip.next_frame() {
                 Some(frame) => {
-                    if let Err(e) = screen.upload_frame(width, height, frame) {
+                    if let Err(e) = screen.upload_frame(sw, sh, frame) {
                         *eflag.borrow_mut() = Some(e);
                         break;
                     }
@@ -364,6 +376,8 @@ impl BSPDriver {
 }
 
 /// 多核 steal 泵：BSP 分带 spawn，AP steal；BSP 独判限速/掉帧/OSD。
+/// `[display]` v1 视觉不变（仍 native 左上 + 黑垫，见 `mp.rs` 头同因：分带按屏
+/// 行切，缩放需 BSP 起播预处理整帧表，另立项；marker 照记配置意图）。
 pub fn dynamic_draw(
     screen: &mut Screen,
     clip: Clip,
@@ -408,6 +422,14 @@ pub fn dynamic_draw(
     // （`sync` 断言 N≤32；>32 核由 steal 分摊，行为见文件头）。
     let (scr_w, scr_h) = screen.get_gop().current_mode_info().resolution();
     let (scr_w, scr_h) = (scr_w as usize, scr_h as usize);
+    {
+        crate::graphics::present::note_clip_start(
+            clip.w as u32,
+            clip.h as u32,
+            scr_w as u32,
+            scr_h as u32,
+        );
+    }
     let stride_bytes = screen.get_gop().current_mode_info().stride() * 4;
     let nbands = n_cores.min(32).max(1);
     let per = scr_h.saturating_sub(OSD_ROWS).div_ceil(nbands).max(1);

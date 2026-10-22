@@ -7,6 +7,11 @@ use alloc::vec::Vec;
 
 use serde::{Deserialize, Serialize};
 
+use super::DisplayConfig;
+// `mod.rs` 已 1002 行封顶不再动：`DisplayAlign` 经此处转出口，
+// `mod.rs` 的 `pub use types::*` 会把它继续送到 `crate::config`。
+pub use super::display::DisplayAlign;
+
 /// 指令集加速档位。`Auto` = 运行时探 CPUID/XCR0 取最高可用。
 /// 全集按加速效率/性能排（`as_u8` 下标即滑杆档位）：`auto` 恒首（0）；
 /// 随后 `scalar`（U64），X128 组（`sse`→`sse42` 整组，再密码/计数类
@@ -546,6 +551,7 @@ pub struct Config {
     pub schedule: ScheduleConfig,
     pub r#async: AsyncConfig,
     pub decode: DecodeTable,
+    pub display: DisplayConfig,
 }
 
 impl Default for Config {
@@ -561,6 +567,7 @@ impl Default for Config {
             schedule: ScheduleConfig::default(),
             r#async: AsyncConfig::default(),
             decode: DecodeTable::default(),
+            display: DisplayConfig::default(),
         }
     }
 }

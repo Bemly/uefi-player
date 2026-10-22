@@ -1,9 +1,7 @@
 //! `player.toml` schema：与固件 `src/config.rs` 同构（字段名/枚举字符串一致，改动双边同步）。
 //!
-//! 纯数据类型 + 默认值，无 display 依赖；规则见 `rules`，文案见 `text`。
-
+//! 纯数据类型 + 默认值（`[display]` 见 `display`）；规则见 `rules`，文案见 `text`。
 use serde::{Deserialize, Serialize};
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum AccelLevel {
@@ -752,6 +750,7 @@ pub(crate) struct FileConfig {
     pub(crate) boot: BootConfig,
     pub(crate) schedule: ScheduleConfig,
     pub(crate) r#async: AsyncConfig,
+    pub(crate) display: crate::display::DisplayConfig,
 }
 
 impl Default for FileConfig {
@@ -767,6 +766,7 @@ impl Default for FileConfig {
             boot: BootConfig::default(),
             schedule: ScheduleConfig::default(),
             r#async: AsyncConfig::default(),
+            display: Default::default(),
         }
     }
 }

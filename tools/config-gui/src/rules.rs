@@ -1,8 +1,7 @@
-//! 黑盒矩阵可测的纯规则（无 display 依赖；`App` 方法只是薄委托，UI 照此摆）。
+//! 黑盒矩阵可测的纯规则（无 UI 依赖；`App` 方法只是薄委托，UI 照此摆）。
 //! 新增 GUI 规则时先加这里 + 矩阵表，再接 UI（见 AGENTS「黑盒矩阵测试」）。
 
 use crate::schema::*;
-
 /// 微调区四旋钮显隐。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct TuneVisible {
@@ -244,6 +243,7 @@ mod blackbox_matrix {
                 roles: RolesMode::Split,
                 measured_workers_n: 6,
             },
+            display: Default::default(),
         };
         let text = toml::to_string(&cfg).unwrap();
         let back: FileConfig = toml::from_str(&text).unwrap();
