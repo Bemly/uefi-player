@@ -14,9 +14,13 @@
 //! dynamic 行边界发布经 `graphics::mp_copy::BoundGate`（`SeqGate`，替代旧
 //! `bounds`+`bgen` 裸数组对；AP 读侧 tsc-bounded 重试，失败沿用旧行区）。
 //! 校准会话（`mp_copy::MpDrive`）沿用 raw 数组，行为零改。
+//!
+//! `[display]` v1 视觉不变（仍 native 左上 + 黑垫）：行分区按屏行切、槽环按屏
+//! stride 建，BSP 起播预缩放整帧表 + AP 分带重映射另立项（逐帧 8MB 暂存 +
+//! 分区重算，须另测 OOM/带宽）；`display:` marker 照记（配置意图，见入口）。
 
 use super::decoder::Clip;
-use super::{VIDEO_H, VIDEO_W, rdtsc};
+use super::rdtsc;
 use crate::config::{self, CopyWidth, DistMode, RolesMode};
 use crate::error::Result;
 use crate::fs::Fs;
@@ -521,9 +525,18 @@ pub fn mp_draw(
     // eager Clip 走下述行分区 eager 路（防双解码浪费）；lazy 残留（单核/配置漂移）
     // 就地补全，确保下述行分区恒吃 eager（逐字节旧行为）。
     if slots && clip.lazy.is_some() {
-        return mp_slots::mp_draw_slots(screen, clip, target, tps);
+        return mp_slots::mp_draw_slots(screen, clip, target, tps, &mp);
     }
     clip.ensure_eager()?;
+    {
+        let (dw, dh) = screen.get_gop().current_mode_info().resolution();
+        crate::graphics::present::note_clip_start(
+            clip.w as u32,
+            clip.h as u32,
+            dw as u32,
+            dh as u32,
+        );
+    }
     // 片源几何（qois 取文件头一致值，raw 取定值 1920x1080）。
     let (width, height) = (clip.w, clip.h);
 

@@ -60,6 +60,10 @@
 //! - 裸指针只在持有者独占期解引用（槽缓冲经 `as_bytes_mut` 独写期、BSP
 //!   `Draining` 独读期；编码源/环/seq 会话期 `Box::leak` 常驻，播完不回收，
 //!   同 `mp_draw` 既有风格）；`unsafe fn` 体内显式 `unsafe {}` 块（edition 2024）。
+//!
+//! # `[display]` v1 视觉不变（仍 native 左上）：AP 按序号真解码自家块，缩放需
+//! 每 AP 一份屏暂存 + 逐帧 CPU 成本，另立项；`display:` marker 由 `mp_draw`
+//! 入口统一记一笔（本模块不再重复）。
 
 use super::OSD_ROWS;
 use crate::config::{self, CopyWidth, MediaFormat, RolesMode};
@@ -81,7 +85,7 @@ use core::ffi::c_void;
 use core::ops::Range;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use uefi::Status;
-use uefi::boot::{EventType, Tpl, create_event, get_handle_for_protocol, open_protocol_exclusive};
+use uefi::boot::{EventType, Tpl, create_event};
 use uefi::cstr16;
 use uefi::proto::console::gop::{BltOp, BltPixel, BltRegion, GraphicsOutput};
 use uefi::proto::pi::mp::MpServices;
@@ -572,14 +576,15 @@ fn scan_split(fs: &mut Fs) -> Result<(SlotSource, usize, usize)> {
 
 /// 帧分区槽环播放（`mp_draw` 分发落点；`clip` 为 lazy 编码源占位——真解码走
 /// `scan_split` 的独立会话，`clip` 窗缓冲至此功成身退，直接 drop 省内存）。
+/// `mp` 由调用方 `mp_draw` 传入（同句柄独占协议不可二次 `open_protocol_exclusive`，
+/// 重开即 `ACCESS_DENIED`，故复用上游已开会话）。
 pub(crate) fn mp_draw_slots(
     screen: &mut Screen,
     clip: Clip,
     target: Option<u32>,
     tps: u64,
+    mp: &MpServices,
 ) -> Result {
-    let mp_handle = get_handle_for_protocol::<MpServices>()?;
-    let mp = open_protocol_exclusive::<MpServices>(mp_handle)?;
     // 选中集（`crew` 决议：BSP-id 自检 + 预算/记忆/workers 优先级；槽路隐含
     // k > 1，环/分块/owner 全按 k 算，闲 AP 由 `slot_task` 入口早退）。
     let detected = mp.get_number_of_processors()?.enabled.max(1);
