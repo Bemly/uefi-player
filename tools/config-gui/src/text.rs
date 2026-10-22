@@ -259,20 +259,9 @@ pub(crate) fn display_align_desc(v: DisplayAlign) -> String {
     .into_owned()
 }
 
-/// 转码目标显示名（输出名见 `TranscodeTarget::out_path`，与固件片源名一致）。
+/// 转码目标短名：与解码页 tab 同口径（文件串大写 QOIS/RAW/HEVC…；tab 一行只求可扫读）。
 pub(crate) fn transcode_target_name(v: crate::transcode::TranscodeTarget) -> String {
-    use crate::transcode::TranscodeTarget;
-    match v {
-        TranscodeTarget::Avc => t!("transcode.t_avc"),
-        TranscodeTarget::Hevc => t!("transcode.t_hevc"),
-        TranscodeTarget::Vp9 => t!("transcode.t_vp9"),
-        TranscodeTarget::H263 => t!("transcode.t_h263"),
-        TranscodeTarget::Mpeg2v => t!("transcode.t_mpeg2v"),
-        TranscodeTarget::Theora => t!("transcode.t_theora"),
-        TranscodeTarget::Qois => t!("transcode.t_qois"),
-        TranscodeTarget::Raw => t!("transcode.t_raw"),
-    }
-    .into_owned()
+    v.file_str().to_uppercase()
 }
 
 /// 转码目标一句话说明（编码器 + 容器去向）。

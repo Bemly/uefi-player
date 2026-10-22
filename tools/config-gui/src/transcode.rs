@@ -34,16 +34,30 @@ pub(crate) enum TranscodeTarget {
 }
 
 impl TranscodeTarget {
+    // 顺序与解码页 `DecodeTable::ORDER`/`DecodeTab::ALL` 同序（QOIS/RAW/HEVC…），tab 一行只求可扫读。
     pub(crate) const ALL: [Self; 8] = [
-        Self::Avc,
+        Self::Qois,
+        Self::Raw,
         Self::Hevc,
         Self::Vp9,
         Self::H263,
         Self::Mpeg2v,
         Self::Theora,
-        Self::Qois,
-        Self::Raw,
+        Self::Avc,
     ];
+    /// 短名与解码页 tab 同口径：文件串大写（QOIS/RAW/HEVC…）。
+    pub(crate) fn file_str(self) -> &'static str {
+        match self {
+            Self::Qois => "qois",
+            Self::Raw => "raw",
+            Self::Hevc => "hevc",
+            Self::Vp9 => "vp9",
+            Self::H263 => "h263",
+            Self::Mpeg2v => "mpeg2v",
+            Self::Theora => "theora",
+            Self::Avc => "avc",
+        }
+    }
     /// 图库相对路径（固件布局；avc/hevc/vp9 同名 video.mp4，
     /// 播哪个由 [play] format 开关决定；`Raw` 为代表首帧，整序列在同目录）。
     pub(crate) fn out_path(self) -> &'static str {
@@ -943,17 +957,25 @@ impl App {
         });
         ui.add_space(10.0);
         self.content_label(ui, t!("transcode.target"));
-        ui.horizontal_wrapped(|ui| {
-            for v in TranscodeTarget::ALL {
-                if self.option_button(
-                    ui,
-                    self.transcode.target == v,
-                    &crate::text::transcode_target_name(v),
-                ) {
-                    self.transcode.target = v;
-                }
-            }
-        });
+        // 与解码页 tab 同式：`GlassToolbar` 胶囊当条 + 8 个 `GlassButton` 连体横滚
+        // （`spacing(2.0)`，不断尾；`id_salt` 隔离解码页 tab 的 ScrollArea ID）。
+        egui::ScrollArea::horizontal()
+            .id_salt("transcode_targets")
+            .show(ui, |ui| {
+                egui_glass::GlassToolbar::new(self.bar_style())
+                    .spacing(2.0)
+                    .show(ui, |ui| {
+                        for v in TranscodeTarget::ALL {
+                            if self.option_button(
+                                ui,
+                                self.transcode.target == v,
+                                &crate::text::transcode_target_name(v),
+                            ) {
+                                self.transcode.target = v;
+                            }
+                        }
+                    });
+            });
         self.content_small(
             ui,
             crate::text::transcode_target_desc(self.transcode.target),
