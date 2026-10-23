@@ -1,0 +1,177 @@
+# 全平台发布：UEFI 固件（x86_64-unknown-uefi）+ config-gui（Win/Linux/macOS 全 x64）→ GitHub Release。
+#
+# 触发：推 `v*` tag（如 v26.10.24，CalVer 同主包版本），或手动 workflow_dispatch
+#（不填 tag 则取根 Cargo.toml 版本加 `v` 前缀；同名 Release 已存在则覆盖上传产物）。
+#
+# runner 选择（2026-10 查 GitHub 托管 runner 表，公仓免费标准档）：
+# - ubuntu-24.04（x64）：固件 + Linux GUI；
+# - windows-2025（x64）：Windows GUI；
+# - macos-26-intel（x64，用户拍板用 26 不用 15；`macos-latest` 已是 arm64、macos-13 已下线）。
+#
+# 本地已知坑同步到 CI：
+# - 7 个 submodule 须叠 `patches/`（见 patches/README.md）后才能编固件；
+# - 根 `.cargo/config.toml` 把默认 target 钉成 UEFI，host 工具一律显式 `--target`；
+# - macOS 全新编译须 `SDKROOT=$(xcrun --show-sdk-path)`（shiguredo_video_toolbox bindgen）。
+
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag（留空 = v<根 Cargo.toml 版本>）"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  firmware:
+    name: firmware (x86_64-unknown-uefi)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: true
+      - name: Apply submodule patches
+        run: |
+          set -eux
+          git -C third_party/sprout apply ../../patches/sprout-boot-lib.patch
+          git -C third_party/oxideav-theora apply ../../patches/oxideav-theora.patch
+          git -C third_party/vp9dec apply ../../patches/vp9dec.patch
+          git -C third_party/rusty_h265 apply ../../patches/rusty_h265.patch
+          git -C third_party/rusty_h265 apply ../../patches/rusty_h265-accel.patch
+          git -C third_party/rusty_h264 apply ../../patches/rusty_h264-accel.patch
+          git -C third_party/filmcraft apply ../../patches/filmcraft-mpeg2v.patch
+          git -C third_party/h263-rs apply ../../patches/h263-rs.patch
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-uefi
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: firmware
+      - name: Build firmware (release)
+        run: cargo build --release --target x86_64-unknown-uefi
+      - name: Package
+        run: |
+          set -eux
+          mkdir -p dist/usb/EFI/BOOT
+          cp target/x86_64-unknown-uefi/release/uefi-player.efi dist/uefi-player-x86_64.efi
+          cp target/x86_64-unknown-uefi/release/uefi-player.efi dist/usb/EFI/BOOT/BOOTX64.EFI
+          cp player.toml dist/usb/player.toml
+          (cd dist/usb && zip -r ../uefi-player-usb-x86_64.zip .)
+          ls -la dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: firmware
+          path: |
+            dist/uefi-player-x86_64.efi
+            dist/uefi-player-usb-x86_64.zip
+
+  gui:
+    name: config-gui (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x64
+            os: ubuntu-24.04
+          - name: windows-x64
+            os: windows-2025
+          - name: macos-x64
+            os: macos-26-intel
+    defaults:
+      run:
+        shell: bash
+    steps:
+      # GUI 走 crates.io 版解码箱，不碰 third_party，免拉 submodule。
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: tools
+          key: gui-${{ matrix.name }}
+      - name: Linux system deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends pkg-config \
+            libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxrandr-dev \
+            libxi-dev libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libvulkan-dev libdbus-1-dev
+      - name: Host triple
+        run: echo "HOST=$(rustc -vV | sed -n 's/^host: //p')" >> "$GITHUB_ENV"
+      - name: Build (Linux / Windows)
+        if: runner.os != 'macOS'
+        run: cargo build --release --manifest-path tools/config-gui/Cargo.toml --target "$HOST"
+      - name: Build + bundle .app (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          export SDKROOT="$(xcrun --show-sdk-path)"
+          cargo run --release --manifest-path tools/gui-pack/Cargo.toml --target "$HOST" -- bundle-macos release
+      - name: Package
+        run: |
+          set -eux
+          mkdir -p dist
+          case "${{ runner.os }}" in
+            Linux)
+              cp "tools/target/$HOST/release/player-config-gui" dist/
+              tar -C dist -czf "player-config-gui-${{ matrix.name }}.tar.gz" player-config-gui
+              ;;
+            Windows)
+              cp "tools/target/$HOST/release/player-config-gui.exe" dist/
+              (cd dist && 7z a "../player-config-gui-${{ matrix.name }}.zip" player-config-gui.exe)
+              ;;
+            macOS)
+              ditto -c -k --keepParent "tools/target/bundle/UEFI Player.app" "player-config-gui-${{ matrix.name }}.zip"
+              ;;
+          esac
+          ls -la
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gui-${{ matrix.name }}
+          path: |
+            player-config-gui-${{ matrix.name }}.tar.gz
+            player-config-gui-${{ matrix.name }}.zip
+          if-no-files-found: error
+
+  release:
+    name: publish release
+    needs: [firmware, gui]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - name: Resolve tag
+        run: |
+          set -eux
+          if [ "${{ github.event_name }}" = "push" ]; then
+            TAG="${GITHUB_REF_NAME}"
+          elif [ -n "${{ inputs.tag }}" ]; then
+            TAG="${{ inputs.tag }}"
+          else
+            TAG="v$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          fi
+          echo "TAG=$TAG" >> "$GITHUB_ENV"
+      - uses: actions/download-artifact@v5
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Create or update release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eux
+          ls -la artifacts
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" artifacts/* --clobber
+          else
+            gh release create "$TAG" artifacts/* --target "$GITHUB_SHA" \
+              --title "uefi-player $TAG" --generate-notes
+          fi
