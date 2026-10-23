@@ -618,11 +618,7 @@ impl eframe::App for App {
                 card.inner_margin(egui::Margin::same(12)).show(ui, |ui| {
                     ui.set_min_size(ui.available_size());
                     // 纯白/纯黑（用户拍板：不用 visuals 默认灰，与中央描边字对齐）。
-                    let nav_fg = if self.dark {
-                        egui::Color32::WHITE
-                    } else {
-                        egui::Color32::BLACK
-                    };
+                    let nav_fg = crate::theme::fg(self.dark);
                     ui.heading(egui::RichText::new(t!("nav.sections")).color(nav_fg));
                     self.nav_button(ui, Page::File, t!("nav.file").into_owned());
                     self.nav_button(ui, Page::Accel, t!("nav.accel").into_owned());

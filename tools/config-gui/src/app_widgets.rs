@@ -12,13 +12,9 @@ use super::{Toast, TOAST_SECS};
 use crate::app::App;
 
 impl App {
-    /// 选中态强调色（深浅主题各一，保证在玻璃上可读）。
+    /// 选中态强调色（玻璃上的选中字色，见 `theme::accent_text`；填充/描边用 `theme::accent_fill`）。
     pub(crate) fn accent(dark: bool) -> egui::Color32 {
-        if dark {
-            egui::Color32::LIGHT_BLUE
-        } else {
-            egui::Color32::from_rgb(0, 90, 200)
-        }
+        crate::theme::accent_text(dark)
     }
 
     /// 单选开关的选中标记（● ○ 全量字体自带，比例字体下也有字形）。
@@ -55,12 +51,8 @@ impl App {
         };
         ctx.request_repaint();
         let frac = 1.0 - t.since.elapsed().as_secs_f32() / TOAST_SECS;
-        let accent = Self::accent(self.dark);
-        let track = if self.dark {
-            egui::Color32::from_white_alpha(28)
-        } else {
-            egui::Color32::from_black_alpha(28)
-        };
+        let accent = crate::theme::accent_fill(self.dark);
+        let track = crate::theme::track(self.dark);
         egui::Area::new("toast".into())
             .order(egui::Order::Foreground)
             .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-16.0, 16.0))
@@ -69,11 +61,7 @@ impl App {
                     .inner_margin(egui::Margin::same(12))
                     .show(ui, |ui| {
                         // 纯白/纯黑字（用户拍板：不要主题灰）：暗色白字，浅色黑字。
-                        let fg = if self.dark {
-                            egui::Color32::WHITE
-                        } else {
-                            egui::Color32::BLACK
-                        };
+                        let fg = crate::theme::fg(self.dark);
                         ui.label(egui::RichText::new(&t.text).color(fg));
                         let w = ui.min_rect().width().max(120.0);
                         let (rect, _) =
@@ -90,11 +78,7 @@ impl App {
 
     /// 工具栏/状态条的玻璃材质：深色配深色预设，浅色配默认。
     pub(crate) fn bar_style(&self) -> egui_glass::GlassStyle {
-        if self.dark {
-            egui_glass::GlassStyle::dark()
-        } else {
-            egui_glass::GlassStyle::regular()
-        }
+        crate::theme::glass(self.dark)
     }
 
     /// 中央透明区描边字（轮子结论：搜过 `egui` 文本描边，`RichText`/
@@ -109,11 +93,7 @@ impl App {
         text: impl Into<egui::WidgetText>,
         fallback: egui::TextStyle,
     ) -> egui::Response {
-        let (fg, stroke) = if dark {
-            (egui::Color32::WHITE, egui::Color32::BLACK)
-        } else {
-            (egui::Color32::BLACK, egui::Color32::WHITE)
-        };
+        let (fg, stroke) = (crate::theme::fg(dark), crate::theme::outline(dark));
         // 剥掉显式颜色再排版：整段走占位色，绘制色才能全覆盖——
         // 否则 `weak` 灰的描边也会被烤成灰色（2026-10-21 故障）。
         // 字号/换行保留（`fallback` 只管无样式段）。
@@ -215,11 +195,7 @@ impl App {
         header: String,
         step: Option<f64>,
     ) -> egui::Response {
-        let style = if dark {
-            egui_glass::GlassStyle::dark()
-        } else {
-            egui_glass::GlassStyle::regular()
-        };
+        let style = crate::theme::glass(dark);
         let old_value = *value;
         let width = ui.available_width().max(64.0);
         let mut response = ui
@@ -284,12 +260,8 @@ impl App {
     ) {
         let rect = response.rect;
         let dark = ui.visuals().dark_mode;
-        let accent = egui::Color32::from_rgb(0, 136, 255);
-        let track_color = if dark {
-            egui::Color32::from_white_alpha(45)
-        } else {
-            egui::Color32::from_black_alpha(26)
-        };
+        let accent = crate::theme::accent_fill(dark);
+        let track_color = crate::theme::track(dark);
         let track = egui::Rect::from_center_size(rect.center(), egui::vec2(rect.width(), 6.0));
         ui.painter().rect_filled(track, 3.0, track_color);
         let span = f64::from(*range.end()) - f64::from(*range.start());

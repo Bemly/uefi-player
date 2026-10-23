@@ -516,6 +516,36 @@ impl App {
                     }
                 }
             }
+            // 选中卡 ↔ 壁纸画廊（`[playlist]`，编辑器在壁纸页）：不在列表就加、
+            // 在就整条移出（含重复）。图库名即相对图库根的 `/` 串，与 `relativize` 同口径。
+            let sel_name = self
+                .gallery
+                .selected
+                .and_then(|i| self.gallery.entries.get(i))
+                .map(|e| e.name.clone());
+            if let Some(name) = sel_name {
+                let pos = crate::app::playlist::playlist_positions(&self.cfg.playlist.items, &name);
+                if pos.is_empty() {
+                    if egui_glass::GlassButton::new(t!("gallery.to_playlist"))
+                        .show(ui)
+                        .clicked()
+                    {
+                        self.cfg
+                            .playlist
+                            .items
+                            .push(crate::schema::PlaylistItem { path: name.clone() });
+                        self.playlist_sel = Some(self.cfg.playlist.items.len() - 1);
+                        self.status = t!("playlist.added", v = name).into_owned();
+                    }
+                } else if egui_glass::GlassButton::new(t!("gallery.from_playlist"))
+                    .show(ui)
+                    .clicked()
+                {
+                    self.cfg.playlist.items.retain(|it| it.path != name);
+                    self.playlist_sel = None;
+                    self.status = t!("playlist.removed", v = name).into_owned();
+                }
+            }
         });
         ui.add_space(8.0);
         if self.gallery.entries.is_empty() {
@@ -559,6 +589,10 @@ impl App {
             None => return,
         };
         let dk = display_kind(kind, codec);
+        // 已在壁纸画廊的卡标 `● #序号`（首个出现位，1 起），与列表编辑器行号同口径。
+        let in_list = crate::app::playlist::playlist_positions(&self.cfg.playlist.items, &name)
+            .first()
+            .map(|i| i + 1);
         let tex = self.gallery.covers.get(&idx).cloned();
         let card = if dark {
             egui_glass::Glass::panel_dark()
@@ -595,26 +629,15 @@ impl App {
                     } else {
                         let (r, _) =
                             ui.allocate_exact_size(egui::vec2(CARD_W, ch), egui::Sense::hover());
-                        ui.painter().rect_filled(
-                            r,
-                            top_round,
-                            if dark {
-                                egui::Color32::from_black_alpha(80)
-                            } else {
-                                egui::Color32::from_white_alpha(120)
-                            },
-                        );
+                        ui.painter()
+                            .rect_filled(r, top_round, crate::theme::placeholder(dark));
                         ui.painter().text(
                             r.center(),
                             egui::Align2::CENTER_CENTER,
                             dk.to_uppercase(),
                             egui::FontId::proportional(28.0),
                             // 纯白/纯黑（用户拍板：不用灰字，与其他字对齐）。
-                            if dark {
-                                egui::Color32::WHITE
-                            } else {
-                                egui::Color32::BLACK
-                            },
+                            crate::theme::fg(dark),
                         );
                     }
                     ui.add_space(6.0);
@@ -623,7 +646,10 @@ impl App {
                         ui.add_space(8.0);
                         ui.vertical(|ui| {
                             ui.set_width(CARD_W - 16.0);
-                            let title = truncate_name(&name, 26);
+                            let title = match in_list {
+                                Some(n) => truncate_name(&format!("● #{n} {name}"), 26),
+                                None => truncate_name(&name, 26),
+                            };
                             if sel {
                                 ui.label(
                                     egui::RichText::new(title)
@@ -632,11 +658,11 @@ impl App {
                                 );
                             } else {
                                 // 纯白/纯黑（用户拍板：不用灰字/默认 visuals 灰）。
-                                ui.label(egui::RichText::new(title).strong().color(if dark {
-                                    egui::Color32::WHITE
-                                } else {
-                                    egui::Color32::BLACK
-                                }));
+                                ui.label(
+                                    egui::RichText::new(title)
+                                        .strong()
+                                        .color(crate::theme::fg(dark)),
+                                );
                             }
                             let meta_v = meta.unwrap_or(ThumbMeta {
                                 w: 0,
@@ -648,11 +674,7 @@ impl App {
                             });
                             let (second, third) = meta_lines(dk, &meta_v, size);
                             // 纯白/纯黑小字（用户拍板：去 `.weak()` 灰，与其他字对齐）。
-                            let meta_fg = if dark {
-                                egui::Color32::WHITE
-                            } else {
-                                egui::Color32::BLACK
-                            };
+                            let meta_fg = crate::theme::fg(dark);
                             ui.label(egui::RichText::new(second).small().color(meta_fg));
                             ui.label(
                                 egui::RichText::new(third.unwrap_or_else(|| String::from(" ")))
@@ -677,7 +699,7 @@ impl App {
             ui.painter().rect_stroke(
                 inner.response.rect,
                 28.0,
-                egui::Stroke::new(2.0, Self::accent(dark)),
+                egui::Stroke::new(2.0, crate::theme::accent_fill(dark)),
                 egui::StrokeKind::Outside,
             );
         }

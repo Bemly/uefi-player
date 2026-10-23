@@ -100,11 +100,7 @@ impl App {
         let mut act = Action::None;
 
         // 图标黑白跟随字体颜色（用户拍板）：暗色白 / 浅色黑与描边字同口径。
-        let col = if self.dark {
-            egui::Color32::WHITE
-        } else {
-            egui::Color32::BLACK
-        };
+        let col = crate::theme::fg(self.dark);
         ui.horizontal(|ui| {
             egui_glass::GlassToolbar::new(self.bar_style()).show(ui, |ui| {
                 // 连体胶囊：打开 → 保存 → 另存为 → 重置 → 语言（44 圆）。

@@ -91,11 +91,7 @@ impl App {
                                         Self::marker(false),
                                         v.file_str()
                                     ))
-                                    .text_color(if self.dark {
-                                        egui::Color32::WHITE
-                                    } else {
-                                        egui::Color32::BLACK
-                                    })
+                                    .text_color(crate::theme::fg(self.dark))
                                     .show(ui);
                                 });
                             }
@@ -404,14 +400,7 @@ impl App {
                 ui.painter().rect_stroke(
                     rect,
                     4.0,
-                    egui::Stroke::new(
-                        1.0,
-                        if self.dark {
-                            egui::Color32::WHITE
-                        } else {
-                            egui::Color32::BLACK
-                        },
-                    ),
+                    egui::Stroke::new(1.0, crate::theme::fg(self.dark)),
                     egui::StrokeKind::Inside,
                 );
                 ui.add_space(4.0);

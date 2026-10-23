@@ -22,8 +22,8 @@
 //!   故 `NativeOptions.renderer` 强制 `Wgpu`.
 //! - 图标：用户给的复古像素显示器图，按内容框裁掉下边框留白后透明垫正方形
 //!   （`assets/icon.png` 1024 主图）；`icon-256.rgba` 预烘焙进二进制做运行时窗口图标
-//!   （零新依赖，mac Dock 走 bundle 的 `icon.icns`，见 `bundle_macos.sh`），
-//!   `icon.ico` 给 Windows 用。重做图标跑 `make_icon.py <原图>` + `iconutil` 即可。
+//!   （零新依赖，mac Dock 走 bundle 的 `icon.icns`，见 `tools/gui-pack` 的 `bundle-macos`），
+//!   `icon.ico` 给 Windows 用。重做图标跑 `gui-pack make-icon <原图>`（mac 上自动 `iconutil`）。
 //!
 //! UI 布局照抄 `egui_glass` 官方 README 配方：“Sidebar and opaque content”
 //! （右上 toast 状态 → 左侧玻璃导航卡 → 中央透明内容放稠密表单 →
@@ -67,6 +67,7 @@ mod rules_bench;
 mod rules_coerce;
 mod schema;
 mod text;
+mod theme;
 mod transcode;
 #[cfg(test)]
 mod transcode_hw;

@@ -54,11 +54,45 @@ pub(crate) fn gallery_dir_of(player_path: &str) -> String {
 
 /// 选中文件落盘用相对路径（能挂图库根下就挂相对串，固件侧直接按相对读；
 /// 根外文件保留绝对串，不断新增）。
+/// 两侧先 `canonicalize`：图库根常是 `"."`（裸 `player.toml`），而 rfd 回的是
+/// 绝对路径，直接 `strip_prefix` 永不命中会落绝对串（固件读不到）；macOS
+/// `/private/var` ↔ `/var` 这类软链同理。分隔符统一 `/`（Windows 回 `\`）。
 pub(crate) fn relativize(dir: &str, abs: &std::path::Path) -> String {
-    match abs.strip_prefix(std::path::Path::new(dir)) {
-        Ok(rel) if !rel.as_os_str().is_empty() => rel.display().to_string(),
-        _ => abs.display().to_string(),
-    }
+    let canon = |p: &std::path::Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let root = canon(std::path::Path::new(dir));
+    let file = canon(abs);
+    let rel = match file.strip_prefix(&root) {
+        Ok(rel) if !rel.as_os_str().is_empty() => rel.to_path_buf(),
+        // 规范化不了（文件不存在等）再按原串试一次，保住相对→相对。
+        _ => match abs.strip_prefix(std::path::Path::new(dir)) {
+            Ok(rel) if !rel.as_os_str().is_empty() => rel.to_path_buf(),
+            _ => return abs.display().to_string(),
+        },
+    };
+    rel.components()
+        .map(|c| c.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// 图库卡片在画廊列表里的下标（纯规则，可单测）：按落盘相对串精确比对
+/// （图库名与 `relativize` 同口径，`/` 分隔）；重复条目允许，全返回。
+pub(crate) fn playlist_positions(items: &[PlaylistItem], name: &str) -> Vec<usize> {
+    items
+        .iter()
+        .enumerate()
+        .filter(|(_, it)| it.path == name)
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// 图库里还没进画廊列表的文件（纯规则，可单测；保持图库序，即 mtime 旧→新）。
+pub(crate) fn gallery_missing(names: &[String], items: &[PlaylistItem]) -> Vec<String> {
+    names
+        .iter()
+        .filter(|n| !items.iter().any(|it| &it.path == *n))
+        .cloned()
+        .collect()
 }
 
 impl App {
@@ -236,6 +270,52 @@ impl App {
         );
         self.cfg.playlist.items = items;
         self.playlist_sel = sel;
+        ui.add_space(8.0);
+        self.playlist_from_gallery(ui);
+    }
+
+    /// 从图库添加（图库页 `GalleryState` 已列的媒体里挑还没进列表的，一点即加末尾）。
+    /// 图库名即相对图库根的 `/` 串（与 `relativize` 同口径），不走文件框；
+    /// 已在列表的不重复列（要重复条目仍可走 `添加…` 文件框）。
+    fn playlist_from_gallery(&mut self, ui: &mut egui::Ui) {
+        self.content_label(ui, t!("playlist.from_gallery"));
+        let names: Vec<String> = self
+            .gallery
+            .entries
+            .iter()
+            .map(|e| e.name.clone())
+            .collect();
+        let todo = gallery_missing(&names, &self.cfg.playlist.items);
+        if todo.is_empty() {
+            self.content_small(ui, t!("playlist.from_gallery_none"));
+        }
+        let mut picked = None;
+        ui.horizontal_wrapped(|ui| {
+            for name in &todo {
+                if egui_glass::GlassButton::new(format!("+ {name}"))
+                    .show(ui)
+                    .clicked()
+                {
+                    picked = Some(name.clone());
+                }
+            }
+            // 图库没扫过/盘上新增了文件：就地重扫（与图库页刷新同一入口）。
+            if egui_glass::GlassButton::new(t!("gallery.refresh"))
+                .show(ui)
+                .clicked()
+            {
+                let p = self.path.clone();
+                self.gallery.refresh(&p);
+            }
+        });
+        if let Some(name) = picked {
+            self.cfg
+                .playlist
+                .items
+                .push(PlaylistItem { path: name.clone() });
+            self.playlist_sel = Some(self.cfg.playlist.items.len() - 1);
+            self.status = t!("playlist.added", v = name).into_owned();
+        }
     }
     // P5：`[[wallpaper.items]]` 已删，`wallpaper_items_editor` 同删
     // （画廊唯一入口 `[playlist]`，见 `playlist_gallery_editor`）。
@@ -258,8 +338,97 @@ mod playlist_tests {
         let abs = std::path::Path::new("1080p/video.mp4");
         // 相对根 + 相对文件：`strip_prefix` 直挂相对串。
         assert_eq!(relativize(".", abs), "1080p/video.mp4");
-        let outside = std::path::Path::new("/tmp/clip.mp4");
-        assert_eq!(relativize(".", outside), "/tmp/clip.mp4");
+        let outside = std::path::Path::new("/nonexistent-uefi-player/clip.mp4");
+        assert_eq!(
+            relativize(".", outside),
+            "/nonexistent-uefi-player/clip.mp4"
+        );
+    }
+
+    /// 回归：图库根是 `"."`、rfd 回绝对路径时必须落相对串（曾落绝对串，固件读不到）。
+    #[test]
+    fn relativize_dot_root_with_absolute_pick() {
+        let dir = std::env::temp_dir().join(format!("uefi-player-rel-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("wallpaper")).expect("mkdir");
+        let f = dir.join("wallpaper").join("wall.mp4");
+        std::fs::write(&f, [0u8; 8]).expect("write");
+        // 绝对图库根 + 绝对文件（temp_dir 在 macOS 是软链，canonicalize 才对得上）。
+        assert_eq!(
+            relativize(&dir.display().to_string(), &f),
+            "wallpaper/wall.mp4"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn positions_match_gallery_names() {
+        let items = vec![
+            PlaylistItem {
+                path: String::from("a.mp4"),
+            },
+            PlaylistItem {
+                path: String::from("wallpaper/wall.mp4"),
+            },
+            PlaylistItem {
+                path: String::from("a.mp4"),
+            },
+        ];
+        assert_eq!(playlist_positions(&items, "a.mp4"), vec![0, 2]);
+        assert_eq!(playlist_positions(&items, "wallpaper/wall.mp4"), vec![1]);
+        assert!(playlist_positions(&items, "b.mp4").is_empty());
+        let names: Vec<String> = ["a.mp4", "b.mp4", "wallpaper/wall.mp4", "c.qois"]
+            .iter()
+            .map(|s| String::from(*s))
+            .collect();
+        // 从图库添加只列未入列的，保持图库序。
+        assert_eq!(gallery_missing(&names, &items), vec!["b.mp4", "c.qois"]);
+        assert!(gallery_missing(&[], &items).is_empty());
+        assert_eq!(gallery_missing(&names, &[]), names);
+    }
+
+    /// 图库 → 画廊黑盒表（`blackbox_matrix` 同口径，纯 TOML）：图库卡名原样
+    /// 落 `[[playlist.items]] path`，回读后 `playlist_positions` 仍命中同一序号；
+    /// 移出（`retain`）后整条消失、其余顺序不变。
+    #[test]
+    fn gallery_to_playlist_matrix() {
+        let names = [
+            "261022120000.mp4",
+            "wallpaper/wall.mp4",
+            "wallpaper/wall.qois",
+            "video.raws",
+            "图库样片.mp4",
+        ];
+        let mut cfg = FileConfig::default();
+        for n in names {
+            cfg.playlist.items.push(PlaylistItem {
+                path: String::from(n),
+            });
+        }
+        let back: FileConfig = toml::from_str(&toml::to_string(&cfg).unwrap()).unwrap();
+        assert_eq!(back, cfg);
+        for (i, n) in names.iter().enumerate() {
+            assert_eq!(playlist_positions(&back.playlist.items, n), vec![i], "{n}");
+        }
+        let mut cut = back.clone();
+        cut.playlist
+            .items
+            .retain(|it| it.path != "wallpaper/wall.mp4");
+        let paths: Vec<&str> = cut
+            .playlist
+            .items
+            .iter()
+            .map(|it| it.path.as_str())
+            .collect();
+        assert_eq!(
+            paths,
+            vec![
+                "261022120000.mp4",
+                "wallpaper/wall.qois",
+                "video.raws",
+                "图库样片.mp4"
+            ]
+        );
     }
 
     #[test]
