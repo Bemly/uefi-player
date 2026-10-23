@@ -1,6 +1,7 @@
 //! 动态背景 GPU 转换版：硬解在 GPU，CPU 只搬运不算像素，玻璃在 live 内采样。
 //!
-//! 链路（默认图库首个 avc/hevc 整片循环，缺片/失败静默回静态底，不断任何流程；
+//! 链路（默认三级：选中接管 > 图库首个 avc/hevc > 内嵌 `dsxhgm.mp4`，整片循环；
+//! 缺片/失败静默回静态底，不断任何流程；
 //! 图库选中 avc/hevc 片源即接管背景（`resolve_source`，切源杀旧 worker 重起）：
 //! worker 线程硬解（mac VideoToolbox / Win-Linux Vulkan `BytesDecoder`）→
 //! 只传 NV12（Y + 交错 UV，不做 BT.601，不转 RGBA）→ UI 线程 DMA 直传两张
@@ -26,6 +27,17 @@ use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TryRecvError};
 use std::time::{Duration, Instant};
 
 use egui_wgpu::wgpu;
+
+/// 内嵌默认背景（`assets/dsxhgm.mp4`，avc 720p60 整片循环；编进二进制，
+/// 图库无集内项时回落于此，无外部文件依赖）。
+const EMBEDDED_BG: &[u8] = include_bytes!("../assets/dsxhgm.mp4");
+
+/// 背景片源：文件（选中接管/图库首个跟随）或内嵌字节（图库无集内项时回落）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum BgSource {
+    File(String),
+    Embedded,
+}
 
 /// 后台→UI 有界队列（背压节流硬解；NV12 单帧约 1.4MB，4 帧约 5.6MB）。
 pub(crate) const QUEUE_DEPTH: usize = 4;
@@ -61,8 +73,8 @@ pub(crate) struct VideoBg {
     rs: Option<egui_wgpu::RenderState>,
     gpu: Option<GpuYuv>,
     front: Option<(egui::TextureId, f32, f32)>,
-    /// 当前片源（None = 无视频 → 静态底；默认由调用方按图库首个 avc/hevc 填入）。
-    source: Option<String>,
+    /// 当前片源（None = 无视频 → 静态底；默认由调用方按选中/图库首个/内嵌三级填入）。
+    source: Option<BgSource>,
 }
 
 impl VideoBg {
@@ -117,7 +129,7 @@ impl VideoBg {
         Self::default_first_source(entries, dir)
     }
 
-    /// 默认背景：图库首个集内项（mtime 从旧到新；无集内项即 None → 静态底）。
+    /// 默认背景：图库首个集内项（mtime 从旧到新；无集内项即 None，调用方再回落内嵌）。
     pub(crate) fn default_first_source(
         entries: &[crate::gallery::GalleryEntry],
         dir: &str,
@@ -134,10 +146,22 @@ impl VideoBg {
         )
     }
 
+    /// 最终默认三级：选中接管 > 图库首个集内项 > 内嵌字节（永不回 None，不断背景）。
+    pub(crate) fn default_source(
+        entries: &[crate::gallery::GalleryEntry],
+        selected: Option<usize>,
+        dir: &str,
+    ) -> BgSource {
+        match Self::resolve_source(entries, selected, dir) {
+            Some(p) => BgSource::File(p),
+            None => BgSource::Embedded,
+        }
+    }
+
     /// 切源（App 每帧调；变化才重建 worker；旧 worker 随 rx 丢弃 EPIPE 退出，
     /// 在途帧不污染新源因为通道按 worker 独立）。
     /// 新源清掉旧失败毒丸（`fallback`）与旧末帧（`front`）。
-    pub(crate) fn set_source(&mut self, want: Option<String>) {
+    pub(crate) fn set_source(&mut self, want: Option<BgSource>) {
         if self.source != want {
             self.source = want;
             self.rx = None;
@@ -195,16 +219,23 @@ impl VideoBg {
                 self.playing = false;
                 return false;
             };
-            if !Self::should_try_start(std::path::Path::new(&src).exists()) {
-                self.fallback = Some(String::from("video bg: no file, fallback solid"));
-                self.playing = false;
-                return false;
-            }
             let (tx, rx) = sync_channel::<BgMsg>(QUEUE_DEPTH);
             self.rx = Some(rx);
             std::thread::Builder::new()
                 .name(String::from("video-bg"))
-                .spawn(move || decode_loop(&src, tx))
+                .spawn(move || match src {
+                    BgSource::File(p)
+                        if Self::should_try_start(std::path::Path::new(&p).exists()) =>
+                    {
+                        decode_loop(&p, tx)
+                    }
+                    BgSource::File(p) => {
+                        let _ = tx.send(BgMsg::Finished(Err(format!(
+                            "video bg: no file {p}, fallback solid"
+                        ))));
+                    }
+                    BgSource::Embedded => decode_bytes(EMBEDDED_BG.to_vec(), tx),
+                })
                 .ok();
         }
         // 非阻塞收完本帧到达的全部消息（只留最新帧，旧帧丢弃跟上节拍）。
@@ -648,9 +679,6 @@ impl GpuYuv {
 /// `Finished(Err)`，UI 静默回退（用户拍板，不弹窗）。
 #[cfg(target_os = "macos")]
 fn decode_loop(path: &str, tx: SyncSender<BgMsg>) {
-    use crate::schema::MediaFormat;
-    use crate::transcode::demux_groups;
-
     let data = match std::fs::read(path) {
         Ok(d) => d,
         Err(e) => {
@@ -658,6 +686,15 @@ fn decode_loop(path: &str, tx: SyncSender<BgMsg>) {
             return;
         }
     };
+    decode_bytes(data, tx)
+}
+
+/// 内存解码循环（内嵌默认背景走此路；与 `decode_loop` 同链，只跳过读盘）。
+#[cfg(target_os = "macos")]
+fn decode_bytes(data: Vec<u8>, tx: SyncSender<BgMsg>) {
+    use crate::schema::MediaFormat;
+    use crate::transcode::demux_groups;
+
     // 只收 AVC 轨优先无则 HEVC（选中门保证至少其一；vp9 永不进本函数）。
     let (demuxed, hevc) = match demux_groups(&data, MediaFormat::Avc, None) {
         Ok(d) => (d, false),
@@ -860,10 +897,6 @@ fn frame_to_nv12(
 /// 静默回退，绝不回退 CPU 软解（用户拍板：GUI 内零软解）。
 #[cfg(not(target_os = "macos"))]
 fn decode_loop(path: &str, tx: SyncSender<BgMsg>) {
-    use crate::codecs::length_prefixed_to_annexb;
-    use crate::schema::MediaFormat;
-    use crate::transcode::demux_groups;
-
     let data = match std::fs::read(path) {
         Ok(d) => d,
         Err(e) => {
@@ -871,7 +904,17 @@ fn decode_loop(path: &str, tx: SyncSender<BgMsg>) {
             return;
         }
     };
-    // 只收 AVC 轨（input.mp4 即 h264；`gpu-video` 解码侧只支持 H.264，见上游兼容表）。
+    decode_bytes(data, tx)
+}
+
+/// 内存解码循环（内嵌默认背景走此路；与 `decode_loop` 同链，只跳过读盘）。
+#[cfg(not(target_os = "macos"))]
+fn decode_bytes(data: Vec<u8>, tx: SyncSender<BgMsg>) {
+    use crate::codecs::length_prefixed_to_annexb;
+    use crate::schema::MediaFormat;
+    use crate::transcode::demux_groups;
+
+    // 只收 AVC 轨（`gpu-video` 解码侧只支持 H.264，见上游兼容表）。
     let demuxed = match demux_groups(&data, MediaFormat::Avc, None) {
         Ok(d) => d,
         Err(e) => {
@@ -1132,12 +1175,34 @@ mod video_bg_tests {
         // 换源：杀 worker 状态 + 清失败毒丸与旧末帧。
         bg.fallback = Some(String::from("boom"));
         bg.front = Some((egui::TextureId::default(), 1.0, 1.0));
-        bg.set_source(Some(String::from("/usb/1080p/a.mp4")));
-        assert_eq!(bg.source, Some(String::from("/usb/1080p/a.mp4")));
+        bg.set_source(Some(BgSource::File(String::from("/usb/1080p/a.mp4"))));
+        assert_eq!(
+            bg.source,
+            Some(BgSource::File(String::from("/usb/1080p/a.mp4")))
+        );
         assert!(!bg.started);
         assert_eq!(bg.fallback, None);
         assert_eq!(bg.front, None);
         assert!(!bg.playing);
+    }
+
+    #[test]
+    fn default_source_never_none() {
+        // 三级默认：选中接管 > 图库首个 > 内嵌字节（永不断背景）。
+        let entries = vec![
+            bg_entry("1080p/v.mp4", Some("vp9")),
+            bg_entry("1080p/a.mp4", Some("avc")),
+        ];
+        assert_eq!(
+            VideoBg::default_source(&entries, Some(0), "/usb"),
+            BgSource::File(String::from("/usb/1080p/a.mp4"))
+        );
+        assert_eq!(
+            VideoBg::default_source(&[], None, "/usb"),
+            BgSource::Embedded
+        );
+        // 内嵌字节非空（assets/dsxhgm.mp4 打进二进制）。
+        assert!(!EMBEDDED_BG.is_empty());
     }
 
     #[test]
