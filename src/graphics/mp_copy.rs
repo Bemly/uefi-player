@@ -349,15 +349,24 @@ impl MpDrive<'_> {
         if !self.blt_push {
             return true;
         }
-        let px = self.height.saturating_mul(self.fb_stride);
+        // 单位口径：`fb_stride`/`row_bytes` 是字节，Blt 吃像素。影子槽是
+        // `height × stride_px` 像素；推屏宽取可见宽（`row_bytes/4`），不能拿步幅当宽——
+        // stride ≥ 屏宽，`dims` 超屏宽即 uefi `check_framebuffer_region` panic
+        //（`buffers` 默认 2 起混合路首次走到，曾以字节步幅 7680 当宽炸矩阵）。
+        let stride_px = self.fb_stride / 4;
+        let w_px = (self.row_bytes / 4).min(stride_px);
+        let px = self.height.saturating_mul(stride_px);
         let ok = unsafe {
             let buf = core::slice::from_raw_parts(self.fb_base as *const BltPixel, px);
             (*self.gop)
                 .blt(BltOp::BufferToVideo {
                     buffer: buf,
-                    src: BltRegion::Full,
+                    src: BltRegion::SubRectangle {
+                        coords: (0, 0),
+                        px_stride: stride_px,
+                    },
                     dest: (0, 0),
-                    dims: (self.fb_stride, self.height),
+                    dims: (w_px, self.height),
                 })
                 .is_ok()
         };
@@ -372,7 +381,8 @@ impl MpDrive<'_> {
             copy_block(
                 self.real_fb,
                 self.fb_base,
-                self.height.saturating_mul(self.fb_stride) * 4,
+                // `fb_stride` 已是字节，不再 ×4（同上单位口径）。
+                self.height.saturating_mul(self.fb_stride),
                 config::copy_width(),
             )
         };

@@ -120,6 +120,7 @@ expect = ["play: path=nano_pump", "playlist: items=1 loop=loop_list", "ptui: pla
 soak_sec = 15
 
 # 调度后端 dynamic：多核 steal 泵直写前台（Blt/影子/单核会回退，本矩阵直给合法组合；单项播放列表）。
+# `tune.buffers` 默认 2 起须显式钉 0：dynamic 无影子环，buffers>0 按设计回退 mp_draw。
 [[case]]
 name = "video-dynamic"
 covers = ["src/video.rs", "src/video/", "usb_reports/1080p/video.qois"]
@@ -132,6 +133,8 @@ level = "auto"
 [render]
 mode = "direct"
 vsync = "off"
+[render.tune]
+buffers = 0
 [play]
 fps = "max"
 [playlist]
