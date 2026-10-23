@@ -2,7 +2,7 @@
 
 > 口径：x86 引导加载器（基于 sprout 扩展）+ SIMD 正式矩阵 +
 > UEFI 播放器 + 引导动态壁纸 + 跨平台配置 GUI。
-> sprout（`third_party/`）只读，不 fork、不改。
+> sprout（`third_party/`）submodule pin 死、不 fork，只通过 `patches/` 叠加（见 `AGENTS.md`）。
 
 ## P0 文档骨架（先行）
 

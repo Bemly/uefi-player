@@ -12,5 +12,17 @@ tools/**/target/
 third_party/**/target/
 # QEMU 黑盒矩阵运行产物（串口日志/镜像，按 case 即用即建，不入库）
 tools/qemu-matrix/runs/
-# usb_reports 本地真机片源与 EFI（二进制，不入库；TXT 报告已搬进 docs/）
+# usb_reports 本地真机片源与 EFI（二进制，不入库；TXT 报告已搬进 docs/reports/）
 usb_reports/*
+# 根目录测试片源兜底（本地片源统一放 usb_reports/media/，防误 add 推到 PUBLIC 仓）。
+# 例外：根目录 `dsxhgm.mp4` 入库（用户拍板）——仓库根即 GUI 默认图库目录，
+# 它（mtime 触古 2000-01-01）恒居图库首位兼默认背景（见 gallery.rs/video_bg.rs），别删。
+/*.mp4
+/*.qois
+/*.raws
+/*.h263
+/*.m2v
+/*.ogv
+/*.ivf
+/*.hevc
+!/dsxhgm.mp4
