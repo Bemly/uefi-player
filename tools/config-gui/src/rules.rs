@@ -1,114 +1,13 @@
 //! 黑盒矩阵可测的纯规则（无 UI 依赖；`App` 方法只是薄委托，UI 照此摆）。
 //! 新增 GUI 规则时先加这里 + 矩阵表，再接 UI（见 AGENTS「黑盒矩阵测试」）。
+//!
+//! P5 触达拆分（本文件已超 1000 行红线）：纯规则按域下沉到
+//! `rules_bench`（待测/显隐）与 `rules_coerce`（读盘/落盘钳制，
+//! 含 `[play] media_dir`）；本文件只剩重导出 + `blackbox_matrix`
+//! 表格测试，行为零改（对外 `crate::rules::*` 路径不变）。
 
-use crate::schema::*;
-/// 微调区四旋钮显隐。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct TuneVisible {
-    pub(crate) frames: bool,
-    pub(crate) tile: bool,
-    pub(crate) vfps: bool,
-    pub(crate) buf: bool,
-}
-
-/// 开机矩阵待测（与固件 `config::needs_render_bench` 同逻辑 + half）：
-/// Blt 下 workers/dist 不参测，单核下 dist 不参测。
-/// `workers`/`dist` 只认 `[schedule]`（`[render]` 下同名键已删，老文件残留直接忽略）。
-pub(crate) fn bench_pending(cfg: &FileConfig) -> bool {
-    let (m, s) = (&cfg.render, &cfg.schedule);
-    if m.mode == RenderMode::Auto && m.measured_render == RenderMode::Auto {
-        return true;
-    }
-    let render_is_blt = match m.mode {
-        RenderMode::Blt => true,
-        RenderMode::Direct => false,
-        RenderMode::Auto => m.measured_render == RenderMode::Blt,
-    };
-    if !render_is_blt && s.workers == WorkersMode::Auto && m.measured_workers == WorkersMode::Auto {
-        return true;
-    }
-    let dist_in_play = !render_is_blt
-        && s.workers != WorkersMode::BspOnly
-        && !(s.workers == WorkersMode::Auto && m.measured_workers == WorkersMode::BspOnly);
-    if dist_in_play && s.dist == DistMode::Auto && m.measured_dist == DistMode::Auto {
-        return true;
-    }
-    // half 自带 bench（冠军计时取半）：无记忆即待测。
-    if m.vsync == VsyncMode::Half && m.measured_vsync_fps == 0 {
-        return true;
-    }
-    // Blt 引擎对照操作：选中非 B2V 且 Blt 在测时，单发出数（不参选，只出数）。
-    let blt_in_play = match m.mode {
-        RenderMode::Blt => true,
-        RenderMode::Direct => false,
-        RenderMode::Auto => {
-            m.measured_render == RenderMode::Auto || m.measured_render == RenderMode::Blt
-        }
-    };
-    if blt_in_play && m.blt_op != BltOpKind::BufferToVideo {
-        return true;
-    }
-    m.vsync == VsyncMode::Auto && m.measured_vsync == VsyncMode::Auto
-}
-
-/// 微调区显隐：frames=矩阵有待测；tile=直写全核且分工沾 tile；
-/// vfps=static 封顶/auto 达标线；buf=非 Blt（Blt 已是单 push）。
-pub(crate) fn tune_visible(cfg: &FileConfig) -> TuneVisible {
-    let (m, s) = (&cfg.render, &cfg.schedule);
-    let dist_in_play = m.mode != RenderMode::Blt && s.workers != WorkersMode::BspOnly;
-    TuneVisible {
-        frames: bench_pending(cfg),
-        tile: dist_in_play && (s.dist == DistMode::Auto || s.dist == DistMode::Tile),
-        vfps: m.vsync == VsyncMode::Auto || m.vsync == VsyncMode::Static,
-        buf: m.mode != RenderMode::Blt,
-    }
-}
-
-/// 读盘钳制：Blt 三个非上屏操作 GUI 置灰不可选，残留值钳回 B2V
-/// （播放行为无变化——固件上屏路本来就只认 B2V；手写值想出引擎数
-/// 的改完别点保存，或固件侧照读，见 player.md）。
-/// 解码缓冲逐格式钳 0-32 + `[schedule] cores` 钳 0..=64（0 保留，超限压界，不断解析）。
-/// `[play] pipeline` / `[render] workers/dist` 已删：老文件残留键 serde 默认忽略，
-/// 无需迁移（`[schedule]` 为准）。
-pub(crate) fn coerce_loaded(mut cfg: FileConfig) -> FileConfig {
-    if cfg.render.blt_op != BltOpKind::BufferToVideo {
-        cfg.render.blt_op = BltOpKind::BufferToVideo;
-    }
-    clamp_decode(&mut cfg.decode);
-    clamp_schedule(&mut cfg.schedule);
-    cfg
-}
-
-pub(crate) fn clamp_schedule(s: &mut ScheduleConfig) {
-    s.cores = s.cores.min(64);
-}
-
-/// 落盘前钳制解码缓冲（滑杆已钳 0-32，这里防手改文件后的脏值回写；
-/// 0 保留 = 跟随 `tune.window`，只压上界）。
-/// RAW-GEOM：raw 几何钳 1..=4096（手改文件脏值回写；与固件 `store_all` 同口径；
-/// 其余格式键固件侧忽略，不钳）。
-pub(crate) fn clamp_decode(d: &mut DecodeTable) {
-    for fmt in DecodeTable::ORDER {
-        if let Some(c) = d.get_mut(fmt) {
-            c.buffers = c.buffers.min(32);
-            if fmt == MediaFormat::Raw {
-                c.width = c.width.clamp(1, 4096);
-                c.height = c.height.clamp(1, 4096);
-            }
-        }
-    }
-}
-
-/// 落盘前钳制 tune（滑杆已钳，这里防手改文件后的脏值回写）。
-/// `window` 是流式供片窗口（1-32，默认 4；只对 staged/stream 生效，
-/// 其余供片忽略本项，不断解析）。
-pub(crate) fn clamp_tune(t: &mut RenderTune) {
-    t.frames = t.frames.max(1);
-    t.tile_rows = t.tile_rows.clamp(8, 512);
-    t.vsync_fps = t.vsync_fps.clamp(15, 240);
-    t.buffers = t.buffers.min(16);
-    t.window = t.window.clamp(1, 32);
-}
+pub(crate) use crate::rules_bench::*;
+pub(crate) use crate::rules_coerce::*;
 
 /// 配置黑盒矩阵：GUI 改配置 → 落盘 → 固件生效，全链路只走 TOML 文本 + 纯规则，
 /// 无 display 下 `cargo test` 可跑。新增 GUI 规则/档位/字段时先在这里加行
@@ -117,6 +16,7 @@ pub(crate) fn clamp_tune(t: &mut RenderTune) {
 #[cfg(test)]
 mod blackbox_matrix {
     use super::*;
+    use crate::schema::*;
     // RAW-GEOM：`DecodeConfig` 已拆到 `decode_cfg`（`schema` 只重导出 `DecodeTable`）。
     use crate::decode_cfg::DecodeConfig;
 
@@ -194,6 +94,7 @@ mod blackbox_matrix {
                 fps: String::from("60"),
                 measured_max_fps: 120,
                 feed: FeedMode::Clip,
+                media_dir: String::from("1080p"),
             },
             playlist: PlaylistConfig {
                 loop_mode: LoopMode::LoopList,
@@ -212,18 +113,9 @@ mod blackbox_matrix {
             decode: DecodeTable::default(),
             wallpaper: WallpaperListConfig {
                 enable: true,
-                loop_mode: LoopMode::LoopList,
                 fps: String::from("20"),
                 preload: 4,
                 popup_freeze: true,
-                items: vec![
-                    PlaylistItem {
-                        path: String::from("wallpaper/wall.mp4"),
-                    },
-                    PlaylistItem {
-                        path: String::from("wallpaper/wall.qois"),
-                    },
-                ],
             },
             boot: BootConfig {
                 auto: true,
@@ -273,12 +165,12 @@ mod blackbox_matrix {
         let text = "version = 1\n[accel]\nlevel = \"auto\"\n[render]\nmode = \"auto\"\n[play]\nfps = \"auto\"\n";
         let cfg: FileConfig = toml::from_str(text).unwrap();
         assert!(!cfg.wallpaper.enable);
-        assert_eq!(cfg.wallpaper.loop_mode, LoopMode::LoopList);
-        assert!(cfg.wallpaper.items.is_empty());
         assert!(cfg.wallpaper.popup_freeze);
         assert!(cfg.playlist.items.is_empty());
         assert_eq!(cfg.playlist.loop_mode, LoopMode::LoopList);
         assert_eq!(cfg.play.feed, FeedMode::Clip);
+        // P5：`[play] media_dir` 缺键按 `""`（根目录）照读。
+        assert_eq!(cfg.play.media_dir, "");
         assert_eq!(cfg.schedule.dist, DistMode::Auto);
         assert_eq!(cfg.schedule.workers, WorkersMode::Auto);
         assert_eq!(cfg.schedule.cores, 0);
@@ -300,8 +192,9 @@ mod blackbox_matrix {
         }
     }
 
-    /// 播放列表循环三档回写（`loop_single`/`loop_list`/`once` × 冻结开关，
-    /// 3×2 = 6 组合不断字段；旧 `[play] format` 残留直接忽略）。
+    /// 画廊循环三档回写（`loop_single`/`loop_list`/`once` × 冻结开关，
+    /// 3×2 = 6 组合不断字段；壁纸画廊语义：显示哪几个/多少个/什么顺序/是否循环，
+    /// 不断言播放器供片语义——供片改走 `[play] media_dir` 整目录）。
     /// （旧 `format_roundtrip_matrix` 已删：`[play] format`/
     /// `[wallpaper] format,frames` 键随播放页一并删除，解码 tabs 见下。）
     #[test]
@@ -311,7 +204,6 @@ mod blackbox_matrix {
             for froze in [false, true] {
                 let mut cfg = FileConfig::default();
                 cfg.playlist.loop_mode = m;
-                cfg.wallpaper.loop_mode = m;
                 cfg.wallpaper.popup_freeze = froze;
                 let text = toml::to_string(&cfg).unwrap();
                 assert!(
@@ -320,34 +212,81 @@ mod blackbox_matrix {
                 );
                 let back: FileConfig = toml::from_str(&text).unwrap();
                 assert_eq!(back.playlist.loop_mode, m);
-                assert_eq!(back.wallpaper.loop_mode, m);
                 assert_eq!(back.wallpaper.popup_freeze, froze);
                 assert_eq!(back, cfg);
                 n += 1;
             }
         }
         assert_eq!(n, 3 * 2);
-        // 老文件缺键：两表全按 `loop_list` + 空列表照读。
+        // 老文件缺键：画廊 `loop` 按 `loop_list` + 空列表照读。
         let legacy: FileConfig = toml::from_str("version = 1\n").unwrap();
         assert_eq!(legacy.playlist.loop_mode, LoopMode::LoopList);
-        assert_eq!(legacy.wallpaper.loop_mode, LoopMode::LoopList);
         assert!(legacy.playlist.items.is_empty());
-        assert!(legacy.wallpaper.items.is_empty());
         assert!(legacy.wallpaper.popup_freeze);
-        // 旧 `[play] format` / `[wallpaper] format,frames` 残留直接忽略，不断解析。
+        // 旧 `[play] format` / `[wallpaper] format,frames,loop,items` 残留直接忽略，不断解析。
         let old: FileConfig = toml::from_str(
-            "version = 1\n[play]\nfps = \"max\"\nformat = \"raw\"\n[wallpaper]\nformat = \"qois\"\nframes = 30\n",
+            "version = 1\n[play]\nfps = \"max\"\nformat = \"raw\"\n[wallpaper]\nformat = \"qois\"\nframes = 30\nloop = \"once\"\n[[wallpaper.items]]\npath = \"wallpaper/wall.mp4\"\n",
         )
         .unwrap();
         assert_eq!(old.play.fps, "max");
         assert!(old.playlist.items.is_empty());
-        assert!(old.wallpaper.items.is_empty());
+        assert_eq!(old.playlist.loop_mode, LoopMode::LoopList);
     }
 
-    /// 播放列表多条目回写（`playlist-list-loop`）、单条循环
-    /// （`playlist-loop-single`）、播完即停（`playlist-once`）与壁纸画廊列表
-    /// （`wallpaper-gallery-list`）见 `playlist.rs` 同名测试（列表归属页，
-    /// 黑盒仍纯 TOML 无 display，`cargo test` 同跑）。
+    /// 画廊多条目回写（`playlist-list-loop`）、单条循环
+    /// （`playlist-loop-single`）、播完即停（`playlist-once`）与画廊归属
+    /// （P5 起 `[playlist]` 即壁纸画廊：显示哪几个/多少个/什么顺序/是否循环；
+    /// 供片改走 `[play] media_dir`，不断言播放器语义）见 `playlist.rs`
+    /// 同名测试（列表归属页，黑盒仍纯 TOML 无 display，`cargo test` 同跑）。
+
+    /// `[play] media_dir` 回写矩阵（缺省/显式/去空格/超长截断；序列化原样，App 落盘前调同一钳制）。
+    /// 纯规则函数（`clamp_media_dir`/`coerce_loaded` 先行），无 display 依赖。
+    #[test]
+    fn media_dir_roundtrip_matrix() {
+        // 缺省：缺键老文件按 `""`（根目录）照读。
+        let legacy: FileConfig = toml::from_str("version = 1\n[play]\nfps = \"max\"\n").unwrap();
+        assert_eq!(legacy.play.media_dir, "");
+        // 显式值照读照写。
+        for s in ["", "1080p", "wallpaper/hd", "a/b/c"] {
+            let mut cfg = FileConfig::default();
+            cfg.play.media_dir = String::from(s);
+            let back: FileConfig = toml::from_str(&toml::to_string(&cfg).unwrap()).unwrap();
+            assert_eq!(back.play.media_dir, s, "{s:?}");
+            assert_eq!(back, cfg);
+        }
+        // 读盘钳制：去首尾空格（合法值不警告）。
+        let spaced: FileConfig = toml::from_str("[play]\nmedia_dir = \"  1080p  \"\n").unwrap();
+        assert_eq!(coerce_loaded(spaced).play.media_dir, "1080p");
+        let mut v = String::from("1080p");
+        assert!(!clamp_media_dir(&mut v));
+        assert_eq!(v, "1080p");
+        // 超长截断：65 字符 → 前 64 + 警告；64 字符合法不警告。
+        let ok64: String = std::iter::repeat_n('a', 64).collect();
+        let bad65: String = std::iter::repeat_n('a', 65).collect();
+        let mut v = ok64.clone();
+        assert!(!clamp_media_dir(&mut v));
+        assert_eq!(v, ok64);
+        let mut v = bad65.clone();
+        assert!(clamp_media_dir(&mut v));
+        assert_eq!(v, ok64);
+        // 中文按字符数（64 汉字合法，65 截断；非字节口径，不切断 UTF-8）。
+        let ok_zh: String = std::iter::repeat_n('片', 64).collect();
+        let mut v = ok_zh.clone();
+        assert!(!clamp_media_dir(&mut v));
+        assert_eq!(v, ok_zh);
+        let mut v = std::iter::repeat_n('片', 65).collect::<String>();
+        assert!(clamp_media_dir(&mut v));
+        assert_eq!(v, ok_zh);
+        // 读盘路径同样截断（`coerce_loaded`）。
+        let loaded: FileConfig =
+            toml::from_str(&format!("[play]\nmedia_dir = \"{bad65}\"\n")).unwrap();
+        assert_eq!(coerce_loaded(loaded).play.media_dir, ok64);
+        // 序列化原样：超长值 `to_string` 不截断（钳制在读盘 coerce + App 落盘前，两处调同一函数）。
+        let mut cfg = FileConfig::default();
+        cfg.play.media_dir = bad65.clone();
+        let text = toml::to_string(&cfg).unwrap();
+        assert!(text.contains(&bad65), "write as-is in {text}");
+    }
 
     /// 解码 tabs 回写（8 格式 × 线程 2 档采样：tab 只切展示，落盘八表齐全；
     /// 全量组合见 `decode_roundtrip_matrix`，此处断 tab 序与落盘键）。

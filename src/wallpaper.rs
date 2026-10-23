@@ -1,6 +1,6 @@
 //! 动态壁纸（P4）：播放器 `Clip` 的薄调用层 + 画廊拼接，不自研解码。
 //!
-//! 画廊模型（`[wallpaper]` enable/loop/fps/preload/popup_freeze + `[[wallpaper.items]]`）：
+//! 画廊模型（`[wallpaper]` enable/fps/preload/popup_freeze + `[playlist]` loop/items 为画廊唯一入口）：
 //! 每项按路径自动检测（与播放列表同一 `detect_clip_format`），恒 eager 预解码
 //! （随机访问循环，以 tag 裁决忽略每格式 fetch 覆盖，见 `feed_for`）；
 //! 各项帧几何必须一致（首项定，后继异形整项跳过 + warn）；

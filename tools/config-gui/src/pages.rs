@@ -483,6 +483,22 @@ impl App {
                         self.cfg.play.feed =
                             FeedMode::ALL[self.feed_f.round().clamp(0.0, 4.0) as usize];
                         self.content_small(ui, t!("play.feed_hint"));
+                        ui.add_space(4.0);
+                        // P5 `[play] media_dir`（薄代理：直读直写 `cfg.play.media_dir`）：
+                        // 文本框查库结论（2026-10-23，`egui_glass 0.1.5`）：
+                        // 库导出仅 `Glass`/`GlassButton`/`GlassSlider`/`GlassToolbar`/
+                        // `GlassStyle`/`LiveBackdrop`/`paint_glass`（本地 registry 源码 +
+                        // `docs.rs` 确认签名），无文本输入件；故用 `egui::TextEdit::singleline`
+                        // 原语（单行），无新依赖。
+                        // live 不钳（打字中截断会抢光标）：读盘 trim + 超长截断并警告
+                        // （`rules::clamp_media_dir`，`load_path` 展示），落盘原样。
+                        self.content_label(ui, t!("play.media_dir"));
+                        let _ = ui.add(
+                            egui::TextEdit::singleline(&mut self.cfg.play.media_dir)
+                                .hint_text("e.g. 1080p")
+                                .desired_width(f32::INFINITY),
+                        );
+                        self.content_small(ui, t!("play.media_dir_hint"));
                     }
                     DecodeTab::Format(fmt) => {
                         // 选中 tab 的 5 控件（线程滑杆 + 零拷开关 + 流式开关 + 缓冲滑杆 +
@@ -620,12 +636,9 @@ impl App {
                     }
                 });
                 self.content_small(ui, wp_enable_desc(self.cfg.wallpaper.enable));
-                // 关壁纸时循环/帧率/预载/冻结/列表全不可选，整组隐藏。
-                // 顺序与 `[wallpaper]` 表一致：loop → fps → preload → popup_freeze → items。
+                // 关壁纸时帧率/预载/冻结/画廊全不可选，整组隐藏。
+                // P5：`[wallpaper] loop/items` 已删（画廊唯一入口 `[playlist]`，见下节）。
                 if self.cfg.wallpaper.enable {
-                    ui.add_space(10.0);
-                    // 循环（`playlist.rs`，与播放列表同编辑器）。
-                    self.wallpaper_loop_row(ui);
                     ui.add_space(10.0);
                     self.content_label(ui, t!("wallpaper.fps"));
                     // 三段滑杆（与播放帧率同构）：0 = auto（跟 vsync），1-240 = 限速，241 = max。
@@ -674,8 +687,10 @@ impl App {
                     self.cfg.wallpaper.popup_freeze = froze;
                     self.content_small(ui, t!("wallpaper.popup_freeze_hint"));
                     ui.add_space(10.0);
-                    self.content_label(ui, t!("wallpaper.list_heading"));
-                    self.wallpaper_items_editor(ui);
+                    // P5 画廊列表（唯一入口 `[playlist] loop` + `[[playlist.items]]`，
+                    // 即壁纸的画廊列表；播放供片改走 `[play] media_dir` 整目录，见解码页 Global）。
+                    self.content_label(ui, t!("playlist.heading"));
+                    self.playlist_gallery_editor(ui);
                 }
             }
             Page::Boot => {

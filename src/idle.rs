@@ -3,7 +3,7 @@
 //! 流程：`main` → 校准（首轮无记忆必测，即“首轮默认测试”）→ `idle::run`（永不返回）：
 //! 壁纸全屏循环（无片源就黑屏 + 提示行）；任意键 → 按 `[wallpaper] popup_freeze`
 //! 冻结或继续播行动画 → 弹出启动选项。选条目交权（回来继续待机）；
-//! `p` 进纯播放器菜单（`q` 回来）；`f` 重启进固件设置（BootToFwUi）；
+//! `p` 进 TUI 外壳（`ptui::run`，`q` 层层回来）；`f` 重启进固件设置（BootToFwUi）；
 //! `s` 关机；`r` 重启；`q` 回壁纸。串口标记见各 `log::` 行（矩阵靠它们同步）。
 
 use alloc::format;
@@ -16,7 +16,7 @@ use crate::boot::{self, KEYS, entry_line};
 use crate::diag::common::{flush_keys, pause_return, poll_key};
 use crate::error::Result;
 use crate::graphics::{Screen, calibrate_tps, tsc};
-use crate::menu::run_menu;
+use crate::ptui;
 use crate::video::decoder::Clip;
 use crate::wallpaper::{self, WP_H, WP_TOP, WP_W};
 
@@ -27,7 +27,14 @@ pub fn run(mut screen: Screen) -> ! {
         // 每次回待机都重载壁纸（U盘热插拔换片源即生效；便宜）。
         let clip = wallpaper::load().unwrap_or(None);
         let tps = if clip.is_some() { calibrate_tps() } else { 1 };
-        idle_wait(&mut screen, &clip, tps);
+        // 待机键路由：`p` 进 TUI 外壳，其余任意键走原引导弹窗
+        // （弹窗内仍保留 `p` 入口，行为对称）。
+        let (key, _raw) = idle_wait(&mut screen, &clip, tps);
+        if key == 'p' {
+            log::warn!("idle: ptui mode");
+            screen = ptui::run(screen);
+            continue;
+        }
         screen = match popup(screen, &clip, tps) {
             Ok(s) => s,
             Err(e) => {
@@ -42,8 +49,8 @@ pub fn run(mut screen: Screen) -> ! {
 }
 
 /// 壁纸待机：全屏循环（`fps` 预算）；无片源/分辨率不对就黑屏 + 提示行。
-/// 任意键（消耗掉）即返回，调用方开弹窗。串口 `idle: ready` 供矩阵卡点。
-fn idle_wait(screen: &mut Screen, clip: &Option<Clip>, tps: u64) {
+/// 返回唤醒按键（调用方路由：`p` 进 TUI，其余走引导弹窗）。串口 `idle: ready` 供矩阵卡点。
+fn idle_wait(screen: &mut Screen, clip: &Option<Clip>, tps: u64) -> (char, u16) {
     // 先排空陈旧输入再打标记：标记之后到的键才是有效按键（矩阵靠标记卡点）。
     // 弹窗内不再排空——开弹窗的键已被上轮 poll 消耗，后到的都是真输入。
     flush_keys();
@@ -66,15 +73,18 @@ fn idle_wait(screen: &mut Screen, clip: &Option<Clip>, tps: u64) {
     let mut last = tsc();
     flush_keys();
     loop {
-        if poll_key().is_some() {
-            return;
+        if let Some(k) = poll_key() {
+            return k;
         }
         if live {
             let now = tsc();
             if now.saturating_sub(last) >= budget {
                 last = now;
                 let clip = clip.as_ref().unwrap_or_else(|| unreachable!());
-                let _ = screen.upload_frame(WP_W, WP_H, clip.frame(idx));
+                // 几何取 clip 真实 `w/h`（`wallpaper::load` 已带几何），让 `display.fit` 正常生效；
+                // 写死 `WP_W/WP_H` 会把非 1080p 画廊帧按 1080p 送显（错窗/撕裂）。
+                let (cw, ch) = (clip.w, clip.h);
+                let _ = screen.upload_frame(cw, ch, clip.frame(idx));
                 // 画廊步进：list 回绕，once 到末帧停留（见 `wallpaper::next_gallery_index`）。
                 idx = wallpaper::next_gallery_index(idx, clip.len());
             }
@@ -84,7 +94,7 @@ fn idle_wait(screen: &mut Screen, clip: &Option<Clip>, tps: u64) {
     }
 }
 
-/// 启动选项弹窗：条目数字键直选交权；`p/f/s/r` 固定项；`q` 回壁纸；
+/// 启动选项弹窗：条目数字键直选交权；`p` 进 TUI 外壳（与待机直达对称）、`f/s/r` 固定项；`q` 回壁纸；
 /// `Enter` 跑默认项。`frozen` 时静态屏，`live` 时行区继续播（选项占文字区）。
 fn popup(mut screen: Screen, clip: &Option<Clip>, tps: u64) -> Result<Screen> {
     let list = boot::list()?;
@@ -114,7 +124,8 @@ fn popup(mut screen: Screen, clip: &Option<Clip>, tps: u64) -> Result<Screen> {
             if now.saturating_sub(last) >= budget {
                 last = now;
                 if let Some(c) = clip {
-                    let _ = screen.upload_frame_region(WP_W, WP_H, anim_top, c.frame(idx));
+                    // 同待机：行区源几何取 clip 真实 `w/h`（`clip_blit` 按此交窗，不写屏外）。
+                    let _ = screen.upload_frame_region(c.w, c.h, anim_top, c.frame(idx));
                     idx = wallpaper::next_gallery_index(idx, c.len());
                 }
             }
@@ -133,7 +144,7 @@ fn popup(mut screen: Screen, clip: &Option<Clip>, tps: u64) -> Result<Screen> {
             }
             'p' => {
                 log::warn!("popup: player mode");
-                return Ok(run_menu(screen));
+                return Ok(ptui::run(screen));
             }
             'f' => {
                 boot_to_firmware(&mut screen);
@@ -191,7 +202,7 @@ fn draw_popup(screen: &mut Screen, list: &crate::boot::entries::BootList) {
         ));
     }
     screen.draw_str("");
-    screen.draw_str("[p] player mode (diag menu)");
+    screen.draw_str("[p] TUI 播放/菜单");
     screen.draw_str("[f] firmware setup (reboot)");
     screen.draw_str("[s] shutdown   [r] reboot");
     screen.draw_str("[q] back to wallpaper  [Enter] default");

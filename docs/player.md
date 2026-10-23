@@ -28,7 +28,7 @@
 - MP4 拆包（石雨堂 `Mp4FileDemuxer`，avcC/hvcC/vpcC，长度前缀→Annex-B 起始码；
   vp09 样片即裸帧直送）与 OggS 拆包（手写：`OggS` 页头 + 段表组包 + MSB-first
   CRC32，错页记数跳过）见 `video/demux.rs` 头注释轮子结论。
-- 壁纸同矩阵（`wall.*` 同名文件，见 `docs/wallpaper.md`），同一自动检测。
+- 壁纸同矩阵（画廊项即 `[playlist]` 项，见 `docs/wallpaper.md`），同一自动检测。
 
 ## 循环模式（`[playlist] loop`）
 
@@ -47,6 +47,28 @@
 `playlist: empty list, nothing to play` 空表行；
 逐项 `video: fmt=` / `video: feed=`（+`fetchovr=<fmt>`）/ `decode: fmt=` /
 `play: path=` 行保持原口径（不断言画质）。
+
+## 播放器 TUI（`src/ptui/`，待机按 `p` 进，`q` 逐层回）
+
+- 首页九宫（`pages/home`）：`1` 播放 / `2` accel / `3` render / `4` schedule /
+  `5` decode / `6` display / `7` test / `8` 壁纸设置，数字进子页，`q` 回调用方
+  （待机/弹窗页栈继续）。进页记 `ptui: page=<name>`，调档记 `ptui: set <key>=<value>`
+  （矩阵卡点用，键名与落盘小写同形）。
+- 拨档（`pages/play`）：`f` 轮换 `play_fps`（auto/max/15/30/60/120），`e` 回绕
+  `play_feed`（clip/staged/stream/zero_copy/single）；其余六页同式
+  （`+/-` 拨数字，字母切开关；壁纸页 `s` 显式落盘除外）。
+- `q` 返回：子页 `q` 回首页，首页 `q` 回待机/弹窗；播片中按任意键停播回播放页。
+- 片源扫描约定：根或 `media_dir` 子目录（`""`=根，单层非递归，子目录不进；
+  目录不存在直接 Err，屏显报错，不回退不静默）→ `media::scan` 枚举直属项 →
+  每个文件名用既有 `detect_clip_format_tagged` 只读识别（tag=`"ptui"`，
+  `.mp4` 容器探针整文件读属既有行为）→ 不可识别跳过 → 相对路径（`/` 分隔）
+  按字节序排。显示前 10 项（数字 `1`-`9`/`0` 选播，`r` 重扫）。
+- 起播一律 `play_path`（与列表同管线，`video: fmt=` / `feed=` 行口径不变）；
+  检测序沿用既有九档（qois → raws 单文件 → raw 目录扫描 → mp4 探针
+  hevc>avc>vp9 → hevc → ivf → h263 → m2v → ogv），TUI 不另起检测。
+- 运行时纯内存不落盘：六页调档只改 `PlayerRuntime` 内存（`runtime_mut`），
+  重启即失；唯一写盘是壁纸页 `s`（只写 `[wallpaper]` 表，见 `docs/wallpaper.md`）。
+  控制权归属总表见 `docs/config.md`。
 
 ## `video.qois` 格式
 

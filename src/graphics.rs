@@ -15,7 +15,7 @@
 
 use crate::config::{self, BltOpKind, DisplayFit, RenderMode};
 use crate::error::Result;
-use crate::video::ascii_font::FONT_8X16;
+use crate::font::{self, latin::FONT_8X16};
 use alloc::vec::Vec;
 use uefi::boot::{ScopedProtocol, get_handle_for_protocol, open_protocol_exclusive};
 use uefi::proto::console::gop::{BltOp, BltPixel, BltRegion, GraphicsOutput};
@@ -122,9 +122,10 @@ impl Screen {
         })?)
     }
 
-    // 糟糕的 ASCII 输出实现,一个字符的一个笔画开始渲染
+    // 中英文混排输出：英文 8x16（旧表字节零改动）+ 中文 16x16 全角 + 缺字豆腐块。
+    // 度量冻结：英文 8 / 中文 16 / 行高 18（`font::layout`），`WP_TOP` 不动。
     pub fn draw_str(&mut self, text: &str) {
-        let mut x = 0;
+        let mut x: usize = 0;
         // 获取当前屏幕的宽度，用于自动换行
         let (width, height) = self.gop.current_mode_info().resolution();
 
@@ -142,48 +143,61 @@ impl Screen {
             // 显式换行符处理
             if c == '\n' {
                 x = 0;
-                self.stdout += 18; // 换行高度（点阵16像素 + 2像素间距）
+                self.stdout += font::LINE_H; // 换行高度（点阵16像素 + 2像素间距）
                 if self.stdout >= height {
                     self.stdout = 0
                 }
                 continue;
             }
 
-            // 超出屏幕宽度自动换行 (8 是字符宽度)
-            if x + 8 > width {
+            // 超出屏幕宽度自动换行（英文 8 / 中文 16，不拆字符）
+            let w = font::char_width(c);
+            if x + w > width {
                 x = 0;
-                self.stdout += 18;
+                self.stdout += font::LINE_H;
                 if self.stdout >= height {
                     self.stdout = 0
                 }
             }
 
-            // --- 2. 绘制字符 ---
-
-            let index = (c as usize) & 0x7F;
-            let glyph = &FONT_8X16[index];
-
-            for row in 0..16 {
-                let row_bits = glyph[row];
-                for col in 0..8 {
-                    let is_fg = (row_bits >> (7 - col)) & 1 == 1;
-                    let color = if is_fg { fg } else { bg };
-
-                    // 绘制像素
-                    let _ = self.gop.blt(BltOp::VideoFill {
-                        color,
-                        dest: (x + col, self.stdout + row),
-                        dims: (1, 1),
-                    });
+            // --- 2. 绘制字符（英文/中文同行高 16px，基线对齐） ---
+            if (c as u32) < 0x80 {
+                let glyph = &FONT_8X16[(c as usize) & 0x7F];
+                for row in 0..16 {
+                    let row_bits = glyph[row];
+                    for col in 0..8 {
+                        let is_fg = (row_bits >> (7 - col)) & 1 == 1;
+                        let color = if is_fg { fg } else { bg };
+                        // 绘制像素
+                        let _ = self.gop.blt(BltOp::VideoFill {
+                            color,
+                            dest: (x + col, self.stdout + row),
+                            dims: (1, 1),
+                        });
+                    }
+                }
+            } else {
+                let rows = font::cjk_glyph_or_tofu(c);
+                for row in 0..16 {
+                    let row_bits = rows[row];
+                    for col in 0..16 {
+                        let is_fg = (row_bits >> (15 - col)) & 1 == 1;
+                        let color = if is_fg { fg } else { bg };
+                        let _ = self.gop.blt(BltOp::VideoFill {
+                            color,
+                            dest: (x + col, self.stdout + row),
+                            dims: (1, 1),
+                        });
+                    }
                 }
             }
 
-            // 字符绘制完后，坐标右移
-            x += 8;
+            // 字符绘制完后，坐标右移（英文 8 / 中文 16）
+            x += w;
         }
 
         // 整个字符串画完后，最后额外换一行，防止下一次打印重叠
-        self.stdout += 18;
+        self.stdout += font::LINE_H;
     }
 
     // ---------- 渲染路径矩阵（配置文件驱动） + `[display]` 适配（v2） ----------

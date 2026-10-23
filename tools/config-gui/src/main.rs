@@ -61,6 +61,10 @@ mod file_pick;
 mod gallery;
 mod pages;
 mod rules;
+// P5 触达拆分：`rules` 已超 1000 行红线，纯规则按域下沉（bench 待测/显隐 +
+// coerce 读盘/落盘钳制；对外 `crate::rules::*` 路径不变，行为零改）。
+mod rules_bench;
+mod rules_coerce;
 mod schema;
 mod text;
 mod transcode;

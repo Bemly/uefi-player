@@ -290,6 +290,10 @@ pub(crate) fn default_buffers() -> u32 {
     0
 }
 
+pub(crate) fn default_media_dir() -> String {
+    String::new()
+}
+
 /// 播放帧率开关（与固件 `parse_fps` 同逻辑：非法值回落 auto）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FpsPolicy {
@@ -447,7 +451,8 @@ impl LoopMode {
     }
 }
 
-/// 播放列表单条（`[[playlist.items]]` / `[[wallpaper.items]]` 唯一键 `path`；
+/// 画廊单条（`[[playlist.items]]` 唯一键 `path`；
+/// P2 起画廊唯一入口收敛到本表（`[[wallpaper.items]]` 已删，残留忽略）；
 /// 固件按扩展名 + MP4 探轨自动识别格式，失败跳过 + `log::warn!`，不断播）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub(crate) struct PlaylistItem {
@@ -455,7 +460,10 @@ pub(crate) struct PlaylistItem {
     pub(crate) path: String,
 }
 
-/// `[playlist]`：`loop` + `[[playlist.items]]`（顺序即播放序；空列表 = `Err`，无静默菜单）。
+/// `[playlist]`：壁纸画廊：显示哪几个/多少个/什么顺序/是否循环
+/// （`loop` + `[[playlist.items]]`；P2 起画廊唯一入口收敛到此，
+/// `[[wallpaper.items]]`/`[wallpaper] loop` 已删，残留按 serde 默认忽略，无迁移；
+/// 空列表 = `Err`，无静默菜单）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub(crate) struct PlaylistConfig {
@@ -540,6 +548,8 @@ pub(crate) use crate::decode_cfg::DecodeTable;
 /// 只由固件实测回写（0 = 未测），这里只读展示 + 重测清零。
 /// `feed` 是解码供片全局默认（`clip` 全预解码，默认，老文件缺键照读；
 /// 逐格式 `decode.<fmt>.fetch` 覆盖它，壁纸恒 `clip` 忽略覆盖）。
+/// `media_dir` 是片源目录（字符串，缺省 `""` = 根目录；读盘钳制见
+/// `rules::clamp_media_dir`：trim 首尾空格，超 64 字符截断 + 警告；落盘原样）。
 /// 旧 `format` 键已删（逐条目自动识别）：老文件残留直接忽略（未知键 serde 默认忽略）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -550,6 +560,8 @@ pub(crate) struct PlayConfig {
     pub(crate) measured_max_fps: u32,
     #[serde(default)]
     pub(crate) feed: FeedMode,
+    #[serde(default = "default_media_dir")]
+    pub(crate) media_dir: String,
 }
 
 /// `[boot]`：多卷自动发现开关（与固件 `BootConfig` 同构；全 `true` = 默认全开）。
@@ -688,26 +700,26 @@ pub(crate) struct AsyncConfig {
 /// `[wallpaper] fps`：纯字符串三态（整数老文件不再兼容：`fps = 15` 即整文件
 /// 回默认 + 警告，见矩阵 `wallpaper_fps_int_rejected`）。
 /// 与固件同口径（`[play] fps` 同构）。
-/// `[wallpaper]` 新式画廊列表（与固件 `WallpaperListConfig` 同构）：
-/// `enable` 仍是总开关（关 = None，装饰永不 halt）；
-/// `loop` + `[[wallpaper.items]]` 逐条目自动识别（顺序即播放序）；
-/// `fps` 同播放三态；`preload` 是逐条目封顶（每条截到 `preload`，0 = 不封顶，
-/// 8MB/帧 bound）；`popup_freeze` 保留；旧 `format`/`frames` 键已删
-/// （老文件残留直接忽略，未知键 serde 默认忽略）。
+/// `[wallpaper]` 动态壁纸开关表（P2 破坏式更新后只留四键：
+/// `enable` 总开关 + `fps` + `preload` + `popup_freeze`；
+/// `loop`/`items`（含 `format`/`frames` 旧键）已删，残留按 serde 默认忽略，
+/// 无迁移/别名；循环语义只留 `[playlist] loop` 一处，画廊唯一入口收敛到
+/// `[playlist]`（壁纸侧 `wallpaper_loop/len/path` 即 `[playlist]` 别名）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub(crate) struct WallpaperListConfig {
     pub(crate) enable: bool,
-    #[serde(rename = "loop", default = "default_loop_mode")]
-    pub(crate) loop_mode: LoopMode,
+    /// 背景循环帧率三态（与 `[play] fps` 同构：`"auto"` 最左 / `"max"` 最右 /
+    /// 中间 `1`-`240` 显式封顶；默认 `"15"`）。
     #[serde(default = "default_wallpaper_fps")]
     pub(crate) fps: String,
+    /// 预载帧数上限（内存兜底；单帧 1920x1080x4 ≈ 8MB）。
+    /// 0 = 不封顶（和播片一样拉满：有多少读多少，长动画注意内存）。
     #[serde(default = "default_wallpaper_preload")]
     pub(crate) preload: u32,
+    /// 选项弹窗时冻结壁纸（默认 true；false 则行区继续播）。
     #[serde(default = "default_true")]
     pub(crate) popup_freeze: bool,
-    #[serde(default)]
-    pub(crate) items: Vec<PlaylistItem>,
 }
 
 pub(crate) fn default_true() -> bool {
@@ -718,11 +730,9 @@ impl Default for WallpaperListConfig {
     fn default() -> Self {
         Self {
             enable: false,
-            loop_mode: LoopMode::LoopList,
             fps: default_wallpaper_fps(),
             preload: default_wallpaper_preload(),
             popup_freeze: true,
-            items: Vec::new(),
         }
     }
 }
@@ -733,6 +743,7 @@ impl Default for PlayConfig {
             fps: default_fps(),
             measured_max_fps: 0,
             feed: FeedMode::Clip,
+            media_dir: default_media_dir(),
         }
     }
 }
@@ -851,36 +862,23 @@ mod schema_tests {
 
     #[test]
     pub(crate) fn wallpaper_roundtrip() {
+        // P2：画廊列表已收敛到 `[playlist]`，`[wallpaper]` 只剩四键
+        //（`enable`/`fps`/`preload`/`popup_freeze`），不再写 `loop`/`items`。
         let mut cfg = FileConfig::default();
         cfg.wallpaper.enable = true;
         cfg.wallpaper.fps = String::from("20");
-        cfg.wallpaper.loop_mode = LoopMode::Once;
         cfg.wallpaper.preload = 4;
         cfg.wallpaper.popup_freeze = false;
-        cfg.wallpaper.items = vec![
-            PlaylistItem {
-                path: String::from("wallpaper/wall.mp4"),
-            },
-            PlaylistItem {
-                path: String::from("wallpaper/wall.qois"),
-            },
-        ];
         let text = toml::to_string(&cfg).unwrap();
         assert!(
-            text.contains("loop = \"once\""),
-            "loop key missing in {text}"
-        );
-        assert!(
-            text.contains("[[wallpaper.items]]"),
-            "items missing in {text}"
+            !text.contains("[[wallpaper.items]]"),
+            "wallpaper items must be gone in {text}"
         );
         let back: FileConfig = toml::from_str(&text).unwrap();
         assert!(back.wallpaper.enable);
         assert_eq!(back.wallpaper.fps, "20");
-        assert_eq!(back.wallpaper.loop_mode, LoopMode::Once);
         assert_eq!(back.wallpaper.preload, 4);
         assert!(!back.wallpaper.popup_freeze);
-        assert_eq!(back.wallpaper.items.len(), 2);
         assert_eq!(back, cfg);
     }
 
@@ -917,13 +915,41 @@ mod schema_tests {
         let legacy: FileConfig = toml::from_str("version = 1\n").unwrap();
         assert!(legacy.playlist.items.is_empty());
         assert_eq!(legacy.playlist.loop_mode, LoopMode::LoopList);
-        // 旧 `[play] format` / `[wallpaper] format,frames` 残留直接忽略，不断解析。
+        // 旧 `[play] format` / `[wallpaper] format,frames,loop,items` 残留直接忽略，不断解析。
         let old: FileConfig = toml::from_str(
-            "version = 1\n[play]\nfps = \"max\"\nformat = \"raw\"\n[wallpaper]\nformat = \"qois\"\nframes = 30\n",
+            "version = 1\n[play]\nfps = \"max\"\nformat = \"raw\"\n[wallpaper]\nformat = \"qois\"\nframes = 30\nloop = \"once\"\n[[wallpaper.items]]\npath = \"wallpaper/wall.mp4\"\n",
         )
         .unwrap();
         assert_eq!(old.play.fps, "max");
         assert!(old.playlist.items.is_empty());
-        assert!(old.wallpaper.items.is_empty());
+        // `[wallpaper]` 只剩四键：残留 `loop`/`items` 不进解析，全回默认。
+        assert!(!old.wallpaper.enable);
+        assert_eq!(old.wallpaper.fps, default_wallpaper_fps());
+        assert_eq!(old.wallpaper.preload, default_wallpaper_preload());
+        assert!(old.wallpaper.popup_freeze);
+    }
+
+    #[test]
+    pub(crate) fn play_media_dir_roundtrip() {
+        // 缺键老文件：按 `""`（根目录）照读。
+        let legacy: FileConfig = toml::from_str("version = 1\n[play]\nfps = \"max\"\n").unwrap();
+        assert_eq!(legacy.play.media_dir, default_media_dir());
+        assert_eq!(legacy.play.media_dir, "");
+        // 显式值照读照写；落盘原样（超长也不在 serde 层截断，钳制见 `rules`）。
+        let mut cfg = FileConfig::default();
+        cfg.play.media_dir = String::from("1080p");
+        let back: FileConfig = toml::from_str(&toml::to_string(&cfg).unwrap()).unwrap();
+        assert_eq!(back.play.media_dir, "1080p");
+        assert_eq!(back, cfg);
+        let long: String = std::iter::repeat_n('a', 70).collect();
+        let mut cfg = FileConfig::default();
+        cfg.play.media_dir = long.clone();
+        let text = toml::to_string(&cfg).unwrap();
+        assert!(
+            text.contains(&format!("media_dir = \"{long}\"")),
+            "write as-is in {text}"
+        );
+        let back: FileConfig = toml::from_str(&text).unwrap();
+        assert_eq!(back.play.media_dir, long);
     }
 }

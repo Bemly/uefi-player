@@ -203,10 +203,10 @@ fn play_transition(screen: &mut Screen, wp: &Option<Clip>, tps: u64) {
     screen.draw_str(&format!("wallpaper: transition {} frames...", n));
     for i in 0..n {
         let fstart = tsc();
-        if screen
-            .upload_frame(wallpaper::WP_W, wallpaper::WP_H, set.frame(i))
-            .is_err()
-        {
+        // 源几何取 clip 真实 `w/h`（与 idle 待机路同 pattern），`display.fit` 生效；
+        // 写死 `WP_W/WP_H` 会把非 1080p 画廊帧按 1080p 送显（错窗/撕裂）。
+        let (cw, ch) = (set.w, set.h);
+        if screen.upload_frame(cw, ch, set.frame(i)).is_err() {
             break;
         }
         while tsc().saturating_sub(fstart) < budget {

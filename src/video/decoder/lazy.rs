@@ -787,6 +787,12 @@ pub(crate) fn decode_qois_chunk(
         return false;
     }
     out.clear();
+    // 落子缓冲 fallible 生长（`mp_slots` 多 AP 首帧并发 8MB 级 `AllocatePool`，
+    // 实测有一方争抢失败；panic 会带崩整机，改记坏块由调用方 drop 跳过，
+    // 循环重播下轮重试即自愈；稳态复用零分配，同 `mp_slots` 内 `try_reserve` 口径）。
+    if out.capacity() < n && out.try_reserve_exact(n - out.len()).is_err() {
+        return false;
+    }
     out.resize(n, BltPixel::new(0, 0, 0));
     let bytes = unsafe {
         core::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut u8, n.saturating_mul(4))
@@ -807,7 +813,7 @@ pub(crate) fn decode_raw_frame(
     frame_bytes: usize,
     out: &mut Vec<BltPixel>,
 ) -> bool {
-    let path = alloc::format!("{}\\{}", dir, name);
+    let path = super::raw_file_path(dir, name);
     let cstr = match uefi::CString16::try_from(path.as_str()) {
         Ok(c) => c,
         Err(_) => return false,
@@ -831,8 +837,8 @@ pub(crate) fn list_raw_names(
     want: usize,
     tag: &str,
 ) -> crate::error::Result<Vec<String>> {
-    let cdir =
-        uefi::CString16::try_from(dir).map_err(|_| crate::error::NyaStatus::FromStrWithBufError)?;
+    let cdir = uefi::CString16::try_from(super::raw_list_dir(dir))
+        .map_err(|_| crate::error::NyaStatus::FromStrWithBufError)?;
     let entries = match fs.list_dir(&cdir) {
         Ok(e) => e,
         Err(crate::error::NyaStatus::Uefi(err)) if err.status() == uefi::Status::NOT_FOUND => {

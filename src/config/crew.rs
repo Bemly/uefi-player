@@ -25,35 +25,30 @@
 //! `combined` 恒行路；`split` 仅 `slots_eligible`（qois/raw + 零拷系供片 +
 //! 选中核数 > 1）时槽路，否则 warn + 回落行路；`auto` = 准入即分（现状行为）。
 
-use core::sync::atomic::{AtomicU8, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicU32, Ordering};
 
 use crate::error::NyaStatus;
 use crate::fs::Fs;
 
-use super::{Config, FeedMode, MediaFormat, RolesMode, ScheduleConfig, WorkersMode};
+use super::{Config, FeedMode, MediaFormat, RolesMode, WorkersMode};
 
-/// 用核预算（0 = 不限；N > 0 = 至多 N 核。load 期已钳 0..=64）。
-static CORES: AtomicU32 = AtomicU32::new(0);
-/// 角色分工（`RolesMode` 判别值）。
-static ROLES: AtomicU8 = AtomicU8::new(0);
 /// 核数记忆（0 = 未测；首启 auto sweep 后回写）。
 static MEASURED_N: AtomicU32 = AtomicU32::new(0);
 
-/// 开机 `load()` 唯一调用：预算钳 64，角色/记忆照存。
-pub(crate) fn store_all(c: &ScheduleConfig) {
-    CORES.store(c.cores.min(64), Ordering::Relaxed);
-    ROLES.store(c.roles.as_u8(), Ordering::Relaxed);
-    MEASURED_N.store(c.measured_workers_n.min(64), Ordering::Relaxed);
+/// 开机 `load()` 唯一调用：P2 起 cores/roles 进 `runtime`（见 `runtime::apply_cfg`），
+/// 此处只存核数记忆（钳 64）。
+pub(crate) fn store_measured(measured_workers_n: u32) {
+    MEASURED_N.store(measured_workers_n.min(64), Ordering::Relaxed);
 }
 
-/// 用核预算（0 = auto 不限；N > 0 = 至多 N 核，已钳 64）。
+/// 用核预算（0 = auto 不限；N > 0 = 至多 N 核，已钳 64；P2 起读 runtime）。
 pub fn schedule_cores() -> u32 {
-    CORES.load(Ordering::Relaxed).min(64)
+    super::runtime().schedule_cores.min(64)
 }
 
-/// 角色分工（默认 `auto`）。
+/// 角色分工（默认 `auto`；P2 起读 runtime）。
 pub fn schedule_roles() -> RolesMode {
-    RolesMode::from_u8(ROLES.load(Ordering::Relaxed))
+    super::runtime().schedule_roles
 }
 
 /// 核数记忆（0 = 未测）。

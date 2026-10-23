@@ -43,8 +43,8 @@ use uefi_async::tick;
 
 use crate::config::{self, CopyWidth};
 use crate::error::{NyaStatus, Result};
+use crate::font::latin::FONT_8X16;
 use crate::graphics::{Screen, copy_block};
-use crate::video::ascii_font::FONT_8X16;
 use crate::video::decoder::Clip;
 use crate::video::sync::{SlotRing, SlotState};
 use crate::video::{pace_or_drop, rdtsc};

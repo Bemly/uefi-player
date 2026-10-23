@@ -121,6 +121,21 @@ pub(crate) fn log_decode_plane(fmt: MediaFormat, tag: &str) {
     );
 }
 
+/// raw 目录列举形（media 裸名/根帧落点）：`""`（媒体根）列目录用 `\`（根枚举形）。
+pub(crate) fn raw_list_dir(dir: &str) -> &str {
+    if dir.is_empty() { "\\" } else { dir }
+}
+
+/// raw 文件拼接形（同上落点）：根拼 `\name` 根绝对形，避免 `\\name` 双分隔；
+/// 普通子目录沿旧 `{dir}\{name}` 相对形。
+pub(crate) fn raw_file_path(dir: &str, name: &str) -> alloc::string::String {
+    if dir.is_empty() || dir == "\\" {
+        alloc::format!("\\{}", name)
+    } else {
+        alloc::format!("{}\\{}", dir, name)
+    }
+}
+
 //////// 统一播放剪辑：预解码帧集（`Vec<Vec<BltPixel>>` + 游标），`[play] feed` 五档供片。
 //////// 对外 API 冻结（`video.rs`/`menu.rs`/`wallpaper.rs`/`exec.rs` 零改）：
 //////// 字段 `w,h,frames,cursor` + 方法 `next_frame/rewind/len/frame` 签名不变；

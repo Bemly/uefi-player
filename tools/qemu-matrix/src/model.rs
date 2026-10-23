@@ -53,42 +53,42 @@ pub(crate) struct Case {
     // 配 `[decode.raw] width=1280 height=720` 用；目录独立，几何不混）。
     #[serde(default)]
     pub(crate) needs_rawvideo720: u32,
-    /// 播片 raws 片源：`1080p/video.raws` 黑场 N 帧单文件（`[play] format = "raw"` 的单文件路用）。
+    /// 播片 raws 片源：`video.raws` 黑场 N 帧单文件（`[play] format = "raw"` 的单文件路用）。
     #[serde(default)]
     pub(crate) needs_raws: u32,
     /// 壁纸 qois 片源：把测试视频拷成 `wallpaper/wall.qois`
     ///（`[wallpaper] format = "qois"` 用，验开机预解码 + 循环）。
     #[serde(default)]
     pub(crate) needs_wallpaper_qois: bool,
-    /// 播片 hevc 片源：探针样片拷成 `1080p/video.hevc`
+    /// 播片 hevc 片源：探针样片拷成 `video.hevc`
     ///（`[play] format = "hevc"` 用，Annex-B 软解进 Clip）。
     #[serde(default)]
     pub(crate) needs_hevcvideo: bool,
-    /// 播片 vp9 片源：探针样片拷成 `1080p/video.ivf`
+    /// 播片 vp9 片源：探针样片拷成 `video.ivf`
     ///（`[play] format = "vp9"` 用，IVF 软解进 Clip）。
     #[serde(default)]
     pub(crate) needs_vp9video: bool,
-    /// 播片 avc 片源：MP4 样片拷成 `1080p/video.mp4`
+    /// 播片 avc 片源：MP4 样片拷成 `video.mp4`
     ///（`[play] format = "avc"` 用，石雨堂拆 avc 轨进 Clip）。
     #[serde(default)]
     pub(crate) needs_avcvideo: bool,
-    /// 播片 hevc-MP4 片源：MP4 样片拷成 `1080p/video.mp4`
+    /// 播片 hevc-MP4 片源：MP4 样片拷成 `video.mp4`
     ///（`[play] format = "hevc"` 的容器路，用石雨堂拆 hev 轨进 Clip）。
     #[serde(default)]
     pub(crate) needs_hevcmp4video: bool,
-    /// 播片 vp9-MP4 片源：MP4 样片拷成 `1080p/video.mp4`
+    /// 播片 vp9-MP4 片源：MP4 样片拷成 `video.mp4`
     ///（`[play] format = "vp9"` 的容器路，用石雨堂拆 vp09 轨进 Clip）。
     #[serde(default)]
     pub(crate) needs_vp9mp4video: bool,
-    /// 播片 h263 片源：裸流样片拷成 `1080p/video.h263`
+    /// 播片 h263 片源：裸流样片拷成 `video.h263`
     ///（`[play] format = "h263"` 用，直解进 Clip）。
     #[serde(default)]
     pub(crate) needs_h263video: bool,
-    /// 播片 mpeg2v 片源：裸基本流样片拷成 `1080p/video.m2v`
+    /// 播片 mpeg2v 片源：裸基本流样片拷成 `video.m2v`
     ///（`[play] format = "mpeg2v"` 用，接入单元切分进 Clip）。
     #[serde(default)]
     pub(crate) needs_mpeg2vvideo: bool,
-    /// 播片 theora 片源：Ogg 样片拷成 `1080p/video.ogv`
+    /// 播片 theora 片源：Ogg 样片拷成 `video.ogv`
     ///（`[play] format = "theora"` 用，手写拆包进 Clip）。
     #[serde(default)]
     pub(crate) needs_theoravideo: bool,

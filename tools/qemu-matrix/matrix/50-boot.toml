@@ -158,9 +158,9 @@ dist = "static"
 """
 boot_expect = ["cfg: version=1", "idle: ready"]
 keys = [
-  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
-  { send = "p", wait_after = 3 },
-  { send = "8", wait_for = ["menu: ready"], wait_after = 10 },
+  { send = "p", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
+  { send = "7", wait_for = ["ptui: page=home"], wait_after = 2 },
+  { send = "8", wait_for = ["menu: ready (press key)"], wait_after = 10 },
 ]
 expect = ["-- bench done --"]
 artifact = { glob = "HWBENCH*.TXT", contains = ["ticks"] }

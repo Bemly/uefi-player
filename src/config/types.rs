@@ -663,15 +663,19 @@ impl LoopMode {
     }
 }
 
-/// 播放列表条目（`[[playlist.items]]` / `[[wallpaper.items]]` 单键：片源路径，
+/// 播放列表条目（`[[playlist.items]]` 单键：片源路径，
 /// 斜杠分隔，固件侧统一转反斜杠打开；格式按路径自动检测，见 `play::detect_clip_format`）。
+/// P2 破坏式更新：`[[wallpaper.items]]` 已删除，画廊唯一入口收敛到本表。
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct PlaylistItem {
     pub path: String,
 }
 
-/// `[playlist]`：播放列表（`loop` + 条目表；`loop` 是 Rust 关键字故字段名 `loop_mode` + rename）。
+/// `[playlist]`：壁纸画廊列表兼播放列表（`loop` + 条目表；
+/// `loop` 是 Rust 关键字故字段名 `loop_mode` + rename）。
+/// P2 起画廊唯一入口收敛到此（`[[wallpaper.items]]`/`[wallpaper] loop` 已删，
+/// 残留按 serde 默认忽略，无迁移/别名；壁纸侧 `wallpaper_*` 即本表别名）。
 /// 缺表缺键全默认（空列表，播片直接 Err，不断 boot）。
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
@@ -686,16 +690,16 @@ pub struct PlaylistConfig {
 /// 非字符串即整文件回默认 + 警告（无别名/回退，与 `accel.level` 旧 `"avx512"`、
 /// `vsync` 旧 `"on"` 同规则）。
 ///
-/// `[wallpaper]`：动态壁纸画廊（`enable` 总开关 + `loop` 循环 + 条目表；
-/// `format`/`frames` 旧键已删除，残留按 serde 默认忽略，无别名；
-/// 每项按路径自动检测，与播放列表同一 `detect_clip_format`，raw 走画廊目录扫描；
-/// `preload` 按项封顶，B 过渡长度由项数代替 `frames`）。
+/// `[wallpaper]`：动态壁纸开关表（P2 破坏式更新后只留四键：
+/// `enable` 总开关 + `fps` + `preload` + `popup_freeze`；
+/// `loop`/`items`（含 `format`/`frames` 旧键）已删除，残留按 serde 默认忽略，
+/// 无迁移/别名；循环语义只留 `[playlist] loop` 一处，画廊唯一入口收敛到
+/// `[playlist]`（壁纸侧 `wallpaper_loop/len/path` 即 `[playlist]` 别名）；
+/// B 过渡长度由画廊项数代替）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WallpaperListConfig {
     pub enable: bool,
-    #[serde(rename = "loop")]
-    pub loop_mode: LoopMode,
     /// 背景循环帧率三态（与 `[play] fps` 同构：`"auto"` 最左 / `"max"` 最右 /
     /// 中间 `1`-`240` 显式封顶；默认 `"15"`）。
     #[serde(default = "default_wallpaper_fps")]
@@ -707,19 +711,15 @@ pub struct WallpaperListConfig {
     /// 选项弹窗时冻结壁纸（默认 true；false 则行区继续播）。
     #[serde(default = "default_true")]
     pub popup_freeze: bool,
-    #[serde(default)]
-    pub items: Vec<PlaylistItem>,
 }
 
 impl Default for WallpaperListConfig {
     fn default() -> Self {
         Self {
             enable: false,
-            loop_mode: LoopMode::LoopList,
             fps: default_wallpaper_fps(),
             preload: default_wallpaper_preload(),
             popup_freeze: true,
-            items: Vec::new(),
         }
     }
 }
@@ -966,12 +966,12 @@ impl FeedMode {
     }
 }
 
-/// `[play]`：`fps` 是字符串（三态没法用纯数字表达），`measured_max_fps`
-/// 只由固件实测回写（0 = 未测），GUI 只读展示。`format` 旧键已删除
-/// （片源改走 `[playlist]`，每项按路径自动检测，残留按 serde 默认忽略，无别名；
-/// 旧 `[play] pipeline` 同理未知忽略，不再照读）。
-/// `feed` 切供片（默认 `clip`，老文件缺键照读；每项有效档 = `decode.<fmt>.fetch`
-/// 覆盖 else 全局，见 `decode::effective_feed`）。
+fn default_media_dir() -> String {
+    String::new()
+}
+
+/// `[play]`：`fps`三态，`measured_max_fps`回写（0=未测）；`format`/`pipeline`旧键已删。
+/// `feed`切供片（默认clip）。`media_dir`（P2新增，`""`=根，单层非递归，不存在由扫描侧报错）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PlayConfig {
@@ -982,6 +982,9 @@ pub struct PlayConfig {
     /// 供片模式（默认 clip，老文件缺键照读；只切 `Clip` 内部拿帧方式）。
     #[serde(default)]
     pub feed: FeedMode,
+    /// 片源目录（`""` = 根目录；单层非递归；不存在由扫描侧报错）。
+    #[serde(default = "default_media_dir")]
+    pub media_dir: String,
 }
 
 impl Default for PlayConfig {
@@ -990,6 +993,7 @@ impl Default for PlayConfig {
             fps: default_fps(),
             measured_max_fps: 0,
             feed: FeedMode::Clip,
+            media_dir: default_media_dir(),
         }
     }
 }

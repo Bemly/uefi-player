@@ -1,0 +1,168 @@
+# 70-ptui.toml：QEMU 黑盒矩阵分组（`matrix/` 目录，TUI 前端用例）。
+# 共 4 cases，单文件 ≤1000 行（AGENTS 口径）。新增 case 按前缀落对应文件，并写 `covers`。
+#
+# TUI 串口契约（以外壳已落地实现为准，见 `src/ptui/mod.rs` + `src/idle.rs`）：
+# - 待机按 p：`idle: ptui mode`（warn）→ `ptui: open`（warn）→ `ptui: page=home`；
+#   弹窗按 p 对称（先 `popup: player mode`，见 `src/idle.rs`，本文件用待机直达）。
+# - 首页（九宫，`pages/home.rs`：`1` 播放 / `2` 加速 / `3` 渲染 / `4` 调度 /
+#   `5` 解码 / `6` 显示 / `7` 测试 / `8` 壁纸 / `q` 回待机：`ptui: back to idle`）；
+#   进测试页记 `ptui: page=tests`，测试页就绪行保留 `menu: ready (press key)`，
+#   q 回首页记 `menu: back to ptui`（旧 `menu: back to idle` 已改）再补
+#   `ptui: page=home`；`menu: back from {key}` 保留不变。
+# - 播放页（`pages/play.rs`，读 `media::scan` 根目录）：进页 `ptui: page=play` +
+#   扫描行 `ptui: media dir='<root>' count=N`，数字键直播首项记
+#   `ptui: play <i> path=<p>`，管线行沿既有 `play: path=` 口径。
+#   `[playlist]` 表项同步保留（片源位置新旧实现通用）。
+# - 调档行 `ptui: set <key>=<value>`（`state::set` 双写）：加速页 `n` 下一档记
+#   `ptui: set accel.level=<str>`；壁纸页 `f` 轮换 + `s` 落盘记
+#   `ptui: wallpaper saved ([wallpaper] only)`（只写 `[wallpaper]` 表）。
+# forbid 沿全局红线（panicked/CpuDeadLoop/空解码等），不另加。
+
+# TUI 冒烟（P6 原文口径）：待机按 p（`idle: ptui mode`）进首页
+#（`ptui: open` + `ptui: page=home`）→ `2` 进加速页（`ptui: page=accel`）
+# → `n` 拨一档（`ptui: set accel.level=`，不断具体值；`n` 走字母键，
+# 无 QEMU monitor 符号键名风险）→ q 回首页 → `7` 进测试页
+#（`ptui: page=tests` + `menu: ready (press key)`）→ q 回首页
+#（`menu: back to ptui` + `ptui: page=home`）→ q 回待机（`ptui: back to idle`）。
+[[case]]
+name = "ptui-smoke"
+covers = ["src/ptui/", "src/menu.rs", "src/idle.rs"]
+timeout_sec = 180
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+vsync = "off"
+[play]
+fps = "max"
+[wallpaper]
+enable = false
+[schedule]
+backend = "manual"
+workers = "bsp_only"
+dist = "static"
+"""
+boot_expect = ["cfg: version=1", "idle: ready"]
+keys = [
+  { send = "p", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
+  { send = "2", wait_for = ["ptui: page=home"], wait_after = 2 },
+  { send = "n", wait_for = ["ptui: page=accel"], wait_after = 2 },
+  { send = "q", wait_for = ["ptui: set accel.level="], wait_after = 2 },
+  { send = "7", wait_for = ["ptui: page=home"], wait_after = 2 },
+  { send = "q", wait_for = ["menu: ready (press key)"], wait_after = 2 },
+  { send = "q", wait_for = ["menu: back to ptui"], wait_after = 2 },
+]
+expect = ["idle: ptui mode", "ptui: open", "ptui: page=home", "ptui: page=accel", "ptui: set accel.level=", "ptui: page=tests", "menu: ready (press key)", "menu: back to ptui", "ptui: back to idle"]
+
+# TUI 播放（P6 改写：替代已删除的 playlist-list-loop/loop-single/once）：
+# 根目录片源（needs_video → 镜像根 `video.qois`，供片 convention 见 20-video 头注释；
+# `[playlist]` 同步放一项：新旧实现双兼容（外壳旧骨架读表、新页扫根），
+# 未来若删表可去项；片源位置两种实现通用）。
+# 首页 `1` 进播放页（`ptui: page=play` + 扫描行 `ptui: media dir='<root>' count=1`）
+# → 数字 `1` 直播首项（`ptui: play 0 path=video.qois` +
+# `play: path=video.qois fmt=Qois` 管线行）+ soak 保活。
+[[case]]
+name = "ptui-play-scan"
+covers = ["src/ptui/", "src/video/play.rs", "usb_reports/1080p/video.qois"]
+timeout_sec = 240
+needs_video = true
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+vsync = "off"
+[play]
+fps = "max"
+[playlist]
+loop = "loop_list"
+[[playlist.items]]
+path = "video.qois"
+[wallpaper]
+enable = false
+[schedule]
+backend = "manual"
+workers = "bsp_only"
+dist = "static"
+"""
+boot_expect = ["cfg: version=1", "idle: ready"]
+keys = [
+  { send = "p", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
+  { send = "1", wait_for = ["ptui: page=home"], wait_after = 2 },
+  { send = "1", wait_for = ["ptui: media dir='<root>' count=1"], wait_after = 5 },
+]
+expect = ["ptui: open", "ptui: page=home", "ptui: page=play", "ptui: media dir='<root>' count=1", "ptui: play 0 path=video.qois", "play: path=video.qois fmt=Qois", "play: path="]
+soak_sec = 15
+
+# TUI 壁纸落盘（九宫 `8` 已接线）：
+# 首页 `8` 进壁纸页（`ptui: page=wallpaper`）→ `f` 轮换 fps
+#（FPS_SEQ auto/max/15/30/60/120，初值 15 → `ptui: set wallpaper.fps=30`）
+# → `s` 落盘（`ptui: wallpaper saved ([wallpaper] only)`，只写 `[wallpaper]` 表）
+# → artifact 回读镜像根 `player.toml` 断言 `fps = "30"`（`volume` 用法参考
+# boot-counting；`[play] fps` 取 `auto` 使该子串只可能来自壁纸落盘）。
+[[case]]
+name = "ptui-wallpaper-save"
+covers = ["src/ptui/", "src/wallpaper.rs"]
+timeout_sec = 240
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+vsync = "off"
+[play]
+fps = "auto"
+[wallpaper]
+enable = true
+loop = "loop_list"
+fps = "15"
+preload = 8
+popup_freeze = true
+[schedule]
+backend = "manual"
+workers = "bsp_only"
+dist = "static"
+"""
+boot_expect = ["cfg: version=1", "idle: ready"]
+keys = [
+  { send = "p", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
+  { send = "8", wait_for = ["ptui: page=home"], wait_after = 1 },
+  { send = "f", wait_for = ["ptui: page=wallpaper"], wait_after = 2 },
+  { send = "s", wait_for = ["ptui: set wallpaper.fps=30"], wait_after = 3 },
+  { send = "q", wait_for = ["ptui: wallpaper saved ([wallpaper] only)"], wait_after = 2 },
+  { send = "q", wait_for = ["ptui: page=home"], wait_after = 2 },
+]
+expect = ["ptui: open", "ptui: page=home", "ptui: page=wallpaper", "ptui: set wallpaper.fps=30", "ptui: wallpaper saved ([wallpaper] only)", "ptui: back to idle"]
+artifact = { glob = "player.toml", contains = ["fps = \"30\""], volume = 1 }
+
+# 字体冒烟：进 TUI 首页即走字形路（中文页标题经 `draw_str` → `src/video/ascii_font.rs`），
+# 不断言画面，只看无 panic（全局 forbid 红线）+ `ptui: open`。
+[[case]]
+name = "font-smoke"
+covers = ["src/video/ascii_font.rs", "src/ptui/"]
+timeout_sec = 180
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+vsync = "off"
+[play]
+fps = "max"
+[wallpaper]
+enable = false
+[schedule]
+backend = "manual"
+workers = "bsp_only"
+dist = "static"
+"""
+boot_expect = ["cfg: version=1", "idle: ready"]
+keys = [
+  { send = "p", wait_for = ["idle: ready (press any key)"], wait_after = 3 },
+]
+expect = ["idle: ptui mode", "ptui: open", "ptui: page=home"]

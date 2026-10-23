@@ -17,9 +17,18 @@
 # zero_copy/streaming 布尔 + buffers 0=跟随 tune.window/1-32 显式 +
 # fetch 缺省继承全局 feed）。
 # 播放列表化后：`[play] format` 旧键已删除，每例以单项 `[[playlist.items]]`
-# 选片（路径自动检测定格式，`play.fmt=` 开机断言随之删除）；断言改为
-# 列表行（`playlist: item 1/1 path=`）+ 解析行（`decode: fmt=`）+ 回退/兑现行 +
-# 生效行（`video: fmt=`/`video: feed=`）+ path 行 + soak 保活，不断言画质。
+# 选片（路径自动检测定格式，`play.fmt=` 开机断言随之删除；供片 convention 见
+# 20-video.toml 头注释：播片放镜像根目录 `video.*`，raw 目录扫描与 `720p/` 例外保留）。
+# 起播键流（TUI 外壳口径）：p → 首页 `1` 进播放页 → 数字 `1` 播首项；
+# TUI `play_path` 只打印 `play: path=<path> fmt=...` + 管线行（`playlist: item` /
+# `video: fmt=` / `video: feed=` / `fetchovr=` / 整表 `decode: fmt=` 行不再出现，
+# 已从断言移除），解码档位行（`decode: <Fmt> threads all deferred` /
+# `honored (frame-parallel safe)`，eager 构造期打印）与 `sched: crew=` /
+# `display:` / `play:` 管线行保留；raw 目录例另配 `[play] media_dir` 指扫描子目录。
+# 断言改为：`ptui: play 0 path=` + 回退/兑现行 + 管线 path 行 + soak 保活，不断言画质。
+# 曾跳过（`scan_split` 硬编码 `1080p` 已修 + `decode_qois_chunk`
+# 落子缓冲并发分配改 fallible）：本轮即跑，断言按 TUI 口径
+#（`ptui: play 0 path=` + 管线 path 行）。
 # threads=all：qois/raw 无状态即时兑现（`honored (frame-parallel safe)`）；有状态六软解
 # （单核顺序状态机）解析但警告并驻 bsp_only。fetch 显式覆盖本格式生效供片
 # （`video: feed=` 取覆盖值 + ` fetchovr=<fmt>` 令牌），缺省继承 `[play] feed`；壁纸恒 eager 无视覆盖。
@@ -41,7 +50,7 @@ feed = "clip"
 [playlist]
 loop = "loop_list"
 [[playlist.items]]
-path = "1080p/video.hevc"
+path = "video.hevc"
 [wallpaper]
 enable = false
 [schedule]
@@ -56,11 +65,11 @@ buffers = 8
 """
 boot_expect = ["cfg: version=1", "play.feed=Clip", "idle: ready"]
 keys = [
-  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
-  { send = "p", wait_after = 3 },
-  { send = "0", wait_for = ["menu: ready"], wait_after = 5 },
+  { send = "p", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
+  { send = "1", wait_for = ["ptui: page=home"], wait_after = 2 },
+  { send = "1", wait_for = ["ptui: page=play"], wait_after = 5 },
 ]
-expect = ["playlist: item 1/1 path=1080p/video.hevc", "video: fmt=Hevc", "decode: fmt=Hevc", "decode: Hevc threads all deferred", "play: path=direct_loop"]
+expect = ["ptui: play 0 path=video.hevc", "decode: Hevc threads all deferred", "play: path=direct_loop"]
 soak_sec = 10
 
 [[case]]
@@ -81,7 +90,7 @@ feed = "clip"
 [playlist]
 loop = "loop_list"
 [[playlist.items]]
-path = "1080p/video.mp4"
+path = "video.mp4"
 [wallpaper]
 enable = false
 [schedule]
@@ -96,11 +105,11 @@ buffers = 8
 """
 boot_expect = ["cfg: version=1", "play.feed=Clip", "idle: ready"]
 keys = [
-  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
-  { send = "p", wait_after = 3 },
-  { send = "0", wait_for = ["menu: ready"], wait_after = 5 },
+  { send = "p", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
+  { send = "1", wait_for = ["ptui: page=home"], wait_after = 2 },
+  { send = "1", wait_for = ["ptui: page=play"], wait_after = 5 },
 ]
-expect = ["playlist: item 1/1 path=1080p/video.mp4", "video: fmt=Avc", "decode: fmt=Avc", "decode: Avc threads all deferred", "play: path=direct_loop"]
+expect = ["ptui: play 0 path=video.mp4", "decode: Avc threads all deferred", "play: path=direct_loop"]
 soak_sec = 10
 
 [[case]]
@@ -121,7 +130,7 @@ feed = "clip"
 [playlist]
 loop = "loop_list"
 [[playlist.items]]
-path = "1080p/video.ivf"
+path = "video.ivf"
 [wallpaper]
 enable = false
 [schedule]
@@ -136,11 +145,11 @@ buffers = 8
 """
 boot_expect = ["cfg: version=1", "play.feed=Clip", "idle: ready"]
 keys = [
-  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
-  { send = "p", wait_after = 3 },
-  { send = "0", wait_for = ["menu: ready"], wait_after = 5 },
+  { send = "p", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
+  { send = "1", wait_for = ["ptui: page=home"], wait_after = 2 },
+  { send = "1", wait_for = ["ptui: page=play"], wait_after = 5 },
 ]
-expect = ["playlist: item 1/1 path=1080p/video.ivf", "video: fmt=Vp9", "decode: fmt=Vp9", "decode: Vp9 threads all deferred", "play: path=direct_loop"]
+expect = ["ptui: play 0 path=video.ivf", "decode: Vp9 threads all deferred", "play: path=direct_loop"]
 soak_sec = 10
 
 [[case]]
@@ -161,7 +170,7 @@ feed = "clip"
 [playlist]
 loop = "loop_list"
 [[playlist.items]]
-path = "1080p/video.h263"
+path = "video.h263"
 [wallpaper]
 enable = false
 [schedule]
@@ -176,11 +185,11 @@ buffers = 8
 """
 boot_expect = ["cfg: version=1", "play.feed=Clip", "idle: ready"]
 keys = [
-  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
-  { send = "p", wait_after = 3 },
-  { send = "0", wait_for = ["menu: ready"], wait_after = 5 },
+  { send = "p", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
+  { send = "1", wait_for = ["ptui: page=home"], wait_after = 2 },
+  { send = "1", wait_for = ["ptui: page=play"], wait_after = 5 },
 ]
-expect = ["playlist: item 1/1 path=1080p/video.h263", "video: fmt=H263", "decode: fmt=H263", "decode: H263 threads all deferred", "play: path=direct_loop"]
+expect = ["ptui: play 0 path=video.h263", "decode: H263 threads all deferred", "play: path=direct_loop"]
 soak_sec = 10
 
 [[case]]
@@ -201,7 +210,7 @@ feed = "clip"
 [playlist]
 loop = "loop_list"
 [[playlist.items]]
-path = "1080p/video.m2v"
+path = "video.m2v"
 [wallpaper]
 enable = false
 [schedule]
@@ -216,11 +225,11 @@ buffers = 8
 """
 boot_expect = ["cfg: version=1", "play.feed=Clip", "idle: ready"]
 keys = [
-  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
-  { send = "p", wait_after = 3 },
-  { send = "0", wait_for = ["menu: ready"], wait_after = 5 },
+  { send = "p", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
+  { send = "1", wait_for = ["ptui: page=home"], wait_after = 2 },
+  { send = "1", wait_for = ["ptui: page=play"], wait_after = 5 },
 ]
-expect = ["playlist: item 1/1 path=1080p/video.m2v", "video: fmt=Mpeg2v", "decode: fmt=Mpeg2v", "decode: Mpeg2v threads all deferred", "play: path=direct_loop"]
+expect = ["ptui: play 0 path=video.m2v", "decode: Mpeg2v threads all deferred", "play: path=direct_loop"]
 soak_sec = 10
 
 [[case]]
@@ -241,7 +250,7 @@ feed = "clip"
 [playlist]
 loop = "loop_list"
 [[playlist.items]]
-path = "1080p/video.ogv"
+path = "video.ogv"
 [wallpaper]
 enable = false
 [schedule]
@@ -256,11 +265,11 @@ buffers = 8
 """
 boot_expect = ["cfg: version=1", "play.feed=Clip", "idle: ready"]
 keys = [
-  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
-  { send = "p", wait_after = 3 },
-  { send = "0", wait_for = ["menu: ready"], wait_after = 5 },
+  { send = "p", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
+  { send = "1", wait_for = ["ptui: page=home"], wait_after = 2 },
+  { send = "1", wait_for = ["ptui: page=play"], wait_after = 5 },
 ]
-expect = ["playlist: item 1/1 path=1080p/video.ogv", "video: fmt=Theora", "decode: fmt=Theora", "decode: Theora threads all deferred", "play: path=direct_loop"]
+expect = ["ptui: play 0 path=video.ogv", "decode: Theora threads all deferred", "play: path=direct_loop"]
 soak_sec = 10
 
 # 解码 qois：无状态逐帧 threads=all 即时兑现（`honored (frame-parallel safe)` 行，不断言画质）。
@@ -282,7 +291,7 @@ feed = "clip"
 [playlist]
 loop = "loop_list"
 [[playlist.items]]
-path = "1080p/video.qois"
+path = "video.qois"
 [wallpaper]
 enable = false
 [schedule]
@@ -296,8 +305,8 @@ streaming = true
 buffers = 8
 """
 boot_expect = ["cfg: version=1", "play.feed=Clip", "idle: ready"]
-keys = [{ send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 }, { send = "p", wait_after = 3 }, { send = "0", wait_for = ["menu: ready"], wait_after = 5 }]
-expect = ["playlist: item 1/1 path=1080p/video.qois", "video: fmt=Qois", "decode: fmt=Qois", "honored (frame-parallel safe)", "play: path=direct_loop"]
+keys = [{ send = "p", wait_for = ["idle: ready (press any key)"], wait_after = 2 }, { send = "1", wait_for = ["ptui: page=home"], wait_after = 2 }, { send = "1", wait_for = ["ptui: page=play"], wait_after = 5 }]
+expect = ["ptui: play 0 path=video.qois", "honored (frame-parallel safe)", "play: path=direct_loop"]
 soak_sec = 10
 
 # 解码 raw：零解码直搬 threads=all 即时兑现（`honored` 行）；黑场 2 帧只走通路。
@@ -316,6 +325,7 @@ vsync = "off"
 [play]
 fps = "max"
 feed = "clip"
+media_dir = "1080p"
 [playlist]
 loop = "loop_list"
 [[playlist.items]]
@@ -333,11 +343,11 @@ streaming = true
 buffers = 8
 """
 boot_expect = ["cfg: version=1", "play.feed=Clip", "idle: ready"]
-keys = [{ send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 }, { send = "p", wait_after = 3 }, { send = "0", wait_for = ["menu: ready"], wait_after = 5 }]
-expect = ["playlist: item 1/1 path=1080p/frame0000.raw", "video: fmt=Raw", "decode: fmt=Raw", "honored (frame-parallel safe)", "play: path=direct_loop"]
+keys = [{ send = "p", wait_for = ["idle: ready (press any key)"], wait_after = 2 }, { send = "1", wait_for = ["ptui: page=home"], wait_after = 2 }, { send = "1", wait_for = ["ptui: page=play"], wait_after = 5 }]
+expect = ["ptui: play 0 path=1080p/frame0000.raw", "honored (frame-parallel safe)", "play: path=direct_loop"]
 soak_sec = 15
 
-# 解码 raws 单文件：BGRA 帧首尾相接无头整切（`1080p/video.raws` 只走通路不断言画质）。
+# 解码 raws 单文件：BGRA 帧首尾相接无头整切（根目录 `video.raws` 只走通路不断言画质）。
 [[case]]
 name = "video-decode-raws"
 covers = ["src/video/decoder", "src/video/play.rs"]
@@ -356,7 +366,7 @@ feed = "clip"
 [playlist]
 loop = "loop_list"
 [[playlist.items]]
-path = "1080p/video.raws"
+path = "video.raws"
 [wallpaper]
 enable = false
 [schedule]
@@ -365,8 +375,8 @@ workers = "bsp_only"
 dist = "static"
 """
 boot_expect = ["cfg: version=1", "play.feed=Clip", "idle: ready"]
-keys = [{ send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 }, { send = "p", wait_after = 3 }, { send = "0", wait_for = ["menu: ready"], wait_after = 5 }]
-expect = ["playlist: item 1/1 path=1080p/video.raws", "video: fmt=Raw", "decode: fmt=Raw", "play: path=direct_loop"]
+keys = [{ send = "p", wait_for = ["idle: ready (press any key)"], wait_after = 2 }, { send = "1", wait_for = ["ptui: page=home"], wait_after = 2 }, { send = "1", wait_for = ["ptui: page=play"], wait_after = 5 }]
+expect = ["ptui: play 0 path=video.raws", "play: path=direct_loop"]
 soak_sec = 15
 
 # RAW-GEOM：小分辨率 raw（`720p/` 独立目录 1280x720 黑场 2 帧 + `[decode.raw]
@@ -387,6 +397,7 @@ vsync = "off"
 [play]
 fps = "max"
 feed = "clip"
+media_dir = "720p"
 [playlist]
 loop = "loop_list"
 [[playlist.items]]
@@ -402,11 +413,13 @@ width = 1280
 height = 720
 """
 boot_expect = ["cfg: version=1", "play.feed=Clip", "idle: ready"]
-keys = [{ send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 }, { send = "p", wait_after = 3 }, { send = "0", wait_for = ["menu: ready"], wait_after = 5 }]
-expect = ["playlist: item 1/1 path=720p/frame0000.raw", "video: fmt=Raw frames=2 1280x720", "decode: fmt=Raw", "play: path=direct_loop"]
+keys = [{ send = "p", wait_for = ["idle: ready (press any key)"], wait_after = 2 }, { send = "1", wait_for = ["ptui: page=home"], wait_after = 2 }, { send = "1", wait_for = ["ptui: page=play"], wait_after = 5 }]
+expect = ["ptui: play 0 path=720p/frame0000.raw", "play: path=720p/frame0000.raw fmt=Raw frames=2 1280x720", "play: path=direct_loop"]
 soak_sec = 10
 
-# 取数覆盖（`[decode.hevc] fetch=stream` 盖全局 feed=clip）：生效 `video: feed=stream` + ` fetchovr=hevc` 令牌；壁纸无视覆盖。
+# 取数覆盖（`[decode.hevc] fetch=stream` 盖全局 feed=clip；TUI `play_path`
+# 不打印 `video: feed=`/`fetchovr=` 行（旧 `video_run` 专属），覆盖口径退为
+# 起播 + 保活，见回报；生效供片改由 slots 路验证，待固件硬编码修复后补）。
 [[case]]
 name = "video-decode-fetch-override"
 covers = ["src/video/decoder", "src/video.rs", "src/diag/data/hevc_probe_main.265"]
@@ -425,7 +438,7 @@ feed = "clip"
 [playlist]
 loop = "loop_list"
 [[playlist.items]]
-path = "1080p/video.hevc"
+path = "video.hevc"
 [wallpaper]
 enable = false
 [schedule]
@@ -436,12 +449,13 @@ dist = "static"
 fetch = "stream"
 """
 boot_expect = ["cfg: version=1", "play.feed=Clip", "idle: ready"]
-keys = [{ send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 }, { send = "p", wait_after = 3 }, { send = "0", wait_for = ["menu: ready"], wait_after = 5 }]
-expect = ["playlist: item 1/1 path=1080p/video.hevc", "video: fmt=Hevc", "video: feed=stream", "decode: fmt=Hevc", "fetchovr=hevc", "play: path=direct_loop"]
+keys = [{ send = "p", wait_for = ["idle: ready (press any key)"], wait_after = 2 }, { send = "1", wait_for = ["ptui: page=home"], wait_after = 2 }, { send = "1", wait_for = ["ptui: page=play"], wait_after = 5 }]
+expect = ["ptui: play 0 path=video.hevc", "play: path=direct_loop"]
 soak_sec = 10
 
 # 零拷×多核（qois/raw 帧并行 + workers=all + feed 档走 mp_slots 按核槽位真并行解码；
 # BSP scan-split 后按序收槽，独判掉帧）：断言新标记行 + scan 行 + path 行，不断言画质。
+# 本轮即跑（TUI 口径断言）。
 [[case]]
 name = "video-mp-slots-qois"
 covers = ["src/video/mp_slots.rs", "src/video/decoder", "src/video.rs", "usb_reports/1080p/video.qois"]
@@ -460,7 +474,7 @@ feed = "zero_copy"
 [playlist]
 loop = "loop_list"
 [[playlist.items]]
-path = "1080p/video.qois"
+path = "video.qois"
 [wallpaper]
 enable = false
 [schedule]
@@ -469,11 +483,12 @@ workers = "all"
 dist = "static"
 """
 boot_expect = ["cfg: version=1", "play.feed=ZeroCopy", "idle: ready"]
-keys = [{ send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 }, { send = "p", wait_after = 3 }, { send = "0", wait_for = ["menu: ready"], wait_after = 5 }]
-expect = ["playlist: item 1/1 path=1080p/video.qois", "play: path=mp_slots frame-parallel fmt=qois fetch=zero_copy", "mp: slots scan qois chunks=", "video: fmt=Qois"]
+keys = [{ send = "p", wait_for = ["idle: ready (press any key)"], wait_after = 2 }, { send = "1", wait_for = ["ptui: page=home"], wait_after = 2 }, { send = "1", wait_for = ["ptui: page=play"], wait_after = 5 }]
+expect = ["ptui: play 0 path=video.qois", "play: path=video.qois fmt=Qois", "play: path=mp_slots frame-parallel fmt=qois fetch=zero_copy", "mp: slots scan qois chunks="]
 soak_sec = 10
 
 # 同上，raw 黑场 2 帧 + feed=stream（换一档供片，覆盖另一触发组合）。
+# 本轮即跑（TUI 口径断言；`media_dir` 指扫描子目录，同 `video-decode-raw`）。
 [[case]]
 name = "video-mp-slots-raw"
 covers = ["src/video/mp_slots.rs", "src/video/decoder", "src/video.rs"]
@@ -489,6 +504,7 @@ vsync = "off"
 [play]
 fps = "max"
 feed = "stream"
+media_dir = "1080p"
 [playlist]
 loop = "loop_list"
 [[playlist.items]]
@@ -501,8 +517,8 @@ workers = "all"
 dist = "static"
 """
 boot_expect = ["cfg: version=1", "play.feed=Stream", "idle: ready"]
-keys = [{ send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 }, { send = "p", wait_after = 3 }, { send = "0", wait_for = ["menu: ready"], wait_after = 5 }]
-expect = ["playlist: item 1/1 path=1080p/frame0000.raw", "play: path=mp_slots frame-parallel fmt=raw fetch=stream", "mp: slots scan raw frames=2 1920x1080", "video: fmt=Raw"]
+keys = [{ send = "p", wait_for = ["idle: ready (press any key)"], wait_after = 2 }, { send = "1", wait_for = ["ptui: page=home"], wait_after = 2 }, { send = "1", wait_for = ["ptui: page=play"], wait_after = 5 }]
+expect = ["ptui: play 0 path=1080p/frame0000.raw", "fmt=Raw frames=", "play: path=mp_slots frame-parallel fmt=raw fetch=stream", "mp: slots scan raw frames=2 1920x1080"]
 soak_sec = 10
 
 # crew 上限（`[schedule] cores=2` + workers=all + clip/eager qois：非 slots 适配方，
@@ -526,7 +542,7 @@ feed = "clip"
 [playlist]
 loop = "loop_list"
 [[playlist.items]]
-path = "1080p/video.qois"
+path = "video.qois"
 [wallpaper]
 enable = false
 [schedule]
@@ -535,13 +551,14 @@ workers = "all"
 cores = 2
 """
 boot_expect = ["cfg: version=1", "play.feed=Clip", "idle: ready"]
-keys = [{ send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 }, { send = "p", wait_after = 3 }, { send = "0", wait_for = ["menu: ready"], wait_after = 5 }]
-expect = ["playlist: items=1 loop=loop_list", "playlist: item 1/1 path=1080p/video.qois", "video: fmt=Qois", "sched: crew=2/4", "play: path=mp_draw"]
+keys = [{ send = "p", wait_for = ["idle: ready (press any key)"], wait_after = 2 }, { send = "1", wait_for = ["ptui: page=home"], wait_after = 2 }, { send = "1", wait_for = ["ptui: page=play"], wait_after = 5 }]
+expect = ["ptui: play 0 path=video.qois", "playlist: items=1 loop=loop_list", "sched: crew=2/4", "play: path=mp_draw"]
 soak_sec = 10
 
 # roles=split 适配方（qois + feed=stream 懒供片 + workers=all）：AP 解码到槽 +
 # BSP 上传 slots 路：断言 `play: path=mp_slots` 前缀 + `sched: crew=4/4 roles=split`
 # + 旧 scan 行字节不变。
+# 本轮即跑（TUI 口径断言）。
 [[case]]
 name = "video-roles-split"
 covers = ["src/video/mp_slots.rs", "src/video.rs", "src/config/types.rs", "usb_reports/1080p/video.qois"]
@@ -560,7 +577,7 @@ feed = "stream"
 [playlist]
 loop = "loop_list"
 [[playlist.items]]
-path = "1080p/video.qois"
+path = "video.qois"
 [wallpaper]
 enable = false
 [schedule]
@@ -569,8 +586,8 @@ workers = "all"
 roles = "split"
 """
 boot_expect = ["cfg: version=1", "play.feed=Stream", "idle: ready"]
-keys = [{ send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 }, { send = "p", wait_after = 3 }, { send = "0", wait_for = ["menu: ready"], wait_after = 5 }]
-expect = ["playlist: items=1 loop=loop_list", "playlist: item 1/1 path=1080p/video.qois", "video: fmt=Qois", "sched: crew=4/4 roles=split", "play: path=mp_slots frame-parallel fmt=qois fetch=stream", "mp: slots scan qois chunks="]
+keys = [{ send = "p", wait_for = ["idle: ready (press any key)"], wait_after = 2 }, { send = "1", wait_for = ["ptui: page=home"], wait_after = 2 }, { send = "1", wait_for = ["ptui: page=play"], wait_after = 5 }]
+expect = ["playlist: items=1 loop=loop_list", "ptui: play 0 path=video.qois", "play: path=video.qois fmt=Qois", "sched: crew=4/4 roles=split", "play: path=mp_slots frame-parallel fmt=qois fetch=stream", "mp: slots scan qois chunks="]
 soak_sec = 10
 
 # roles=combined 同适配方（qois + feed=stream 懒供片 + workers=all）：slots 门
@@ -594,7 +611,7 @@ feed = "stream"
 [playlist]
 loop = "loop_list"
 [[playlist.items]]
-path = "1080p/video.qois"
+path = "video.qois"
 [wallpaper]
 enable = false
 [schedule]
@@ -603,6 +620,6 @@ workers = "all"
 roles = "combined"
 """
 boot_expect = ["cfg: version=1", "play.feed=Stream", "idle: ready"]
-keys = [{ send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 }, { send = "p", wait_after = 3 }, { send = "0", wait_for = ["menu: ready"], wait_after = 5 }]
-expect = ["playlist: items=1 loop=loop_list", "playlist: item 1/1 path=1080p/video.qois", "video: fmt=Qois", "sched: crew=4/4 roles=combined", "play: path=mp_draw"]
+keys = [{ send = "p", wait_for = ["idle: ready (press any key)"], wait_after = 2 }, { send = "1", wait_for = ["ptui: page=home"], wait_after = 2 }, { send = "1", wait_for = ["ptui: page=play"], wait_after = 5 }]
+expect = ["ptui: play 0 path=video.qois", "playlist: items=1 loop=loop_list", "sched: crew=4/4 roles=combined", "play: path=mp_draw"]
 soak_sec = 10

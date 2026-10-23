@@ -1,15 +1,21 @@
 # 20-video.toml：QEMU 黑盒矩阵分组（`matrix/` 目录，按用例前缀分组，合并后等价原 `matrix.toml`）。
-# 共 12 cases（播放 5 + 播放列表 3 + 显示 4），单文件 ≤1000 行（AGENTS 口径）。新增 case 按前缀落对应文件（解码/槽位/crew-roles 类进 60-decode.toml），并写 `covers`。
+# 共 9 cases（播放 5 + 显示 4），单文件 ≤1000 行（AGENTS 口径）。新增 case 按前缀落对应文件（解码/槽位/crew-roles 类进 60-decode.toml，TUI 类进 70-ptui.toml），并写 `covers`。
 #
 # 播放列表模型（`[playlist] loop` + `[[playlist.items]] path`，见 `docs/player.md`）：
 # 固件不再读 `[play] format`（旧键残留按 serde 默认忽略），每项按路径自动检测
 # （qois 后缀 / raws 单文件 / frameNNNN.raw 目录扫描 / mp4 容器探针 hevc>avc>vp9 / hevc/.265 /
 # ivf / h263 / m2v / ogv，探针失败该项 `playlist: skip` 警告跳过，不断播）。
+# 起播键流（TUI 外壳口径）：p → TUI 首页 `1` 进播放页 → 数字 `1` 播首项
+#（旧弹窗 → p → 纯播放器菜单 → 0 已随外壳退役；`playlist: items=` 为开机行保留，
+# 逐项 `playlist: item` 行只在旧 `video_run` 管线打印，TUI `play_path` 改断
+# `ptui: play <i> path=` + `play: path=` 管线行）。
+# 供片 convention（P6）：播片放镜像根目录（`video.*`；`1080p/` 硬编码已删除；
+# raw 目录扫描 `1080p/frameNNNN.raw` 与 `720p/` 几何目录保留，壁纸 `wallpaper/` 不动）。
 # 旧单格式 case（video-raw/hevc/vp9/h263/mpeg2v/theora/avc/hevc-mp4/vp9-mp4）与
-# 旧供片档位 case（video-feed-* 七例，feed 收敛为全局默认 + per-codec fetch 覆盖）
-# 已删除，覆盖收敛到本文件 3 个播放列表 case（多文件夹具复用既有 needs_* 标志，
-# 同一 case 置多个标志即同镜像多片源，无新 runner 标志）与 60-decode.toml 的
-# 播放列表化用例；mp4 容器探针以 avc 轨（loop-single）+ hev 轨（once）两代表覆盖。
+# 旧供片档位 case（video-feed-* 七例）已删除，覆盖收敛到本文件单项播放列表 case
+# 与 60-decode.toml 的播放列表化用例；旧三播放列表语义 case
+#（playlist-list-loop/loop-single/once）已删除，改由 `70-ptui.toml` 的
+# `ptui-play-scan`（TUI 扫描制播放）覆盖。
 
 [[case]]
 name = "video-mp"
@@ -28,7 +34,7 @@ fps = "max"
 [playlist]
 loop = "loop_list"
 [[playlist.items]]
-path = "1080p/video.qois"
+path = "video.qois"
 [wallpaper]
 enable = false
 [schedule]
@@ -38,14 +44,14 @@ dist = "static"
 """
 boot_expect = ["cfg: version=1", "idle: ready"]
 keys = [
-  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
-  { send = "p", wait_after = 3 },
-  { send = "0", wait_for = ["menu: ready"], wait_after = 5 },
+  { send = "p", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
+  { send = "1", wait_for = ["ptui: page=home"], wait_after = 2 },
+  { send = "1", wait_for = ["ptui: page=play"], wait_after = 5 },
 ]
-expect = ["play: path=mp_draw", "playlist: items=1 loop=loop_list", "playlist: item 1/1 path=1080p/video.qois"]
+expect = ["play: path=mp_draw", "playlist: items=1 loop=loop_list", "ptui: play 0 path=video.qois"]
 soak_sec = 20
 
-# 播放 Blt：弹窗 → p → 按 0 进 blt_loop，soak 15 秒（单项播放列表）。
+# 播放 Blt：TUI 播放页播首项进 blt_loop，soak 15 秒。
 [[case]]
 name = "video-blt"
 covers = ["src/video.rs", "src/video/", "usb_reports/1080p/video.qois"]
@@ -63,7 +69,7 @@ fps = "max"
 [playlist]
 loop = "loop_list"
 [[playlist.items]]
-path = "1080p/video.qois"
+path = "video.qois"
 [wallpaper]
 enable = false
 [schedule]
@@ -73,11 +79,11 @@ dist = "static"
 """
 boot_expect = ["cfg: version=1", "idle: ready"]
 keys = [
-  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
-  { send = "p", wait_after = 3 },
-  { send = "0", wait_for = ["menu: ready"], wait_after = 5 },
+  { send = "p", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
+  { send = "1", wait_for = ["ptui: page=home"], wait_after = 2 },
+  { send = "1", wait_for = ["ptui: page=play"], wait_after = 5 },
 ]
-expect = ["play: path=blt_loop", "playlist: items=1 loop=loop_list", "playlist: item 1/1 path=1080p/video.qois"]
+expect = ["play: path=blt_loop", "playlist: items=1 loop=loop_list", "ptui: play 0 path=video.qois"]
 soak_sec = 15
 
 # 调度后端 nano：单核执行器泵走渲染路径（direct 单核），workers/dist 忽略（单项播放列表）。
@@ -98,7 +104,7 @@ fps = "max"
 [playlist]
 loop = "loop_list"
 [[playlist.items]]
-path = "1080p/video.qois"
+path = "video.qois"
 [wallpaper]
 enable = false
 [schedule]
@@ -106,11 +112,11 @@ backend = "nano"
 """
 boot_expect = ["cfg: version=1", "idle: ready"]
 keys = [
-  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
-  { send = "p", wait_after = 3 },
-  { send = "0", wait_for = ["menu: ready"], wait_after = 5 },
+  { send = "p", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
+  { send = "1", wait_for = ["ptui: page=home"], wait_after = 2 },
+  { send = "1", wait_for = ["ptui: page=play"], wait_after = 5 },
 ]
-expect = ["play: path=nano_pump", "playlist: items=1 loop=loop_list", "playlist: item 1/1 path=1080p/video.qois"]
+expect = ["play: path=nano_pump", "playlist: items=1 loop=loop_list", "ptui: play 0 path=video.qois"]
 soak_sec = 15
 
 # 调度后端 dynamic：多核 steal 泵直写前台（Blt/影子/单核会回退，本矩阵直给合法组合；单项播放列表）。
@@ -131,7 +137,7 @@ fps = "max"
 [playlist]
 loop = "loop_list"
 [[playlist.items]]
-path = "1080p/video.qois"
+path = "video.qois"
 [wallpaper]
 enable = false
 [schedule]
@@ -139,11 +145,11 @@ backend = "dynamic"
 """
 boot_expect = ["cfg: version=1", "idle: ready"]
 keys = [
-  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
-  { send = "p", wait_after = 3 },
-  { send = "0", wait_for = ["menu: ready"], wait_after = 5 },
+  { send = "p", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
+  { send = "1", wait_for = ["ptui: page=home"], wait_after = 2 },
+  { send = "1", wait_for = ["ptui: page=play"], wait_after = 5 },
 ]
-expect = ["play: path=dynamic_draw", "play: alive round=", "playlist: items=1 loop=loop_list", "playlist: item 1/1 path=1080p/video.qois"]
+expect = ["play: path=dynamic_draw", "play: alive round=", "playlist: items=1 loop=loop_list", "ptui: play 0 path=video.qois"]
 soak_sec = 20
 
 # 调度新位置证明：[schedule] manual + workers/dist 生效（直达 mp_draw，与旧 `[render]` 键同语义；单项播放列表）。
@@ -164,7 +170,7 @@ fps = "max"
 [playlist]
 loop = "loop_list"
 [[playlist.items]]
-path = "1080p/video.qois"
+path = "video.qois"
 [wallpaper]
 enable = false
 [schedule]
@@ -174,139 +180,17 @@ dist = "static"
 """
 boot_expect = ["cfg: version=1", "idle: ready"]
 keys = [
-  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
-  { send = "p", wait_after = 3 },
-  { send = "0", wait_for = ["menu: ready"], wait_after = 5 },
+  { send = "p", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
+  { send = "1", wait_for = ["ptui: page=home"], wait_after = 2 },
+  { send = "1", wait_for = ["ptui: page=play"], wait_after = 5 },
 ]
-expect = ["play: path=mp_draw", "sched.backend=Manual", "playlist: items=1 loop=loop_list", "playlist: item 1/1 path=1080p/video.qois"]
+expect = ["play: path=mp_draw", "sched.backend=Manual", "playlist: items=1 loop=loop_list", "ptui: play 0 path=video.qois"]
 soak_sec = 15
 
-# 播放列表循环（loop_list）：6 项裸片源各自动检测（qois/hevc/ivf/h263/m2v/ogv，
-# 同镜像多 needs_* 即多文件），逐项 `playlist: item` + `video: fmt=` 不断，
-# 播完回绕（loop_list 语义）；`play: path=` + soak 保活同旧口径。
-[[case]]
-name = "playlist-list-loop"
-covers = ["src/video/", "src/video/play.rs", "src/config/types.rs", "usb_reports/1080p/video.qois", "src/diag/data/hevc_probe_main.265", "src/diag/data/vp9_probe.ivf", "src/diag/data/video.h263", "src/diag/data/video.m2v", "src/diag/data/video.ogv"]
-timeout_sec = 240
-needs_video = true
-needs_hevcvideo = true
-needs_vp9video = true
-needs_h263video = true
-needs_mpeg2vvideo = true
-needs_theoravideo = true
-config = """
-version = 1
-[accel]
-level = "auto"
-[render]
-mode = "direct"
-vsync = "off"
-[play]
-fps = "max"
-[playlist]
-loop = "loop_list"
-[[playlist.items]]
-path = "1080p/video.qois"
-[[playlist.items]]
-path = "1080p/video.hevc"
-[[playlist.items]]
-path = "1080p/video.ivf"
-[[playlist.items]]
-path = "1080p/video.h263"
-[[playlist.items]]
-path = "1080p/video.m2v"
-[[playlist.items]]
-path = "1080p/video.ogv"
-[wallpaper]
-enable = false
-[schedule]
-backend = "manual"
-workers = "bsp_only"
-dist = "static"
-"""
-boot_expect = ["cfg: version=1", "idle: ready"]
-keys = [
-  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
-  { send = "p", wait_after = 3 },
-  { send = "0", wait_for = ["menu: ready"], wait_after = 5 },
-]
-expect = ["playlist: items=6 loop=loop_list", "playlist: item 1/6 path=1080p/video.qois", "playlist: item 6/6 path=1080p/video.ogv", "video: fmt=Qois", "video: fmt=Hevc", "video: fmt=Vp9", "video: fmt=H263", "video: fmt=Mpeg2v", "video: fmt=Theora", "play: path=direct_loop"]
-soak_sec = 15
-
-# 播放列表单曲循环（loop_single）：mp4 容器探针（avc 轨，石雨堂拆 avcC → Annex-B）
-# 即容器路证明；同一项反复出现（count x2）即“重播当前项”语义。
-[[case]]
-name = "playlist-loop-single"
-covers = ["src/video/", "src/video/play.rs", "src/config/types.rs", "src/diag/data/video-avc.mp4"]
-timeout_sec = 180
-needs_avcvideo = true
-config = """
-version = 1
-[accel]
-level = "auto"
-[render]
-mode = "direct"
-vsync = "off"
-[play]
-fps = "max"
-[playlist]
-loop = "loop_single"
-[[playlist.items]]
-path = "1080p/video.mp4"
-[wallpaper]
-enable = false
-[schedule]
-backend = "manual"
-workers = "bsp_only"
-dist = "static"
-"""
-boot_expect = ["cfg: version=1", "idle: ready"]
-keys = [
-  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
-  { send = "p", wait_after = 3 },
-  { send = "0", wait_for = ["menu: ready"], wait_after = 5 },
-]
-expect = ["playlist: items=1 loop=loop_single", { pat = "playlist: item 1/1 path=1080p/video.mp4", count = 2 }, "video: fmt=Avc", "play: path=direct_loop"]
-soak_sec = 10
-
-# 播放列表播一次（once）：mp4 hev 轨（容器探针第二代表，hvcC → Annex-B）+
-# qois 两项走完即停（once 语义）；不断言播后落点，只验两项都播出。
-[[case]]
-name = "playlist-once"
-covers = ["src/video/", "src/video/play.rs", "src/config/types.rs", "src/diag/data/video-hevc.mp4", "usb_reports/1080p/video.qois"]
-timeout_sec = 180
-needs_hevcmp4video = true
-needs_video = true
-config = """
-version = 1
-[accel]
-level = "auto"
-[render]
-mode = "direct"
-vsync = "off"
-[play]
-fps = "max"
-[playlist]
-loop = "once"
-[[playlist.items]]
-path = "1080p/video.mp4"
-[[playlist.items]]
-path = "1080p/video.qois"
-[wallpaper]
-enable = false
-[schedule]
-backend = "manual"
-workers = "bsp_only"
-dist = "static"
-"""
-boot_expect = ["cfg: version=1", "idle: ready"]
-keys = [
-  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
-  { send = "p", wait_after = 3 },
-  { send = "0", wait_for = ["menu: ready"], wait_after = 5 },
-]
-expect = ["playlist: items=2 loop=once", "playlist: item 1/2 path=1080p/video.mp4", "playlist: item 2/2 path=1080p/video.qois", "video: fmt=Hevc", "video: fmt=Qois", "play: path=direct_loop"]
-soak_sec = 10
+# 扫描制播放（P6）：旧 `playlist-list-loop`/`playlist-loop-single`/`playlist-once`
+# 三例（播片列表语义）已删除，改由 TUI 扫描制播放覆盖（见 `70-ptui.toml` 的
+# `ptui-play-scan`：根目录片源，进 TUI 播放页断扫描行 + 播 + soak）。
+# 本文件余下 9 cases 均为单项 `[[playlist.items]]`（根目录 `video.*` 路径）。
 
 # 显示适配 fit（默认档）：[display] fit=fit bar=black，qois 单项循环（抄 video-nano 最小形）；
 # clip 起播打 `display: fit=fit bar=000000 ...` 标记（播后 expect 断言前缀，boot_expect 只保开机），soak 保活。
@@ -330,7 +214,7 @@ bar = "black"
 [playlist]
 loop = "loop_list"
 [[playlist.items]]
-path = "1080p/video.qois"
+path = "video.qois"
 [wallpaper]
 enable = false
 [schedule]
@@ -338,11 +222,11 @@ backend = "nano"
 """
 boot_expect = ["cfg: version=1", "idle: ready"]
 keys = [
-  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
-  { send = "p", wait_after = 3 },
-  { send = "0", wait_for = ["menu: ready"], wait_after = 5 },
+  { send = "p", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
+  { send = "1", wait_for = ["ptui: page=home"], wait_after = 2 },
+  { send = "1", wait_for = ["ptui: page=play"], wait_after = 5 },
 ]
-expect = ["play: path=nano_pump", "playlist: items=1 loop=loop_list", "playlist: item 1/1 path=1080p/video.qois", "display: fit=fit bar=000000"]
+expect = ["play: path=nano_pump", "playlist: items=1 loop=loop_list", "ptui: play 0 path=video.qois", "display: fit=fit bar=000000"]
 soak_sec = 15
 
 # 显示适配 stretch：[display] fit=stretch bar=black（除 fit 外与 fit 例同构，便于隔离变量）；
@@ -367,7 +251,7 @@ bar = "black"
 [playlist]
 loop = "loop_list"
 [[playlist.items]]
-path = "1080p/video.qois"
+path = "video.qois"
 [wallpaper]
 enable = false
 [schedule]
@@ -375,11 +259,11 @@ backend = "nano"
 """
 boot_expect = ["cfg: version=1", "idle: ready"]
 keys = [
-  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
-  { send = "p", wait_after = 3 },
-  { send = "0", wait_for = ["menu: ready"], wait_after = 5 },
+  { send = "p", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
+  { send = "1", wait_for = ["ptui: page=home"], wait_after = 2 },
+  { send = "1", wait_for = ["ptui: page=play"], wait_after = 5 },
 ]
-expect = ["play: path=nano_pump", "playlist: items=1 loop=loop_list", "playlist: item 1/1 path=1080p/video.qois", "display: fit=stretch bar=000000"]
+expect = ["play: path=nano_pump", "playlist: items=1 loop=loop_list", "ptui: play 0 path=video.qois", "display: fit=stretch bar=000000"]
 soak_sec = 15
 
 # 显示适配 cover：[display] fit=cover bar=black（与 fit/stretch 例同构，便于隔离变量）；
@@ -404,7 +288,7 @@ bar = "black"
 [playlist]
 loop = "loop_list"
 [[playlist.items]]
-path = "1080p/video.qois"
+path = "video.qois"
 [wallpaper]
 enable = false
 [schedule]
@@ -412,11 +296,11 @@ backend = "nano"
 """
 boot_expect = ["cfg: version=1", "idle: ready"]
 keys = [
-  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
-  { send = "p", wait_after = 3 },
-  { send = "0", wait_for = ["menu: ready"], wait_after = 5 },
+  { send = "p", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
+  { send = "1", wait_for = ["ptui: page=home"], wait_after = 2 },
+  { send = "1", wait_for = ["ptui: page=play"], wait_after = 5 },
 ]
-expect = ["play: path=nano_pump", "playlist: items=1 loop=loop_list", "playlist: item 1/1 path=1080p/video.qois", "display: fit=cover bar=000000"]
+expect = ["play: path=nano_pump", "playlist: items=1 loop=loop_list", "ptui: play 0 path=video.qois", "display: fit=cover bar=000000"]
 soak_sec = 15
 
 # 显示适配自定义 bar（RGB 自由色）：[display] fit=fit bar="#102040"（与 cover 例同构，仅 fit 回默认 + bar 取自定义 hex，便于隔离 bar 变量）；
@@ -441,7 +325,7 @@ bar = "#102040"
 [playlist]
 loop = "loop_list"
 [[playlist.items]]
-path = "1080p/video.qois"
+path = "video.qois"
 [wallpaper]
 enable = false
 [schedule]
@@ -449,9 +333,9 @@ backend = "nano"
 """
 boot_expect = ["cfg: version=1", "idle: ready"]
 keys = [
-  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
-  { send = "p", wait_after = 3 },
-  { send = "0", wait_for = ["menu: ready"], wait_after = 5 },
+  { send = "p", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
+  { send = "1", wait_for = ["ptui: page=home"], wait_after = 2 },
+  { send = "1", wait_for = ["ptui: page=play"], wait_after = 5 },
 ]
-expect = ["play: path=nano_pump", "playlist: items=1 loop=loop_list", "playlist: item 1/1 path=1080p/video.qois", "display: fit=fit bar=102040"]
+expect = ["play: path=nano_pump", "playlist: items=1 loop=loop_list", "ptui: play 0 path=video.qois", "display: fit=fit bar=102040"]
 soak_sec = 15

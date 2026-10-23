@@ -7,10 +7,12 @@ mod boot;
 mod config;
 mod diag;
 mod error;
+mod font;
 mod fs;
 mod graphics;
 mod idle;
 mod menu;
+mod ptui;
 mod video;
 mod wallpaper;
 

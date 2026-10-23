@@ -1,6 +1,9 @@
 # 30-probe.toml：QEMU 黑盒矩阵分组（`matrix/` 目录，按用例前缀分组，合并后等价原 `matrix.toml`）。
 # 共 7 cases，单文件 ≤1000 行（AGENTS 口径）。新增 case 按前缀落对应文件，并写 `covers`。
 
+# 诊断键流（TUI 外壳口径）：p → TUI 首页 `7` 进测试页 → 诊断项直按原键
+#（旧弹窗 → p → 纯播放器菜单已随外壳退役；测试页项键与旧菜单同 `ITEMS` 键）。
+
 [[case]]
 name = "diag-keys"
 covers = ["src/diag/get_cpu_info.rs", "src/diag/mp_service.rs", "src/diag/avx_checker.rs"]
@@ -23,17 +26,17 @@ dist = "static"
 """
 boot_expect = ["cfg: version=1", "idle: ready"]
 keys = [
-  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
-  { send = "p", wait_after = 3 },
-  { send = "1", wait_for = ["menu: ready"], wait_after = 8 },
+  { send = "p", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
+  { send = "7", wait_for = ["ptui: page=home"], wait_after = 2 },
+  { send = "1", wait_for = ["menu: ready (press key)"], wait_after = 8 },
   { send = "x", wait_after = 3 },
   { send = "4", wait_after = 8 },
   { send = "x", wait_after = 3 },
-  { send = "7", wait_for = ["menu: ready"], wait_after = 5 },
+  { send = "7", wait_for = ["menu: ready (press key)"], wait_after = 5 },
 ]
 expect = ["Total number of logic processors:", "Starting Multi-Processor", "AVX is "]
 
-# uefi-async 自举：进纯播放器菜单按 a，nano（join/timeout/timer/pacer）+
+# uefi-async 自举：TUI 测试页按 a，nano（join/timeout/timer/pacer）+
 # dynamic（spawn/cancel/retune）两条堆线必须 PASS。
 [[case]]
 name = "async-exec"
@@ -57,9 +60,9 @@ dist = "static"
 """
 boot_expect = ["cfg: version=1", "idle: ready"]
 keys = [
-  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
-  { send = "p", wait_after = 3 },
-  { send = "a", wait_for = ["menu: ready"], wait_after = 8 },
+  { send = "p", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
+  { send = "7", wait_for = ["ptui: page=home"], wait_after = 2 },
+  { send = "a", wait_for = ["menu: ready (press key)"], wait_after = 8 },
 ]
 expect = ["async-exec: nano ok", "async-exec: dynamic ok", "async-exec: PASS"]
 
@@ -88,9 +91,9 @@ dist = "static"
 """
 boot_expect = ["cfg: version=1", "idle: ready"]
 keys = [
-  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
-  { send = "p", wait_after = 3 },
-  { send = "a", wait_for = ["menu: ready"], wait_after = 8 },
+  { send = "p", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
+  { send = "7", wait_for = ["ptui: page=home"], wait_after = 2 },
+  { send = "a", wait_for = ["menu: ready (press key)"], wait_after = 8 },
 ]
 expect = ["async-exec: nano ok", "async-exec: PASS"]
 
@@ -118,13 +121,13 @@ dist = "static"
 """
 boot_expect = ["cfg: version=1", "idle: ready"]
 keys = [
-  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
-  { send = "p", wait_after = 3 },
-  { send = "a", wait_for = ["menu: ready"], wait_after = 8 },
+  { send = "p", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
+  { send = "7", wait_for = ["ptui: page=home"], wait_after = 2 },
+  { send = "a", wait_for = ["menu: ready (press key)"], wait_after = 8 },
 ]
 expect = ["async-exec: dynamic ok", "async-exec: PASS"]
 
-# uefi-input2 交互探测：进菜单按 b（等键 10s），矩阵发 z，
+# uefi-input2 交互探测：TUI 测试页按 b（等键 10s），矩阵发 z，
 # Ex 协议必须回显键码 + 修饰/锁定状态，最后 PASS。
 [[case]]
 name = "input2-probe"
@@ -148,15 +151,15 @@ dist = "static"
 """
 boot_expect = ["cfg: version=1", "idle: ready"]
 keys = [
-  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
-  { send = "p", wait_after = 3 },
-  { send = "b", wait_for = ["menu: ready"], wait_after = 3 },
+  { send = "p", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
+  { send = "7", wait_for = ["ptui: page=home"], wait_after = 2 },
+  { send = "b", wait_for = ["menu: ready (press key)"], wait_after = 3 },
   { send = "z", wait_for = ["input2: waiting"], wait_after = 5 },
 ]
 expect = ["input2: key=", "input2: PASS"]
 
 # AVC 解码探针：内嵌 baseline 小样片在固件里实解，帧数/几何/校验和 + PASS 全走串口。
-# 按键 `c`（菜单诊断项；弹窗侧 p/f/s/r/q 已占，c 只在纯播放器菜单里有效）。
+# 按键 `c`（测试页诊断项直按）。
 [[case]]
 name = "avc-probe"
 covers = ["src/diag/avc_probe.rs", "src/diag/data/avc_probe_baseline.264"]
@@ -179,14 +182,14 @@ dist = "static"
 """
 boot_expect = ["cfg: version=1", "idle: ready"]
 keys = [
-  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
-  { send = "p", wait_after = 3 },
-  { send = "c", wait_for = ["menu: ready"], wait_after = 5 },
+  { send = "p", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
+  { send = "7", wait_for = ["ptui: page=home"], wait_after = 2 },
+  { send = "c", wait_for = ["menu: ready (press key)"], wait_after = 5 },
 ]
 expect = ["avc: decoded 4 frames", "avc: PASS"]
 
 # HEVC 解码探针：内嵌 Main 小样片在固件里实解，帧数/几何/校验和 + PASS 全走串口。
-# 按键 `d`（菜单诊断项；弹窗侧 p/f/s/r/q 已占，d 只在纯播放器菜单里有效）。
+# 按键 `d`（测试页诊断项直按）。
 [[case]]
 name = "hevc-probe"
 covers = ["src/diag/hevc_probe.rs", "src/diag/data/hevc_probe_main.265"]
@@ -209,9 +212,9 @@ dist = "static"
 """
 boot_expect = ["cfg: version=1", "accel: decode simd hevc=on vp9=on h263=on h264=off mpeg2v=on theora=on", "idle: ready"]
 keys = [
-  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
-  { send = "p", wait_after = 3 },
-  { send = "d", wait_for = ["menu: ready"], wait_after = 5 },
+  { send = "p", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
+  { send = "7", wait_for = ["ptui: page=home"], wait_after = 2 },
+  { send = "d", wait_for = ["menu: ready (press key)"], wait_after = 5 },
 ]
 expect = ["hevc: decoded 10 frames", "hevc: PASS"]
 

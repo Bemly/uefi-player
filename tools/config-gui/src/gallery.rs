@@ -486,74 +486,61 @@ impl App {
             self.content_monospace(ui, dir.as_str());
         });
         ui.add_space(4.0);
-        // WE 式左右分栏：左侧卡片网格，右侧控制列（控制在上，播放列表在下，
-        // 见 playlist_list_editor：循环档 + 拖拽/上下排序 + 增删）。
-        const SIDE_W: f32 = 300.0;
-        ui.horizontal_top(|ui| {
-            let left_w = (ui.available_width() - SIDE_W - 8.0).max(200.0);
-            ui.vertical(|ui| {
-                ui.set_width(left_w);
-                ui.horizontal(|ui| {
-                    if egui_glass::GlassButton::new(t!("gallery.refresh"))
-                        .show(ui)
-                        .clicked()
-                    {
-                        let p = self.path.clone();
-                        self.gallery.refresh(&p);
-                        self.status =
-                            t!("gallery.refreshed", n = self.gallery.entries.len()).into_owned();
+        // P5：内嵌画廊编辑器已搬入壁纸页（`playlist_gallery_editor`；`[playlist]`
+        // 即壁纸画廊，不再是播放器供片），本页只剩卡片网格 + 控制行，全宽。
+        ui.horizontal(|ui| {
+            if egui_glass::GlassButton::new(t!("gallery.refresh"))
+                .show(ui)
+                .clicked()
+            {
+                let p = self.path.clone();
+                self.gallery.refresh(&p);
+                self.status = t!("gallery.refreshed", n = self.gallery.entries.len()).into_owned();
+            }
+            // 选中卡一键带源跳转转码页（源路径 = 图库根 + 相对名）。
+            let can_go = self.gallery.selected.is_some();
+            if can_go
+                && egui_glass::GlassButton::new(t!("gallery.to_transcode"))
+                    .show(ui)
+                    .clicked()
+            {
+                if let Some(i) = self.gallery.selected {
+                    if let Some(e) = self.gallery.entries.get(i) {
+                        let src = std::path::Path::new(&dir)
+                            .join(&e.name)
+                            .display()
+                            .to_string();
+                        self.transcode.source = src;
+                        self.refresh_probe();
+                        self.page = crate::app::Page::Transcode;
                     }
-                    // 选中卡一键带源跳转转码页（源路径 = 图库根 + 相对名）。
-                    let can_go = self.gallery.selected.is_some();
-                    if can_go
-                        && egui_glass::GlassButton::new(t!("gallery.to_transcode"))
-                            .show(ui)
-                            .clicked()
-                    {
-                        if let Some(i) = self.gallery.selected {
-                            if let Some(e) = self.gallery.entries.get(i) {
-                                let src = std::path::Path::new(&dir)
-                                    .join(&e.name)
-                                    .display()
-                                    .to_string();
-                                self.transcode.source = src;
-                                self.refresh_probe();
-                                self.page = crate::app::Page::Transcode;
+                }
+            }
+        });
+        ui.add_space(8.0);
+        if self.gallery.entries.is_empty() {
+            self.content_small(ui, t!("gallery.empty"));
+        } else {
+            let cols = grid_columns(ui.available_width());
+            let dark = self.dark;
+            let n = self.gallery.entries.len();
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                let mut idx = 0;
+                while idx < n {
+                    ui.horizontal(|ui| {
+                        for _ in 0..cols {
+                            if idx >= n {
+                                break;
                             }
-                        }
-                    }
-                });
-                ui.add_space(8.0);
-                if self.gallery.entries.is_empty() {
-                    self.content_small(ui, t!("gallery.empty"));
-                } else {
-                    let cols = grid_columns(ui.available_width());
-                    let dark = self.dark;
-                    let n = self.gallery.entries.len();
-                    egui::ScrollArea::vertical().show(ui, |ui| {
-                        let mut idx = 0;
-                        while idx < n {
-                            ui.horizontal(|ui| {
-                                for _ in 0..cols {
-                                    if idx >= n {
-                                        break;
-                                    }
-                                    self.gallery_card(ui, idx, dark);
-                                    ui.add_space(CARD_GAP);
-                                    idx += 1;
-                                }
-                            });
+                            self.gallery_card(ui, idx, dark);
                             ui.add_space(CARD_GAP);
+                            idx += 1;
                         }
                     });
+                    ui.add_space(CARD_GAP);
                 }
             });
-            ui.vertical(|ui| {
-                ui.set_width(SIDE_W);
-                self.content_label(ui, t!("playlist.heading"));
-                self.playlist_list_editor(ui);
-            });
-        });
+        }
     }
 
     /// 单张卡片：玻璃容器（封面顶满上沿）+ 标题 + 元数据两行（等高）；

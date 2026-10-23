@@ -1,6 +1,6 @@
 [package]
 name = "uefi-player"
-version = "26.10.21"
+version = "26.10.23"
 edition = "2024"
 
 [dependencies]

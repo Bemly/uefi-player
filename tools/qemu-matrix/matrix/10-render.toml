@@ -23,11 +23,11 @@ dist = "static"
 """
 boot_expect = ["cfg: version=1", "idle: ready"]
 keys = [
-  { send = "x", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
-  { send = "p", wait_after = 3 },
-  { send = "7", wait_for = ["menu: ready"], wait_after = 5 },
+  { send = "p", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
+  { send = "7", wait_for = ["ptui: page=home"], wait_after = 2 },
+  { send = "7", wait_for = ["menu: ready (press key)"], wait_after = 5 },
 ]
-expect = ["AVX is "]
+expect = ["ptui: open", "ptui: page=home", "ptui: page=tests", "menu: ready (press key)", "AVX is "]
 
 # 矩阵冒烟：全 auto + 2 帧，矩阵行必须出现（赢家不定，不锁）。
 # 无按键：只验开机校准（待机即停，不断言菜单）。

@@ -606,7 +606,7 @@ impl Source {
                 frame_bytes,
             } => {
                 while *pos < names.len() {
-                    let path = alloc::format!("{}\\{}", dir, names[*pos]);
+                    let path = super::raw_file_path(dir, &names[*pos]);
                     *pos += 1;
                     let cstr = match uefi::CString16::try_from(path.as_str()) {
                         Ok(c) => c,

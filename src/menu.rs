@@ -1,10 +1,16 @@
-//! 纯播放器模式菜单（诊断 + 播片）：从启动选项弹窗按 `p` 进入，
-//! 按 `q` 回壁纸待机。默认停留等待按键，按 0-9 进对应项，r 重启。
+//! TUI 测试页（P4 收敛后形态）：只跑诊断项，播片入口已搬走。
+//!
+//! - 入口：`run_test_page(screen: Screen) -> Screen`（P3 前身 `run_menu` 已删，破坏式）。
+//! - 诊断分发：`diag::registry::ITEMS` 逐项调用保留；`fatal_on_error` 项（生产播片
+//!   `video_run`）跳过不列，由 TUI 首页经 `video::play::play_path` 接管
+//!   （`registry.rs` 零改，播片键 `0` 在此页按未知键处理）。
+//! - 背景：`WP_TOP` 以下行区播壁纸，源几何取 clip 真实 `w/h`（`display.fit` 生效，
+//!   不写死 `WP_W/WP_H`）。
+//! - 行区 paint 失败：记 `log::warn!` 再停背景（不静默杀，方便矩阵定位）。
 //!
 //! 错误策略：
-//! - 播放视频（生产路径）失败 → [`handle_fatal`]，和重构前 `main` 语义完全一致；
-//! - 诊断项失败 → 可返回式报错显示，按任意键回菜单；
-//! - [`handle_fatal`] 本体（`error.rs`）一字不动。
+//! - 诊断项失败 → 可返回式报错显示，按任意键回测试页（不 halt）；
+//! - 独占项跑完重建 `Screen`（GOP 独占规则：Shared 借屏，Exclusive 先 drop 再重建）。
 
 use core::time::Duration;
 
@@ -17,11 +23,20 @@ use crate::graphics::{Screen, calibrate_tps, tsc};
 use crate::video::decoder::Clip;
 use crate::wallpaper::{self, WP_H, WP_TOP, WP_W};
 
+/// 生产播片项判定（`registry::ITEMS` 里唯一 `fatal_on_error` 的就是 `video_run`）：
+/// 测试页不列不分发，TUI 首页经 `play_path` 接管。
+fn is_playback(item: &crate::diag::registry::Item) -> bool {
+    item.fatal_on_error
+}
+
 fn draw_menu(screen: &mut Screen) {
     let _ = screen.clear();
     screen.reset_cursor();
-    screen.draw_str("== UEFI Diag Menu ==");
+    screen.draw_str("== TUI Tests ==");
     for item in ITEMS {
+        if is_playback(item) {
+            continue;
+        }
         screen.draw_str(&alloc::format!(
             "[{}] {} - {}",
             item.key,
@@ -29,11 +44,11 @@ fn draw_menu(screen: &mut Screen) {
             item.desc
         ));
     }
-    screen.draw_str("[r] reboot  [q] back to wallpaper");
-    screen.draw_str("Press key to select:");
+    screen.draw_str("[r] 重启  [q] 返回上级");
+    screen.draw_str("按键选择：");
 }
 
-/// 诊断项的可返回式报错：显示错误，等任意键回菜单（不 halt）。
+/// 诊断项的可返回式报错：显示错误，等任意键回测试页（不 halt）。
 fn show_recoverable(screen: &mut Screen, err: NyaStatus) {
     let _ = screen.clear();
     screen.reset_cursor();
@@ -56,7 +71,7 @@ fn run_shared(screen: &mut Screen, f: fn(&mut Screen) -> Result, fatal: bool) {
     }
 }
 
-/// 开机预载菜单背景：开关关/无片源/分辨率不对都返回 `None`。
+/// 开机预载测试页背景：开关关/无片源/分辨率不对都返回 `None`。
 fn load_background(screen: &mut Screen) -> Option<WpState> {
     let set = wallpaper::load().unwrap_or(None)?;
     if set.is_empty() {
@@ -85,7 +100,7 @@ fn load_background(screen: &mut Screen) -> Option<WpState> {
 }
 
 /// 阻塞等按键，空闲时按帧预算在文字区下方播壁纸（`WP_TOP` 以下行区，
-/// 菜单文字不重画——`draw_str` 逐像素 `VideoFill` 跟不上帧率）。
+/// 测试页文字不重画——`draw_str` 逐像素 `VideoFill` 跟不上帧率）。
 /// 无壁纸时等价旧 `wait_key_ex`（轮询 + 短 stall）。
 fn wait_key_or_animate(screen: &mut Screen, wp: &mut Option<WpState>) -> (char, u16) {
     loop {
@@ -97,9 +112,10 @@ fn wait_key_or_animate(screen: &mut Screen, wp: &mut Option<WpState>) -> (char, 
             let now = tsc();
             if now.saturating_sub(st.last) >= st.budget {
                 st.last = now;
-                // 行区 paint 失败（如 GOP 抖动）就停背景，不炸菜单。
+                // 行区 paint 失败就停背景（先记 warn，不静默，方便矩阵定位）。
+                // 源几何取 clip 真实 `w/h`（`wallpaper::load` 已带几何），不写死 `WP_W/WP_H`。
                 if screen
-                    .upload_frame_region(WP_W, WP_H, WP_TOP, st.set.frame(st.idx))
+                    .upload_frame_region(st.set.w, st.set.h, WP_TOP, st.set.frame(st.idx))
                     .is_ok()
                 {
                     // 画廊步进：list 回绕，once 到末帧停留（见 `wallpaper::next_gallery_index`）。
@@ -110,6 +126,7 @@ fn wait_key_or_animate(screen: &mut Screen, wp: &mut Option<WpState>) -> (char, 
             }
         }
         if kill_wp {
+            log::warn!("menu: wallpaper bg dropped (row upload failed)");
             *wp = None;
         }
         stall(Duration::from_millis(5));
@@ -132,8 +149,10 @@ struct WpState {
     budget: u64,
 }
 
-pub fn run_menu(mut screen: Screen) -> Screen {
-    // P4-A：菜单背景预载（关/无片源/分辨率不对 → None，纯静态菜单）。
+/// TUI 测试页主循环（P4-A：菜单背景预载逻辑不变；播片入口已搬走）：
+/// 值进值出 `Screen`，`q` 回 TUI 上级（调用方继续页栈），`r` 重启。
+pub fn run_test_page(mut screen: Screen) -> Screen {
+    // P4-A：测试页背景预载（关/无片源/分辨率不对 → None，纯静态页）。
     let mut wp = load_background(&mut screen);
     let mut wp_warned = false;
     // 就绪标记（串口可断言；QEMU 黑盒矩阵靠它定发送按键的时机
@@ -150,8 +169,8 @@ pub fn run_menu(mut screen: Screen) -> Screen {
         let (key, raw) = wait_key_or_animate(&mut screen, &mut wp);
 
         if key_match('q', key, raw) {
-            // 回壁纸待机（串口可断言）。
-            log::info!("menu: back to idle");
+            // 回 TUI 上级（调用方页栈继续）。
+            log::info!("menu: back to ptui");
             return screen;
         }
         if key_match('r', key, raw) {
@@ -160,6 +179,10 @@ pub fn run_menu(mut screen: Screen) -> Screen {
 
         let mut matched = false;
         for item in ITEMS {
+            if is_playback(item) {
+                // 生产播片入口搬走（TUI 首页经 `play_path` 接管），本页跳过。
+                continue;
+            }
             if key_match(item.key, key, raw) {
                 matched = true;
                 match item.run {
@@ -170,7 +193,7 @@ pub fn run_menu(mut screen: Screen) -> Screen {
                     }
                     Entry::Exclusive(f) => {
                         // 该 demo 需要自己独占 GOP（强制切显示模式）。
-                        // 先释放 Screen 再跑，跑完重建 Screen 回菜单。
+                        // 先释放 Screen 再跑，跑完重建 Screen 回测试页。
                         // 注意：这里不清屏——demo 画面要留给用户看，
                         // 提示行打在底部。
                         drop(screen);

@@ -6,7 +6,6 @@ use core::time::Duration;
 use uefi::boot;
 use uefi::boot::set_watchdog_timer;
 
-pub mod ascii_font;
 pub mod buffer;
 pub mod decoder;
 pub mod demux;
@@ -19,7 +18,7 @@ pub mod sync;
 pub(crate) use self::loops::{blt_loop, direct_loop};
 pub use self::mp::OSD_ROWS;
 pub(crate) use self::mp::mp_draw;
-pub(crate) use self::play::{load_video_clip, need_eager_clip, resolve_play_target};
+pub(crate) use self::play::{first_playable_clip, need_eager_clip, play_clip, resolve_play_target};
 
 pub(crate) const VIDEO_W: usize = 1920;
 pub(crate) const VIDEO_H: usize = 1080;
@@ -80,15 +79,14 @@ pub fn video_run(screen: &mut Screen) -> Result {
     // 关闭看门狗，如果不行之后写定时喂狗
     set_watchdog_timer(0, 0, None)?;
 
-    let tps = calibrate_tps();
-    let target = resolve_play_target(screen, tps)?;
-
     // 统一控制面：无旁路分发，恒经 render 矩阵 + schedule 后端。
     // 旧 `[play] pipeline` 7 档已删（未知键忽略）：staged/zero_copy/stream/single
     // 走 `feed`（clip 路内拿帧方式），legacy_* 走 clip+eager+render 组合
     // （blt 整推 / direct+bsp_only / direct+bsp_only+scalar），见 `docs/player.md`。
     let mut fs = Fs::new()?;
-    let clip = load_video_clip(&mut fs, need_eager_clip())?;
+    // 单路径起播（首个可播播放列表项；旧列表游标/步进已删，播完循环本片）：
+    // 管线与 TUI `play_path` 共用 `play::play_clip`（限速裁决 + 三路分发）。
+    let clip = first_playable_clip(&mut fs, need_eager_clip())?;
 
     // 渲染路径矩阵（\player.toml，见 `Screen::ensure_render_calibrated`）：
     //   blt            → 单线程走 GOP Blt 引擎（workers 无意义）
@@ -98,19 +96,7 @@ pub fn video_run(screen: &mut Screen) -> Result {
     // （render 全 honoring）；dynamic 是多核 steal 泵（只直写前台，见 exec）。
     // `[display]`：源几何以 `Clip::w/h` 为准（`VIDEO_W/H` 仅 1080p 常量；
     // 小尺寸片源仍按 clip 几何打标/缩放，见 `loops`/`graphics::present`）。
-    let (cw, ch) = (clip.w, clip.h);
-    match crate::config::schedule_backend() {
-        crate::config::ScheduleBackend::Nano => {
-            log::info!(
-                "play: path=nano_pump (single executor task; schedule workers/dist ignored)"
-            );
-            exec::nano_pump(screen, clip, cw, ch, target, tps)
-        }
-        crate::config::ScheduleBackend::Dynamic => {
-            exec::dynamic_draw(screen, clip, cw, ch, target, tps)
-        }
-        crate::config::ScheduleBackend::Manual => manual_run(screen, clip, target, tps),
-    }
+    play_clip(screen, clip)
 }
 
 /// 手写调度（`[schedule] backend=manual`，也是执行器后端的回退落点）：

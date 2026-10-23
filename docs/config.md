@@ -54,9 +54,17 @@ feed = "clip"           # 供片模式：clip（开机全量预解码，默认�
                         # 生效值可被 `[decode.<fmt>] fetch` 按当前项检测格式覆盖
                         # （串口 `video: feed=` 取覆盖值）
 measured_max_fps = 0    # 固件实测回写（0 = 未测）；GUI 只读展示
+media_dir = ""          # 片源目录（""=根，单层非递归；只给 TUI 播放页扫描用，
+                        # 不存在由扫描侧报错；播放列表/画廊路径不受它约束，各写各的全相对路径）
 # format 旧键已删除（改逐项自动检测；旧文件残留键按 serde 默认忽略）。
 
-# 播放列表（新增正典；`loop` + 项数组，固件逐项自动检测格式）：
+# 播放列表 = 壁纸画廊唯一入口（`loop` + 项数组，固件逐项自动检测格式）：
+# 显示哪几个：`items` 全集即画廊全集（播片侧首个可播项起播，壁纸侧全拼成一个 Clip；
+# `loop_single` 下壁纸只取首项重播）；显示多少：列表长度即画廊长度（B 过渡全长封顶），
+# `preload` 仍按项截断（见 `[wallpaper]`）；顺序：文件书写序
+# （TUI 播放页扫描另按字节序排，不动本表）；循环：`loop` 三档
+# （`loop_list` 默认回绕 / `loop_single` 重播当前项 / `once` 播完最后一项即停）。
+# `[[wallpaper.items]]` 与 `[wallpaper] loop` 已删除（残留键按 serde 默认忽略，无迁移/别名）。
 [playlist]
 loop = "loop_list"      # loop_list（播完回绕，默认）| loop_single（重播当前项）
                         # | once（播完最后一项即停，回菜单）
@@ -142,19 +150,18 @@ measured_workers_n = 0  # sweep 胜者（生效核数；0 = 未测，下次启�
 
 [wallpaper]
 enable = false          # 菜单背景 + 引导过渡总开关（关 = decor 为 None，壁纸不 halt 任何流程）
-loop = "loop_list"      # loop_list（默认）| loop_single | once（与 [playlist] loop 同构）
 fps = "15"               # 背景帧率三态（与 [play] fps 同构）：auto（最左，跟 vsync；
                            # vsync 关则不限速）| max（最右，不限速）| 1-240（中间显式封顶）
                            # 默认 "15"
 preload = 8             # 按项预载封顶（每项 Clip 截断到 preload 帧，0 = 不封顶；
                            # 1080p BGRA 单帧约 8MB，长动画注意内存）
 popup_freeze = true     # 选项弹窗时冻结壁纸（false 则行区继续播；GUI 有开关）
-[[wallpaper.items]]
-path = "wallpaper/wall.mp4"   # 自动检测（与播放列表同一规则；容器/裸流均可）
-[[wallpaper.items]]
-path = "wallpaper/wall.qois"  # qois 单文件预解码（与播片同代价）
-# format/frames 旧键已删除（改逐项自动检测 + 列表长度治理 B 过渡；旧文件残留键忽略）。
-# enable 仍是总开关；gallery 为空（无项/全坏）= 静默无壁纸（菜单/引导照走，串口警告）。
+# loop/items 旧键已删除（循环语义只留 [playlist] loop 一处；画廊唯一入口收敛到
+# [playlist]，`wallpaper_loop/len/path` 即其别名；残留键按 serde 默认忽略，无迁移/别名）。
+# 画廊写法：把壁纸文件直接写进 [playlist]，如 path = "wallpaper/wall.mp4"
+# （自动检测，与播放列表同一规则；容器/裸流均可；qois 单文件预解码与播片同代价）。
+# format/frames 旧键同样已删除。
+# enable 仍是总开关；gallery 为空（[playlist] 无项/全坏）= 静默无壁纸（菜单/引导照走，串口警告）。
 # 共存规则：wall.*（`wallpaper/` 下）与播片项（常放 `1080p/` 下）分目录存放，
 # 同一检测矩阵，互不抢片源；B 过渡播列表全长（preload 仍按项截断）。
 
@@ -248,21 +255,27 @@ bar = "black"           # 黑边填充色（RGB 自由色，默认 "black"=00000
   帧字节 = `w*h*4`，几何 preset + mp_slots 步幅同源；矩阵 `video-decode-raw-720p`
   断言 `video: fmt=Raw frames=2 1280x720`）。
   串口另有 `decode: fmt=<Dbg> threads=...` 解析行（矩阵断言用）。
-- `[playlist]`（新增正典）：`loop` 三档（`loop_list` 默认回绕 /
-  `loop_single` 重播当前项 / `once` 播完最后一项即停回菜单），缺表缺键按默认照读；
+- `[playlist]`（壁纸画廊唯一入口）：`loop` 三档（`loop_list` 默认回绕 /
+  `loop_single` 重播当前项（壁纸侧只取首项） / `once` 播完最后一项即停回菜单），
+  缺表缺键按默认照读；
   `[[playlist.items]] path` 逐项自动检测（检测序见 `docs/player.md`），失败该项跳过 +
   警告（`playlist: skip`），空列表直接报错（`playlist: empty list, nothing to play`）。
   旧文件无 `[playlist]` 即空列表（播片侧报错，不断开机；矩阵里播片 case 必带至少一项）。
-- `[wallpaper]`（画廊模型）：`enable` 仍是总开关（关 = decor 为 None，
-  壁纸不 halt 任何流程）；`loop` 与播放列表同构（默认 `loop_list`）；
-  `fps` 三态同 `[play]`（默认 `"15"`）；`preload` 改按项封顶
+  `[[wallpaper.items]]` 与 `[wallpaper] loop` 已删除（残留键按 serde 默认忽略，无迁移/别名；
+  `wallpaper_loop/len/path/frames` 即本表别名，签名不变，调用方零改）。
+- `[play] media_dir`：`""` = 根目录，单层非递归（子目录不进；不存在由 TUI 扫描侧报错，
+  不回退不静默）；只给 TUI 播放页（`media::scan`）用，播放列表/画廊各写各的全相对路径，
+  不受它约束。开机拷入 runtime（TUI 只读，见下表）。
+- `[wallpaper]`（四键开关表）：`enable` 仍是总开关（关 = decor 为 None，
+  壁纸不 halt 任何流程）；`fps` 三态同 `[play]`（默认 `"15"`）；`preload` 按项封顶
   （每项 Clip 截断，0 = 不封顶）；`popup_freeze` 不变；
-  列表长度治理 B 过渡（`frames` 旧键已删除）；`format` 旧键已删除
-  （改逐项自动检测，残留键按 serde 默认忽略）。gallery 为空
-  （无项/全坏）= 静默无壁纸（菜单/引导照走，串口警告）。
+  列表长度治理 B 过渡（`frames` 旧键已删除）；`format`/`loop`/`items` 旧键已删除
+  （改逐项自动检测 + 画廊收敛 `[playlist]`，残留键按 serde 默认忽略）。gallery 为空
+  （`[playlist]` 无项/全坏）= 静默无壁纸（菜单/引导照走，串口警告）。
   串口画廊行：`wallpaper: gallery items={n} loop={mode} preloaded {m} frames (preload {p})`。
 - 旧键/旧值：`[play] pipeline`、`[play] format`、`[render] workers`、`[render] dist`、
-  `[wallpaper] format`、`[wallpaper] frames` 已删除
+  `[wallpaper] format`、`[wallpaper] frames`、`[wallpaper] loop`、
+  `[[wallpaper.items]]` 已删除
   （残留键按 serde 默认忽略；`pipeline` 旧文件按 `clip` 跑；无 `[playlist]` 旧文件
   即空列表，播片侧报错）；
   值别名 `avx512`（→`avx512f`）、`on`（→`static`）、整数壁纸 `fps` 已摘除，
@@ -286,3 +299,28 @@ bar = "black"           # 黑边填充色（RGB 自由色，默认 "black"=00000
   行为变更：`native` 旧语义为源分辨率 `0,0` 原位（左上），v2 起按 `align` 摆放
   （默认居中）；旧文件无 `align` 键按 `center` 照读，画面位置与旧版不同属预期。
   H.263 编码期 letterbox 与此正交，保持不动（互补，见 `docs/player.md` 管线）。
+
+## 控制权归属（谁听文件的、谁只听 TUI 内存）
+
+- 开机只装填一次，之后脱钩：播放器侧（`accel` / `render` / `schedule` /
+  `play.fps` / `play.feed` / `play.media_dir` / `decode.*` / `display` /
+  `tune.*`）拷入 `PlayerRuntime`（`seed_runtime_from_file`），运行期只读 runtime，
+  不再碰文件；TUI 各页经 `runtime_mut()` 改内存（见下）。
+- 文件侧原子（仍听文件）：壁纸四键（`wallpaper_enabled/fps/preload/popup_freeze`）+
+  画廊（`playlist_loop/len/path`，即 `[playlist]` 别名）+ `boot.*` 开关 +
+  `measured_*`（见下），调用方（`wallpaper::load` 每次回待机重读，热插拔即生效）。
+- `measured_*` 留文件：`[render] measured_render/workers/dist/vsync/vsync_fps/cores` +
+  `[schedule] measured_workers_n` + `[play] measured_max_fps` 仍是校准记忆，
+  固件回写（`persist_*` 全表重读原样保留，只改本键）、GUI 只读展示 + 重测清零，
+  TUI 不碰。
+- 写盘规则：只有壁纸页落盘（`s` 调 `save_wallpaper()`，只写 `[wallpaper]` 四键，
+  其余表重读原样保留）；播放 / 加速 / 渲染 / 调度 / 解码 / 显示六页调档只改
+  runtime 内存，重启即失（`ptui: set` 行只记串口，不动盘）。
+
+| 表 | 运行时听谁 | TUI 改哪 | 落盘 |
+|---|---|---|---|
+| `accel/render/schedule/play.fps+feed+media_dir/decode/display/tune` | runtime（开机拷入后脱钩） | `runtime_mut()` 改内存 | 不落 |
+| `[wallpaper]` 四键 | 文件原子（热插拔即生效） | `set_wallpaper_*` 改内存 | 只有壁纸页 `s` 落本表 |
+| `[playlist]` | 文件原子（画廊/播片共用） | TUI 不改 | 不落 |
+| `measured_*` | 文件原子（快启复用） | TUI/GUI 不改 | 只有固件校准回写 |
+| `[boot]` | 文件原子 | TUI 无页 | 不落 |

@@ -677,8 +677,8 @@ pub(crate) fn from_raw_dir(
     frame_bytes: usize,
     tag: &str,
 ) -> crate::error::Result<EagerClip> {
-    let cdir =
-        uefi::CString16::try_from(dir).map_err(|_| crate::error::NyaStatus::FromStrWithBufError)?;
+    let cdir = uefi::CString16::try_from(super::raw_list_dir(dir))
+        .map_err(|_| crate::error::NyaStatus::FromStrWithBufError)?;
     let entries = match fs.list_dir(&cdir) {
         Ok(e) => e,
         Err(crate::error::NyaStatus::Uefi(err)) if err.status() == uefi::Status::NOT_FOUND => {
@@ -712,7 +712,7 @@ pub(crate) fn from_raw_dir(
     let mut frames = Vec::new();
     let mut skipped = 0u32;
     for name in names.into_iter().take(want.max(1)) {
-        let path = alloc::format!("{}\\{}", dir, name);
+        let path = super::raw_file_path(dir, &name);
         let cstr = match uefi::data_types::CString16::try_from(path.as_str()) {
             Ok(c) => c,
             Err(_) => {

@@ -15,20 +15,70 @@ measured_vsync_fps = 0
 measured_cores = 0
 
 [render.tune]
-frames = 30
-tile_rows = 64
-vsync_fps = 60
+frames = 25
+tile_rows = 80
+vsync_fps = 79
 buffers = 0
+window = 4
 
 [play]
 fps = "auto"
 measured_max_fps = 0
+feed = "clip"
 
 [playlist]
-loop = "loop_list"
+loop = "loop_single"
 
 [[playlist.items]]
 path = "1080p/video.qois"
+
+[decode.qois]
+threads = "bsp_only"
+zero_copy = false
+streaming = false
+buffers = 0
+
+[decode.raw]
+threads = "bsp_only"
+zero_copy = false
+streaming = false
+buffers = 0
+
+[decode.hevc]
+threads = "bsp_only"
+zero_copy = false
+streaming = false
+buffers = 0
+
+[decode.avc]
+threads = "bsp_only"
+zero_copy = false
+streaming = false
+buffers = 0
+
+[decode.vp9]
+threads = "bsp_only"
+zero_copy = false
+streaming = false
+buffers = 0
+
+[decode.h263]
+threads = "bsp_only"
+zero_copy = false
+streaming = false
+buffers = 0
+
+[decode.mpeg2v]
+threads = "bsp_only"
+zero_copy = false
+streaming = false
+buffers = 0
+
+[decode.theora]
+threads = "bsp_only"
+zero_copy = false
+streaming = false
+buffers = 0
 
 [wallpaper]
 enable = false
@@ -36,6 +86,7 @@ loop = "loop_list"
 fps = "15"
 preload = 8
 popup_freeze = true
+items = []
 
 [boot]
 auto = true
@@ -50,6 +101,9 @@ strict = false
 backend = "manual"
 workers = "auto"
 dist = "auto"
+cores = 0
+roles = "auto"
+measured_workers_n = 0
 
 [async]
 executor = "dynamic"

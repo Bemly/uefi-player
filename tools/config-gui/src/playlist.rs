@@ -1,4 +1,9 @@
-//! 播放列表 / 壁纸画廊列表编辑器（同 `impl App`，跨文件只为守 1000 行上限）。
+//! 壁纸画廊列表编辑器（同 `impl App`，跨文件只为守 1000 行上限）。
+//!
+//! P5 语义（破坏式更新）：`[playlist] loop` + `[[playlist.items]]` 即壁纸的画廊列表，
+//! 不再是播放器的供片单（播放改走 `[play] media_dir` 整目录，见解码页 Global）。
+//! 内嵌编辑器家在壁纸页（P5 前在图库页右侧栏，WE 式；已搬入，图库页只剩卡片网格）。
+//! TOML 键形零改（`loop` + `[[playlist.items]]`），只换页签与注释，逻辑零改。
 //!
 //! 轮子 verdict（见根 AGENTS.md「轮子优先」，搜过才写）：
 //! - 搜过 `crates.io`：“egui drag reorder”只有 `egui_dnd`
@@ -80,29 +85,21 @@ impl App {
         next
     }
 
-    /// 播放列表循环行（读 `cfg.playlist`，写回 + 镜像同步）。
+    /// 画廊循环行（P5 起 `[playlist]` 即壁纸画廊：读 `cfg.playlist`，写回 + 镜像同步；
+    /// 页签在壁纸页画廊列表节，键形零改）。
     pub(crate) fn playlist_loop_row(&mut self, ui: &mut egui::Ui) {
         self.content_label(ui, t!("playlist.loop"));
         let cur = self.cfg.playlist.loop_mode;
-        // 借用拆开：滑杆拿 `playlist_loop_f` 可变借，文本先算好（播放页同式）。
+        // 借用拆开：滑杆拿 `playlist_loop_f` 可变借，文本先算好（加速/供片滑杆同式）。
         let mut mirror = self.playlist_loop_f;
         let next = self.loop_slider_row(ui, cur, &mut mirror, "playlist.loop_hint");
         self.cfg.playlist.loop_mode = next;
         self.playlist_loop_f = next.index() as f32;
     }
 
-    /// 壁纸画廊循环行（读 `cfg.wallpaper`，写回 + 镜像同步）。
-    pub(crate) fn wallpaper_loop_row(&mut self, ui: &mut egui::Ui) {
-        self.content_label(ui, t!("wallpaper.loop"));
-        let cur = self.cfg.wallpaper.loop_mode;
-        let mut mirror = self.wp_loop_f;
-        let next = self.loop_slider_row(ui, cur, &mut mirror, "wallpaper.loop_hint");
-        self.cfg.wallpaper.loop_mode = next;
-        self.wp_loop_f = next.index() as f32;
-    }
-
     /// 通用列表编辑器（拖拽主路 + 上/下按钮兜底 + `rfd` 新增 + 删除选中）。
-    /// `items`/`sel`/`tag` 按播放列表或壁纸画廊传入；调用方负责外层标题。
+    /// `items`/`sel`/`tag` 按画廊（`[playlist]`，唯一列表入口）传入；调用方负责外层标题。
+    /// （P5：`[[wallpaper.items]]` 已删，`wallpaper_items_editor` 同删。）
     fn list_editor(
         &mut self,
         ui: &mut egui::Ui,
@@ -220,9 +217,9 @@ impl App {
         });
     }
 
-    /// 播放列表编辑器（循环行 + 列表；`fps`/`feed` 全局默认已搬解码页顶）。
-    /// 调用方：图库页右侧栏底部（WE 式；独立 tab 已摘除）。
-    pub(crate) fn playlist_list_editor(&mut self, ui: &mut egui::Ui) {
+    /// 画廊列表编辑器（循环行 + 列表；`fps`/`feed` 全局默认已搬解码页顶）。
+    /// 调用方：壁纸页画廊列表节（P5 起 `[playlist]` 即壁纸画廊，不再是播放器供片）。
+    pub(crate) fn playlist_gallery_editor(&mut self, ui: &mut egui::Ui) {
         self.playlist_loop_row(ui);
         ui.add_space(8.0);
         // 借用拆开：编辑器要 `&mut items` + `&mut sel` + `&mut self.status`，
@@ -240,22 +237,8 @@ impl App {
         self.cfg.playlist.items = items;
         self.playlist_sel = sel;
     }
-
-    /// 壁纸画廊列表（仅列表；循环行由调用方另摆，顺序见 `[wallpaper]` 表）。
-    pub(crate) fn wallpaper_items_editor(&mut self, ui: &mut egui::Ui) {
-        let mut items = std::mem::take(&mut self.cfg.wallpaper.items);
-        let mut sel = self.wallpaper_sel;
-        self.list_editor(
-            ui,
-            &mut items,
-            &mut sel,
-            "wallpaper",
-            "wallpaper.count",
-            "wallpaper.empty",
-        );
-        self.cfg.wallpaper.items = items;
-        self.wallpaper_sel = sel;
-    }
+    // P5：`[[wallpaper.items]]` 已删，`wallpaper_items_editor` 同删
+    // （画廊唯一入口 `[playlist]`，见 `playlist_gallery_editor`）。
 }
 
 #[cfg(test)]
@@ -397,35 +380,6 @@ mod playlist_tests {
         assert!(eback.playlist.items.is_empty());
         assert_eq!(eback, empty);
     }
-
-    /// 壁纸画廊列表回写（`wallpaper-gallery-list`：2 条目 × `loop_list`，
-    /// 落盘 `[[wallpaper.items]]` + `loop` 键齐全；`enable/fps/preload` 同表）。
-    #[test]
-    fn wallpaper_gallery_list() {
-        let mut cfg = FileConfig::default();
-        cfg.wallpaper.enable = true;
-        cfg.wallpaper.loop_mode = LoopMode::LoopList;
-        cfg.wallpaper.preload = 8;
-        cfg.wallpaper.items = vec![
-            PlaylistItem {
-                path: String::from("wallpaper/wall.mp4"),
-            },
-            PlaylistItem {
-                path: String::from("wallpaper/wall.qois"),
-            },
-        ];
-        let text = toml::to_string(&cfg).unwrap();
-        assert!(
-            text.contains("loop = \"loop_list\""),
-            "loop key missing in {text}"
-        );
-        assert_eq!(text.matches("[[wallpaper.items]]").count(), 2);
-        let back: FileConfig = toml::from_str(&text).unwrap();
-        assert!(back.wallpaper.enable);
-        assert_eq!(back.wallpaper.loop_mode, LoopMode::LoopList);
-        assert_eq!(back.wallpaper.items.len(), 2);
-        assert_eq!(back.wallpaper.items[0].path, "wallpaper/wall.mp4");
-        assert_eq!(back.wallpaper.preload, 8);
-        assert_eq!(back, cfg);
-    }
+    // P5：`[[wallpaper.items]]`/`[wallpaper] loop` 已删（画廊唯一入口 `[playlist]`，
+    // 见 `playlist_list_loop` 等同名测试），`wallpaper_gallery_list` 测试同删。
 }

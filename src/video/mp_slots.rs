@@ -68,9 +68,9 @@
 use super::OSD_ROWS;
 use crate::config::{self, CopyWidth, MediaFormat, RolesMode};
 use crate::error::Result;
+use crate::font::latin::FONT_8X16;
 use crate::fs::Fs;
 use crate::graphics::{Screen, copy_block};
-use crate::video::ascii_font::FONT_8X16;
 use crate::video::decoder::{
     Clip, decode_qois_chunk, decode_raw_frame, list_raw_names, scan_qois_chunks,
 };
@@ -495,15 +495,99 @@ fn bsp_loop(ctx: &SlotTask) {
     }
 }
 
+/// 媒体根扫描（`ptui::media::scan` 同口径，本层不跨层引用）：`config::media_dir()`
+/// 单层枚举——`""`=根（`\`），否则单层子目录（`/` 转 `\`；子目录不进）；
+/// 直属文件名按字节序排序，返回 `/` 分隔相对路径。
+fn media_files(fs: &mut Fs) -> Result<Vec<String>> {
+    let dir = config::media_dir();
+    let entries: Vec<(String, bool)> = if dir.is_empty() {
+        fs.list_dir(cstr16!("\\"))?
+    } else {
+        let sub = dir.replace('/', "\\");
+        let c = uefi::CString16::try_from(sub.as_str())
+            .map_err(|_| crate::error::NyaStatus::FromStrWithBufError)?;
+        fs.list_dir(&c)?
+    };
+    let mut out: Vec<String> = entries
+        .into_iter()
+        .filter(|(_, d)| !d)
+        .map(|(n, _)| {
+            if dir.is_empty() {
+                n
+            } else {
+                alloc::format!("{}/{}", dir, n)
+            }
+        })
+        .collect();
+    out.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
+    Ok(out)
+}
+
+/// 目录直属 `frameNNNN.raw` 存在性（只读枚举；打不开按“无”处理，调用方统一 Err）。
+fn dir_has_frames(fs: &mut Fs, dir: &str) -> bool {
+    let cpath = if dir.is_empty() { "\\" } else { dir };
+    let c = match uefi::CString16::try_from(cpath) {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    let entries = match fs.list_dir(&c) {
+        Ok(e) => e,
+        Err(_) => return false,
+    };
+    entries
+        .into_iter()
+        .filter(|(_, d)| !d)
+        .map(|(n, _)| n)
+        .any(|n| crate::config::is_raw_frame_path(&n))
+}
+
+/// raw 帧目录定位（media 单层口径）：media_dir 自身直属 frame 文件 → media_dir 自身；
+/// 否则仅当 media 为根（`""`）时再看一层子目录（字节序，首个含帧者）；
+/// 找不到回 `video: no valid frames`（空集同口径）。
+fn raw_frame_dir(fs: &mut Fs) -> Result<String> {
+    let dir = config::media_dir();
+    let here = dir.replace('/', "\\");
+    // 1) media_dir 自身：直属 frame 文件即命中（含根 `""` 直属帧）。
+    if dir_has_frames(fs, &here) {
+        return Ok(here);
+    }
+    // 2) 根布局兼容：根下子目录逐个看（字节序，首个含帧者；旧写死 `"1080p"` 的扫描替代）。
+    if dir.is_empty() {
+        let mut subs: Vec<String> = fs
+            .list_dir(cstr16!("\\"))?
+            .into_iter()
+            .filter(|(_, d)| *d)
+            .map(|(n, _)| n)
+            .collect();
+        subs.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
+        for sub in subs {
+            if dir_has_frames(fs, &sub) {
+                return Ok(sub);
+            }
+        }
+    }
+    Err(crate::error::NyaStatus::_Debug(alloc::format!(
+        "video: no valid frames"
+    )))
+}
+
 /// BSP scan-split（`mp_draw_slots` 落点前半）：读片源 + 复用已有分块扫描，
 /// 返回常驻只读编码源 + (视频行字节, 视频高)。空集直接 `video: no valid frames`。
-/// - qois：整文件读（load 期同路径已读过一次，此处为真解码会话再读一次，
+/// - qois：媒体根首个 `.qois` 整文件读（load 期同路径已读过一次，此处为真解码会话再读一次，
 ///   一次性 I/O；不复用 `Clip.lazy` 内部编码块——`source` 模块只读，字段不可见）。
-/// - raw：只枚举名表（`list_raw_names` 本体），帧字节 AP 按需现读，不预读。
+/// - raw：帧目录扫描定位后只枚举名表（`list_raw_names` 本体），帧字节 AP 按需现读，不预读。
 fn scan_split(fs: &mut Fs) -> Result<(SlotSource, usize, usize)> {
     match config::play_format() {
         MediaFormat::Qois => {
-            let file = fs.open_file(cstr16!("1080p\\video.qois"))?;
+            // 首个 `.qois`（字节序；media 单层口径，扩展名即定，无需探针 I/O，解码自校验）。
+            let rel = media_files(fs)?
+                .into_iter()
+                .find(|p| p.to_ascii_lowercase().ends_with(".qois"))
+                .ok_or_else(|| {
+                    crate::error::NyaStatus::_Debug(alloc::format!("video: no valid frames"))
+                })?;
+            let c = crate::video::play::path_cstr16(&rel)?;
+            let file = fs.open_file(&c)?;
             let data = Clip::read_whole_file(file, "video")?;
             let ranges = scan_qois_chunks(&data);
             if ranges.is_empty() {
@@ -550,7 +634,9 @@ fn scan_split(fs: &mut Fs) -> Result<(SlotSource, usize, usize)> {
             ))
         }
         _ => {
-            let names = list_raw_names(fs, "1080p", usize::MAX, "video")?;
+            // 帧目录扫描定位（旧写死 `"1080p"` 的替代；名表枚举口径不变）。
+            let dir = raw_frame_dir(fs)?;
+            let names = list_raw_names(fs, &dir, usize::MAX, "video")?;
             if names.is_empty() {
                 return Err(crate::error::NyaStatus::_Debug(alloc::format!(
                     "video: no valid frames"
@@ -564,7 +650,7 @@ fn scan_split(fs: &mut Fs) -> Result<(SlotSource, usize, usize)> {
             log::info!("mp: slots scan raw frames={} {}x{}", total, rw, rh);
             Ok((
                 SlotSource::Raw {
-                    dir: "1080p",
+                    dir: Box::leak(dir.into_boxed_str()),
                     names: names_leaked,
                     frame_bytes: rw * rh * 4,
                     total,

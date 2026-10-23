@@ -189,9 +189,12 @@ pub(crate) fn run_case(
         ),
     ];
     if case.needs_video {
+        // P6 convention：供片放镜像根目录（`video.qois`；`1080p/` 硬编码已删除；
+        // `wallpaper/` 壁纸目录与 `720p/` 几何目录保留）。
+        // 主机源仍在 `usb_reports/1080p/video.qois`（二进制不入库）。
         let src = format!("{ROOT}/usb_reports/1080p/video.qois");
         match std::fs::read(&src) {
-            Ok(d) => files.push(("1080p/video.qois", d)),
+            Ok(d) => files.push(("video.qois", d)),
             Err(_) => return (false, format!("missing {src}")),
         }
     }
@@ -203,9 +206,9 @@ pub(crate) fn run_case(
         ));
     }
     if case.needs_raws > 0 {
-        // 播片 raws 片源：`1080p/video.raws` 黑场 N 帧首尾相接（单文件路只走通路）。
+        // 播片 raws 片源：根目录 `video.raws` 黑场 N 帧首尾相接（单文件路只走通路）。
         files.push((
-            "1080p/video.raws",
+            "video.raws",
             vec![0u8; case.needs_raws as usize * 1920 * 1080 * 4],
         ));
     }
@@ -232,11 +235,13 @@ pub(crate) fn run_case(
             Err(_) => return (false, format!("missing {src}")),
         }
     }
+    // 播片裸流/容器探针片源：根目录 `video.*`（P6 convention；`1080p/` 前缀已删除，
+    // 只改目标路径，主机源路径不动）。壁纸 `wallpaper/` 目标不动。
     if case.needs_hevcvideo {
         // 播片 hevc 片源：探针样片（Annex-B，320x240×10 帧，只走通路不断言画质）。
         let src = format!("{ROOT}/src/diag/data/hevc_probe_main.265");
         match std::fs::read(&src) {
-            Ok(d) => files.push(("1080p/video.hevc", d)),
+            Ok(d) => files.push(("video.hevc", d)),
             Err(_) => return (false, format!("missing {src}")),
         }
     }
@@ -244,7 +249,7 @@ pub(crate) fn run_case(
         // 播片 vp9 片源：探针样片（IVF，160x120×10 帧，只走通路不断言画质）。
         let src = format!("{ROOT}/src/diag/data/vp9_probe.ivf");
         match std::fs::read(&src) {
-            Ok(d) => files.push(("1080p/video.ivf", d)),
+            Ok(d) => files.push(("video.ivf", d)),
             Err(_) => return (false, format!("missing {src}")),
         }
     }
@@ -252,7 +257,7 @@ pub(crate) fn run_case(
         // 播片 avc 片源：MP4 样片（avc 轨，160x120×10 帧，只走通路不断言画质）。
         let src = format!("{ROOT}/src/diag/data/video-avc.mp4");
         match std::fs::read(&src) {
-            Ok(d) => files.push(("1080p/video.mp4", d)),
+            Ok(d) => files.push(("video.mp4", d)),
             Err(_) => return (false, format!("missing {src}")),
         }
     }
@@ -260,7 +265,7 @@ pub(crate) fn run_case(
         // 播片 hevc-MP4 片源：MP4 样片（hev 轨，160x120×10 帧，只走通路不断言画质）。
         let src = format!("{ROOT}/src/diag/data/video-hevc.mp4");
         match std::fs::read(&src) {
-            Ok(d) => files.push(("1080p/video.mp4", d)),
+            Ok(d) => files.push(("video.mp4", d)),
             Err(_) => return (false, format!("missing {src}")),
         }
     }
@@ -268,7 +273,7 @@ pub(crate) fn run_case(
         // 播片 vp9-MP4 片源：MP4 样片（vp09 轨，160x120×10 帧，只走通路不断言画质）。
         let src = format!("{ROOT}/src/diag/data/video-vp9.mp4");
         match std::fs::read(&src) {
-            Ok(d) => files.push(("1080p/video.mp4", d)),
+            Ok(d) => files.push(("video.mp4", d)),
             Err(_) => return (false, format!("missing {src}")),
         }
     }
@@ -276,7 +281,7 @@ pub(crate) fn run_case(
         // 播片 h263 片源：裸流样片（QCIF 128x96×10 帧，只走通路不断言画质）。
         let src = format!("{ROOT}/src/diag/data/video.h263");
         match std::fs::read(&src) {
-            Ok(d) => files.push(("1080p/video.h263", d)),
+            Ok(d) => files.push(("video.h263", d)),
             Err(_) => return (false, format!("missing {src}")),
         }
     }
@@ -284,7 +289,7 @@ pub(crate) fn run_case(
         // 播片 mpeg2v 片源：裸基本流样片（160x120×10 帧，只走通路不断言画质）。
         let src = format!("{ROOT}/src/diag/data/video.m2v");
         match std::fs::read(&src) {
-            Ok(d) => files.push(("1080p/video.m2v", d)),
+            Ok(d) => files.push(("video.m2v", d)),
             Err(_) => return (false, format!("missing {src}")),
         }
     }
@@ -292,7 +297,7 @@ pub(crate) fn run_case(
         // 播片 theora 片源：Ogg 样片（160x120×10 帧，只走通路不断言画质）。
         let src = format!("{ROOT}/src/diag/data/video.ogv");
         match std::fs::read(&src) {
-            Ok(d) => files.push(("1080p/video.ogv", d)),
+            Ok(d) => files.push(("video.ogv", d)),
             Err(_) => return (false, format!("missing {src}")),
         }
     }
