@@ -1,5 +1,5 @@
 # 70-ptui.toml：QEMU 黑盒矩阵分组（`matrix/` 目录，TUI 前端用例）。
-# 共 4 cases，单文件 ≤1000 行（AGENTS 口径）。新增 case 按前缀落对应文件，并写 `covers`。
+# 共 5 cases，单文件 ≤1000 行（AGENTS 口径）。新增 case 按前缀落对应文件，并写 `covers`。
 #
 # TUI 串口契约（以外壳已落地实现为准，见 `src/ptui/mod.rs` + `src/idle.rs`）：
 # - 待机按 p：`idle: ptui mode`（warn）→ `ptui: open`（warn）→ `ptui: page=home`；
@@ -166,3 +166,51 @@ keys = [
   { send = "p", wait_for = ["idle: ready (press any key)"], wait_after = 3 },
 ]
 expect = ["idle: ptui mode", "ptui: open", "ptui: page=home"]
+
+# 播片按键退出（`video/loops.rs` 任意键返回 `Ok` 的回归锁）：
+# 首页 `1` 进播放页 → 数字 `1` 播小片源（`needs_h263video`，QCIF 128x96×10 帧，
+# 复用已有探针样片，不造大文件；`[playlist]` 同步一项，新旧实现双兼容）
+# → 播起后（`ptui: play 0 path=` 卡点）发 `x` 退出
+# （`blt_loop`/`direct_loop` 见键即 `Ok`，本例 `direct` 盖 `direct_loop`）
+# → 回播放页（`ptui: page=play` 第二次出现，`goto` 在 `play_index` 返回后重记）
+# + `ptui: back from play 0`。forbid 照抄全局红线，不另加。
+[[case]]
+name = "ptui-play-exit"
+covers = ["src/video/loops.rs", "src/ptui/pages/play.rs"]
+timeout_sec = 240
+needs_h263video = true
+forbid = ["panicked at", "CpuDeadLoop", "No valid frames", "startup_all_aps failed"]
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+vsync = "off"
+[play]
+fps = "max"
+feed = "clip"
+[playlist]
+loop = "loop_list"
+[[playlist.items]]
+path = "video.h263"
+[wallpaper]
+enable = false
+[schedule]
+backend = "manual"
+workers = "bsp_only"
+dist = "static"
+[decode.h263]
+threads = "all"
+zero_copy = true
+streaming = true
+buffers = 8
+"""
+boot_expect = ["cfg: version=1", "play.feed=Clip", "idle: ready"]
+keys = [
+  { send = "p", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
+  { send = "1", wait_for = ["ptui: page=home"], wait_after = 2 },
+  { send = "1", wait_for = ["ptui: media dir='<root>' count=1"], wait_after = 5 },
+  { send = "x", wait_for = ["ptui: play 0 path=video.h263"], wait_after = 3 },
+]
+expect = ["ptui: open", "ptui: page=home", { pat = "ptui: page=play", count = 2 }, "ptui: media dir='<root>' count=1", "ptui: play 0 path=video.h263", "play: path=direct_loop", "ptui: back from play 0"]
