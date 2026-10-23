@@ -20,13 +20,32 @@
 //! 在 `tick`（闭包外）做，闭包内只读当前 native id 绘制。paint 回调（nounwind，
 //! panic 即 abort，血泪）里本模块零逻辑——转换提交全在 `tick` 内同步做完。
 //!
-//! 内存纪律：整片循环 + `sync_channel(4)` 背压（NV12 约 5.6MB），UI 按
-//! min(源 fps, 15) 定速消费，播完即重建解码器回绕（干净 IDR，无跨轮参考）。
+//! 内存纪律：整片循环 + `sync_channel(4)` 背压（NV12 约 5.6MB）+ B 帧重排窗
+//! （定深 8，约 11MB 上限，不攒整组），UI 按 min(源 fps, 15) 定速消费，播完即
+//! 重建解码器回绕（干净 IDR，无跨轮参考）。
 
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TryRecvError};
 use std::time::{Duration, Instant};
 
 use egui_wgpu::wgpu;
+
+/// B 帧重排窗深：VT 按解码序吐帧，攒够即按 pts 取最小发出（显示序）；
+/// 定窗免攒整组（长 GOP 不爆内存），深度盖 x264 默认连 B（High 档实测 4 连 B）。
+const REORDER_DEPTH: usize = 8;
+
+/// 窗内取最小 pts（B 帧重排；纯规则，可单测；空窗即 None，不断流）。
+fn pop_earliest<T>(pending: &mut Vec<(i128, T)>) -> Option<(i128, T)> {
+    if pending.is_empty() {
+        return None;
+    }
+    let mut k = 0;
+    for i in 1..pending.len() {
+        if pending[i].0 < pending[k].0 {
+            k = i;
+        }
+    }
+    Some(pending.remove(k))
+}
 
 /// 内嵌默认背景（`assets/dsxhgm.mp4`，avc 720p60 整片循环；编进二进制，
 /// 图库无集内项时回落于此，无外部文件依赖）。
@@ -753,6 +772,9 @@ fn decode_bytes(data: Vec<u8>, tx: SyncSender<BgMsg>) {
             }
         };
         let mut elapsed = 0.0f64;
+        // B 帧重排窗：VT 按解码序吐帧（High 档 P,P,B,B,B…），攒够按 pts 取最小
+        // 发出（显示序）；窗满才吐，深度盖连 B，不断流、不攒整组。
+        let mut pending: Vec<(i128, (u32, u32, Vec<u8>, Vec<u8>))> = Vec::new();
         // 首组前缀（SPS/PPS）VideoToolbox 建会话时已消费，此处只喂样片负载
         // （length-prefixed AVCC，与 `nalu_len_bytes` 一致，无需转 Annex-B）。
         for g in &demuxed.groups {
@@ -761,17 +783,22 @@ fn decode_bytes(data: Vec<u8>, tx: SyncSender<BgMsg>) {
                 match dec.decode(&r.payload) {
                     Ok(Some(frame)) => {
                         if let Some((w, h, y, uv)) = frame_to_nv12(&frame) {
-                            // 背压：UI 跟不上即阻塞在此，不堆内存。
-                            if tx.send(BgMsg::FrameNv12 { w, h, y, uv }).is_err() {
-                                return;
-                            }
-                            let wall_secs = wall_start.elapsed().as_secs_f64();
-                            let sleep_ms = VideoBg::pace_sleep_ms(elapsed, wall_secs);
-                            if sleep_ms > 0 {
-                                std::thread::sleep(std::time::Duration::from_millis(sleep_ms));
-                            }
+                            pending.push((r.pts, (w, h, y, uv)));
                         }
                         // `None`（隐藏帧/重排等待）不计帧，继续喂。
+                        while pending.len() > REORDER_DEPTH {
+                            if let Some((_, (w, h, y, uv))) = pop_earliest(&mut pending) {
+                                // 背压：UI 跟不上即阻塞在此，不堆内存。
+                                if tx.send(BgMsg::FrameNv12 { w, h, y, uv }).is_err() {
+                                    return;
+                                }
+                                let wall_secs = wall_start.elapsed().as_secs_f64();
+                                let sleep_ms = VideoBg::pace_sleep_ms(elapsed, wall_secs);
+                                if sleep_ms > 0 {
+                                    std::thread::sleep(std::time::Duration::from_millis(sleep_ms));
+                                }
+                            }
+                        }
                     }
                     Ok(None) => {}
                     Err(e) => {
@@ -780,6 +807,17 @@ fn decode_bytes(data: Vec<u8>, tx: SyncSender<BgMsg>) {
                         continue;
                     }
                 }
+            }
+        }
+        // 整片播完排空窗口（显示序），再回绕。
+        while let Some((_, (w, h, y, uv))) = pop_earliest(&mut pending) {
+            if tx.send(BgMsg::FrameNv12 { w, h, y, uv }).is_err() {
+                return;
+            }
+            let wall_secs = wall_start.elapsed().as_secs_f64();
+            let sleep_ms = VideoBg::pace_sleep_ms(elapsed, wall_secs);
+            if sleep_ms > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(sleep_ms));
             }
         }
         // 整片播完即回绕（从头再播，同 loop 语义）。
@@ -968,8 +1006,11 @@ fn decode_bytes(data: Vec<u8>, tx: SyncSender<BgMsg>) {
         };
         // 首包带 SPS/PPS 前缀（`gpu-video` 吃 Annex-B bytestream，见上游 player 示例；
         // 本仓 `length_size` 前缀先转 Annex-B，与固件 `demux_mp4_track` 同式）。
+        // B 帧重排窗：同 VT 路，攒够按 pts 取最小发出（显示序；同输入多帧同 pts
+        // 按解码序，`pop_earliest` 稳定）。
         let mut first = true;
         let mut elapsed = 0.0f64;
+        let mut pending: Vec<(i128, (u32, u32, Vec<u8>, Vec<u8>))> = Vec::new();
         for g in &demuxed.groups {
             for r in g {
                 elapsed += r.dur;
@@ -988,6 +1029,11 @@ fn decode_bytes(data: Vec<u8>, tx: SyncSender<BgMsg>) {
                             if let Some((w, h, y, uv)) =
                                 split_nv12(&f.data.frame, f.data.width, f.data.height)
                             {
+                                pending.push((r.pts, (w, h, y, uv)));
+                            }
+                        }
+                        while pending.len() > REORDER_DEPTH {
+                            if let Some((_, (w, h, y, uv))) = pop_earliest(&mut pending) {
                                 if tx.send(BgMsg::FrameNv12 { w, h, y, uv }).is_err() {
                                     return;
                                 }
@@ -1007,7 +1053,17 @@ fn decode_bytes(data: Vec<u8>, tx: SyncSender<BgMsg>) {
                 }
             }
         }
-        // 整片播完即回绕（`flush` 把重排延迟帧吐完再绕，不丢尾）。
+        // 整片播完排空窗口（显示序）再回绕（`flush` 把重排延迟帧吐完，不丢尾）。
+        while let Some((_, (w, h, y, uv))) = pop_earliest(&mut pending) {
+            if tx.send(BgMsg::FrameNv12 { w, h, y, uv }).is_err() {
+                return;
+            }
+            let wall_secs = wall_start.elapsed().as_secs_f64();
+            let sleep_ms = VideoBg::pace_sleep_ms(elapsed, wall_secs);
+            if sleep_ms > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(sleep_ms));
+            }
+        }
     }
 }
 
@@ -1071,6 +1127,25 @@ mod video_bg_tests {
         // 此处只锁死实时节拍仍在（逐帧按 pts 睡，不赶帧）。
         assert_eq!(VideoBg::pace_sleep_ms(2.0, 1.0), 1000);
         assert_eq!(VideoBg::pace_sleep_ms(1.0, 2.0), 0);
+    }
+
+    #[test]
+    fn reorder_window_emits_display_order() {
+        // 解码序 P0,P4,B1,B2,B3（High 档连 B）→ 显示序 0,1,2,3,4；空窗 None。
+        assert_eq!(pop_earliest(&mut Vec::<(i128, u8)>::new()), None);
+        let mut w: Vec<(i128, u8)> = vec![];
+        let mut out = Vec::new();
+        for (pts, v) in [(0, 0u8), (4, 4), (1, 1), (2, 2), (3, 3)] {
+            w.push((pts, v));
+            while w.len() > 2 {
+                out.push(pop_earliest(&mut w).unwrap());
+            }
+        }
+        while let Some(p) = pop_earliest(&mut w) {
+            out.push(p);
+        }
+        let seq: Vec<u8> = out.into_iter().map(|(_, v)| v).collect();
+        assert_eq!(seq, vec![0, 1, 2, 3, 4]);
     }
 
     #[test]
