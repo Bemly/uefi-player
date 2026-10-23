@@ -107,7 +107,9 @@ jobs:
             libxi-dev libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
             libvulkan-dev libdbus-1-dev
       - name: Host triple
-        run: echo "HOST=$(rustc -vV | sed -n 's/^host: //p')" >> "$GITHUB_ENV"
+        # 块标量：纯标量里的 `host: ` 会被 YAML 当成键值分隔符（首版即栽于此）。
+        run: |
+          echo "HOST=$(rustc -vV | sed -n 's/^host: //p')" >> "$GITHUB_ENV"
       - name: Build (Linux / Windows)
         if: runner.os != 'macOS'
         run: cargo build --release --manifest-path tools/config-gui/Cargo.toml --target "$HOST"
