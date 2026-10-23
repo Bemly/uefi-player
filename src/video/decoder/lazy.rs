@@ -548,12 +548,11 @@ pub(crate) fn h263_bytes(
     mode: FeedMode,
 ) -> crate::error::Result<super::Clip> {
     use h263_rs::parser::H263Reader;
-    let leaked: &'static mut [u8] = alloc::boxed::Box::leak(data.to_vec().into_boxed_slice());
-    let s: &'static [u8] = leaked;
+    let owned = super::source::OwnedBytes::new(data);
     let source = Source::H263 {
-        data: s,
-        reader: H263Reader::from_source(s),
+        reader: H263Reader::from_source(unsafe { owned.as_static() }),
         state: h263_rs::H263State::new(h263_rs::DecoderOption::empty()),
+        data: owned,
     };
     // 流式免预切：总数未知（`None` 截断，`len` 取 `MAX`）。
     LazyState::build(tag, mode, source, usize::MAX, None, MediaFormat::H263)
@@ -679,12 +678,11 @@ pub(crate) fn vp9_single_raw_frames(
 
 pub(crate) fn h263_single_bytes(data: &[u8], tag: &str) -> crate::error::Result<super::Clip> {
     use h263_rs::parser::H263Reader;
-    let leaked: &'static mut [u8] = alloc::boxed::Box::leak(data.to_vec().into_boxed_slice());
-    let s: &'static [u8] = leaked;
+    let owned = super::source::OwnedBytes::new(data);
     let source = Source::H263 {
-        data: s,
-        reader: H263Reader::from_source(s),
+        reader: H263Reader::from_source(unsafe { owned.as_static() }),
         state: h263_rs::H263State::new(h263_rs::DecoderOption::empty()),
+        data: owned,
     };
     LazyState::build_single(tag, source, usize::MAX, None)
 }

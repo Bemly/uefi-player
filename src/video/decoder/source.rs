@@ -24,6 +24,37 @@ use uefi::proto::console::gop::BltPixel;
 
 use crate::video::buffer::{BltFrameBuffer, QoiFrameBuffer, RawFrameBuffer};
 
+/// 自引用解码器（`H263Reader<&[u8]>`）的字节所有者：堆上一块，借出 `'static`
+/// 切片给 reader，`Drop` 时归还（旧版 `Box::leak` 每次进播放都漏一整份片源）。
+/// 安全口径：借出的切片只存进同一 `Source::H263` 变体里排在本字段之前的
+/// 字段（先 drop），所有者不外借、不克隆。
+pub(crate) struct OwnedBytes(core::ptr::NonNull<[u8]>);
+
+impl OwnedBytes {
+    pub(crate) fn new(data: &[u8]) -> Self {
+        let b: Box<[u8]> = data.to_vec().into_boxed_slice();
+        Self(core::ptr::NonNull::from(Box::leak(b)))
+    }
+
+    /// 借出 `'static` 切片。
+    ///
+    /// # Safety
+    /// 切片只能交给与本所有者同生命周期、先于它 drop 的字段。
+    pub(crate) unsafe fn as_static(&self) -> &'static [u8] {
+        unsafe { self.0.as_ref() }
+    }
+}
+
+impl Drop for OwnedBytes {
+    fn drop(&mut self) {
+        drop(unsafe { Box::from_raw(self.0.as_ptr()) });
+    }
+}
+
+// 只读字节，所有权唯一：跨核搬运与 `Box<[u8]>` 同性质。
+unsafe impl Send for OwnedBytes {}
+unsafe impl Sync for OwnedBytes {}
+
 /// 编码分块 + 有状态解码会话（内存赢在解码帧侧：编码侧保留，分块复用）。
 pub(crate) enum Source {
     Qois {
@@ -59,11 +90,11 @@ pub(crate) enum Source {
         pending: VecDeque<Vec<BltPixel>>,
     },
     H263 {
-        /// 会话期泄漏（`Box::leak` 常驻，仓内既有风格）：reader 拥有 `&[u8]`
-        /// 切片，自引用结构只能借静态片；`reset` 只重建 reader/state，不重泄漏。
-        data: &'static [u8],
+        /// reader 借 `data` 的切片（自引用）；字段声明序即 drop 序，
+        /// `data` 必须排最后（reader/state 先放，再还内存）。`reset` 只重建 reader/state。
         reader: h263_rs::parser::H263Reader<&'static [u8]>,
         state: h263_rs::H263State,
+        data: OwnedBytes,
     },
     Mpeg2v {
         data: Vec<u8>,
@@ -719,7 +750,7 @@ impl Source {
                 reader,
                 state,
             } => {
-                *reader = h263_rs::parser::H263Reader::from_source(*data);
+                *reader = h263_rs::parser::H263Reader::from_source(unsafe { data.as_static() });
                 *state = h263_rs::H263State::new(h263_rs::DecoderOption::empty());
             }
             Source::Mpeg2v {

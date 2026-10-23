@@ -127,7 +127,9 @@ pub fn chainload_efi(
     let image = ImageLoader::load(request).map_err(anyhow_err)?;
     let mut guard = UnloadGuard(Some(*image.handle()));
 
-    // BLS `options` 行透传（空串按无处理）；pin 住等 start 完成再释放。
+    // BLS `options` 行透传（空串按无处理）；pin 住等 start 完成再释放
+    // （绑定必须活在函数作用域：LoadedImage 只存裸指针，提前 drop 即悬垂）。
+    let mut _opts_keep = None;
     if let Some(opts) = edera_sprout_parsing::empty_is_none(options) {
         let opts = alloc::boxed::Box::pin(
             uefi::CString16::try_from(opts).map_err(|_| NyaStatus::FromStrWithBufError)?,
@@ -143,12 +145,14 @@ pub fn chainload_efi(
                 lip.set_load_options(opts.as_ptr() as *const u8, opts.num_bytes() as u32);
             }
         }
+        _opts_keep = Some(opts);
     }
 
     // 即将交权：镜像不再归我们 unload（固件在它退出时处理）。
     log::warn!("boot: starting image");
     guard.0 = None;
     uefi::boot::start_image(*image.handle())?;
+    drop(_opts_keep);
     Ok(())
 }
 
@@ -213,13 +217,14 @@ pub fn chainload_linux(
 
     // options 为空填 placeholder（stubble 非空断言，上游同款）。
     let opts = edera_sprout_parsing::empty_is_none(options.map(str::trim)).unwrap_or("placeholder");
+    // 绑定活到 start_image 返回（LoadedImage 只存裸指针，块内 drop 即悬垂）。
+    let opts = alloc::boxed::Box::pin(
+        uefi::CString16::try_from(opts).map_err(|_| NyaStatus::FromStrWithBufError)?,
+    );
+    if opts.num_bytes() > u32::MAX as usize {
+        return Err(NyaStatus::_Debug(String::from("boot: options too large")));
+    }
     {
-        let opts = alloc::boxed::Box::pin(
-            uefi::CString16::try_from(opts).map_err(|_| NyaStatus::FromStrWithBufError)?,
-        );
-        if opts.num_bytes() > u32::MAX as usize {
-            return Err(NyaStatus::_Debug(String::from("boot: options too large")));
-        }
         let mut lip = uefi::boot::open_protocol_exclusive::<uefi::proto::loaded_image::LoadedImage>(
             *image.handle(),
         )?;
@@ -273,6 +278,7 @@ pub fn chainload_linux(
     let result = uefi::boot::start_image(*image.handle());
     drop(initrd_handle);
     drop(dt_handle);
+    drop(opts);
     result?;
     Ok(())
 }

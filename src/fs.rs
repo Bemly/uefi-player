@@ -91,8 +91,8 @@ impl Fs {
 
     /// 列目录直属项 `(名, 是否目录)`。`uefi-rs` 没有现成 walker，
     /// `read_entry` 循环 20 行自研（见 `src/boot/entries.rs` 头注释轮子结论）。
-    /// 固定 512B 缓冲：FAT 长文件名一般够用，超长返回 BUFFER_TOO_SMALL 即停
-    /// （调用方记 warning，不炸；BLS/壁纸文件名都是短名）。
+    /// 起步 512B 缓冲：超长文件名返回 BUFFER_TOO_SMALL 时按固件给的尺寸扩容重读
+    /// （旧版直接停，会把后面的目录项整段吞掉）。
     pub fn list_dir(&mut self, path: &CStr16) -> Result<Vec<(String, bool)>> {
         let mut dir = self.open_dir(path)?;
         let mut out = Vec::new();
@@ -107,7 +107,10 @@ impl Fs {
                     }
                     out.push((name, info.is_directory()));
                 }
-                Err(e) if e.status() == Status::BUFFER_TOO_SMALL => break,
+                Err(e) if e.status() == Status::BUFFER_TOO_SMALL => match *e.data() {
+                    Some(size) if size > buf.len() => buf.resize(size, 0),
+                    _ => break,
+                },
                 Err(e) => Err(e.status())?,
             }
         }
@@ -133,9 +136,23 @@ impl Fs {
             }
         };
 
-        // 获取完整内容
-        let mut file_content = vec![0u8; info.file_size() as usize];
-        file.read(&mut file_content)?;
+        // 获取完整内容：大文件（视频/内核）分配失败返回错误而不是 abort；
+        // 固件短读是常态，循环读满，提前 EOF 按实际长度截断。
+        let size = usize::try_from(info.file_size()).map_err(|_| Status::OUT_OF_RESOURCES)?;
+        let mut file_content: Vec<u8> = Vec::new();
+        file_content
+            .try_reserve_exact(size)
+            .map_err(|_| Status::OUT_OF_RESOURCES)?;
+        file_content.resize(size, 0);
+        let mut done = 0;
+        while done < size {
+            let n = file.read(&mut file_content[done..])?;
+            if n == 0 {
+                break;
+            }
+            done += n;
+        }
+        file_content.truncate(done);
 
         Ok(file_content)
     }

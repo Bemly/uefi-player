@@ -428,8 +428,14 @@ pub fn demux_ogg_packets(data: &[u8], tag: &str) -> crate::error::Result<Vec<Vec
         ]);
         if crc != want_crc {
             skipped += 1;
+            // 坏页可能正好带着跨页包的续段：半包丢掉，免得和下一页拼成坏包。
+            cur.clear();
             off = body_off + body_len;
             continue;
+        }
+        // 非续页（header_type bit0 = 0）却有残留半包：前页丢过段，残包作废。
+        if data[off + 5] & 0x01 == 0 && !cur.is_empty() {
+            cur.clear();
         }
         // 按段表组 packet（255 = 续段）。
         let mut boff = body_off;

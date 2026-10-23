@@ -52,7 +52,7 @@ pub fn handle_fatal(err: NyaStatus, screen: &mut Screen) -> ! {
         _ => println!("FATAL ERROR: {:?}", err),
     }
 
-    println!("System will stall for 1 minute before returning.");
+    println!("System will stall for 2 minutes before returning.");
 
     stall(Duration::from_mins(2));
 
