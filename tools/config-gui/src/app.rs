@@ -368,6 +368,9 @@ impl App {
             let p = app.path.clone();
             app.load_path(p);
         }
+        // 启动即刷图库：默认背景跟随图库首个 avc/hevc，不等人点刷新。
+        let p = app.path.clone();
+        app.gallery.refresh(&p);
         app
     }
 
@@ -554,6 +557,9 @@ impl App {
                     self.tune_at_load = self.cfg.render.tune;
                     self.status = msg;
                     self.path = path;
+                    // 换文件即换图库：默认背景跟随新目录首个 avc/hevc。
+                    let p = self.path.clone();
+                    self.gallery.refresh(&p);
                 }
                 Err(e) => {
                     self.status =
