@@ -287,7 +287,7 @@ pub(crate) fn default_window() -> u32 {
 }
 
 pub(crate) fn default_buffers() -> u32 {
-    0
+    2
 }
 
 pub(crate) fn default_media_dir() -> String {

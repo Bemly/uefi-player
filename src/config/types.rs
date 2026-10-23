@@ -462,7 +462,7 @@ pub(crate) const fn default_tile_rows() -> u32 {
 }
 
 pub(crate) const fn default_buffers() -> u32 {
-    0
+    2
 }
 
 pub(crate) const fn default_window() -> u32 {

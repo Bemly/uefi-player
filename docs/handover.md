@@ -47,7 +47,7 @@ third_party/sprout 只读 submodule，只依赖 5 个 lib
    `half` 复用冠军 cell 计时算 max/2，落盘 `measured_vsync_fps` 复用。
    旧文件 `"on"` 用 serde alias 照读，不炸旧配置。
    所有 60fps 硬编码描述已清（预算一律走 `effective_vsync_fps()`）。
-3. **后缓冲 `tune.buffers`（0-16，默认 0）**：直写路先画影子再整推（撕裂窗口压成
+3. **后缓冲 `tune.buffers`（0-16，默认 2）**：直写路先画影子再整推（撕裂窗口压成
    一次 push）；mp 路 BSP 整推（Blt 引擎，失败回退 CPU 整推）；
    `push_gen` 世代同步（N==1 也无竞态）；OSD 先画进影子再随推上屏。
    Blt 单发路不用（已是单 push）。

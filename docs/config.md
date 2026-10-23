@@ -38,7 +38,7 @@ measured_cores   = 0       # 校准时机型 AP+BSP 总数
 frames    = 30          # 每次矩阵/微基准的帧数（>=1，GUI 1-120）
 tile_rows = 64          # tile 高（行），MP 自调度切块粒度（8-512）
 vsync_fps = 60          # vsync 预算帧率：static 的封顶 + auto 探测达标线（15-240）
-buffers   = 0           # 后缓冲帧数（0-16；0 = 直写前台，>0 = 影子环 + 整推；Blt 单发路不用）
+buffers   = 2           # 后缓冲帧数（0-16；0 = 直写前台，>0 = 影子环 + 整推；缺省 2，多 16MB 影子内存，消 direct+buffers=0 在慢片上的全屏涂黑闪烁；Blt 单发路不用）
 window    = 4           # 流式供片窗口（`[play] feed = "stream"` 的解码帧缓存数，1-32；
                         # 只对 stream 生效，其余供片忽略；缺键老文件按 4 照读）
 

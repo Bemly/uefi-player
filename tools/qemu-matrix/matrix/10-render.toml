@@ -106,8 +106,9 @@ dist = "static"
 boot_expect = ["cfg: version=1", "idle: ready"]
 expect = ["half probe winner_ticks", "budget"]
 
-# 后缓冲影子环：buffers=2 + auto 单核矩阵（单 cell 经 upload_frame 整推），
-# 影子起用行必须出现（无上屏动作时环永不起，这是预期行为）。无按键。
+# 后缓冲影子环缺省：缺省 buffers=2（`[render.tune]` 不写键）+ auto 单核矩阵
+# （单 cell 经 upload_frame 整推），影子起用行必须出现。显式 buffers=2 同效，
+# 其解析由 GUI 笛卡尔（tune roundtrip/clamp）覆盖。无按键。
 [[case]]
 name = "matrix-buffers"
 covers = []
@@ -119,7 +120,6 @@ level = "auto"
 [render]
 mode = "auto"
 vsync = "off"
-tune = { buffers = 2 }
 [play]
 fps = "max"
 [wallpaper]

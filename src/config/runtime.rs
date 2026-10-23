@@ -34,7 +34,7 @@ use super::{
 /// - `vsync_mode`/`vsync_fps`：`[render] vsync`（默认 auto）+ `[render.tune] vsync_fps`
 ///  （默认 60，钳 15-240）。
 /// - `tune_*`：`[render.tune]` 四键（frames/tile_rows/buffers/window，
-///   默认 30/64/0/4，钳制口径见 `apply_cfg`）。
+///   默认 30/64/2/4，钳制口径见 `apply_cfg`）。
 /// - `display_*`：`[display]` 三键（fit/align/bar，默认 fit/center/black）。
 /// - `decode`：`[decode.<fmt>]` 八格式表（沿用现有每表类型，缺表缺键全默认）。
 #[derive(Debug, Clone)]
@@ -107,7 +107,7 @@ static mut RUNTIME: PlayerRuntime = PlayerRuntime {
     vsync_fps: 60,
     tune_frames: 30,
     tune_tile_rows: 64,
-    tune_buffers: 0,
+    tune_buffers: 2,
     tune_window: 4,
     display_fit: DisplayFit::Fit,
     display_align: DisplayAlign::Center,
