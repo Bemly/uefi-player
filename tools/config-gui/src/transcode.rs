@@ -76,7 +76,8 @@ impl TranscodeTarget {
 
 /// 分辨率文本解析（纯规则，可单测）：`1920x1080` / `1280*720` / `854X480`；
 /// 空串或 `source` = None（保持源几何直通，H263 本来就无视）；非法返回 Err 供 UI 报错。
-/// 钳到 16..=2048 且偶数（奇数降一；编码器与写纹理都要求偶数行）。
+/// 钳到 16..=4096 且偶数（奇数降一；编码器与写纹理都要求偶数行；4096 档覆盖
+/// 1440p/QHD，大于 L4.x（2228224 像素）由各 entry 按分辨率升 level，见下）。
 pub(crate) fn parse_res_wh(text: &str) -> Result<Option<(u32, u32)>, String> {
     let t = text.trim();
     if t.is_empty() || t.eq_ignore_ascii_case("source") {
@@ -93,8 +94,8 @@ pub(crate) fn parse_res_wh(text: &str) -> Result<Option<(u32, u32)>, String> {
         .trim()
         .parse()
         .map_err(|_| String::from("bad height"))?;
-    if w < 16 || h < 16 || w > 2048 || h > 2048 {
-        return Err(String::from("range 16..=2048"));
+    if w < 16 || h < 16 || w > 4096 || h > 4096 {
+        return Err(String::from("range 16..=4096"));
     }
     Ok(Some((w & !1, h & !1)))
 }
@@ -1221,6 +1222,18 @@ impl App {
                 return;
             }
         };
+        // 目标格式几何门（mp4 源 4K 直通跟源也可能超规，显式档同理）：
+        // mpeg2v 只到 MP@HL（1920x1152），超了直接拒单，不断 job。
+        if self.transcode.target == TranscodeTarget::Mpeg2v {
+            if let Some((w, h)) = res_wh {
+                if w > 1920 || h > 1152 {
+                    self.transcode.status = String::from(
+                        "resolution: mpeg2v max 1920x1152 (MP@HL), pick 1080p or lower",
+                    );
+                    return;
+                }
+            }
+        }
         let fps_pos = self.transcode.fps_f.round().clamp(0.0, 240.0) as u32;
         let out_fps = if fps_pos == 0 { None } else { Some(fps_pos) };
         let seg = match parse_seg(&self.transcode.seg_text) {
@@ -1759,6 +1772,13 @@ pub(crate) fn run_transcode_job(
     // 容器包装 + 落盘（几何取首个缩放帧回退 1080p，Source 无帧不可能到此）。
     stage(JobStage::Mux);
     let (ow, oh) = out_wh.unwrap_or((OUT_W, OUT_H));
+    // 目标格式几何门（跟源 4K 直通也可能超规，显式档 UI 侧已拦一道）：
+    // mpeg2v 只到 MP@HL（1920x1152），超了直接 Err，不断 mux。
+    if target == TranscodeTarget::Mpeg2v && (ow > 1920 || oh > 1152) {
+        return Err(String::from(
+            "mpeg2v: output WxH exceeds MP@HL (1920x1152), pick 1080p or lower",
+        ));
+    }
     let bytes = acc.finish(target, ow, oh, fps)?;
 
     if let Some(parent) = std::path::Path::new(out_path).parent() {
@@ -1983,8 +2003,24 @@ pub(crate) fn avc_entry(sps: &[u8], pps: &[u8], w: u32, h: u32) -> SampleEntry {
     })
 }
 
+/// MP4/IVF level 选档（avc/hevc/vp9 共用口径；L4.x 上限 2228224 像素，
+/// L5.x 上限 8912896 像素——两家表同值；1440p 落第二档，4K 方图落第三档）：
+/// 0 = L4.x（调用方原口径），1 = L5.0，2 = L5.1+/L6.0。
+fn mp_level_tier(w: u32, h: u32) -> u32 {
+    let px = w as u64 * h as u64;
+    if px > 8_912_896 {
+        2
+    } else if px > 2_228_224 {
+        1
+    } else {
+        0
+    }
+}
+
 /// HEVC entry（`hvc1/hvcC`；固件 demux 不校验 profile 字段，
-/// 此处按 Main 8-bit 420 填保守值，level 随帧率取 4.0/4.1）。
+/// 此处按 Main 8-bit 420 填保守值；level 按分辨率取（L4.x/5.0/5.1），
+/// 名义时钟 30fps（码控口径见 `codecs.rs` 头注释），1440p60+ 名义上要更高 tier，
+/// 固件侧不校验、主流播放器按实际 SPS 容忍，此处不另细分）。
 pub(crate) fn hevc_entry(
     vps: &[u8],
     sps: &[u8],
@@ -1999,6 +2035,17 @@ pub(crate) fn hevc_entry(
         nal_unit_type: Uint::new(t),
         nalus,
     };
+    let level_idc = match mp_level_tier(w, h) {
+        2 => 153, // L5.1
+        1 => 150, // L5.0（1440p 档）
+        _ => {
+            if fps > 30 {
+                123
+            } else {
+                120
+            }
+        }
+    };
     SampleEntry::Hvc1(Hvc1Box {
         visual: visual_fields(w, h),
         hvcc_box: HvccBox {
@@ -2007,7 +2054,7 @@ pub(crate) fn hevc_entry(
             general_profile_idc: Uint::new(1),
             general_profile_compatibility_flags: 0x6000_0000,
             general_constraint_indicator_flags: Uint::new(0),
-            general_level_idc: if fps > 30 { 123 } else { 120 },
+            general_level_idc: level_idc,
             min_spatial_segmentation_idc: Uint::new(0),
             parallelism_type: Uint::new(0),
             chroma_format_idc: Uint::new(1),
@@ -2028,14 +2075,20 @@ pub(crate) fn hevc_entry(
     })
 }
 
-/// VP9 entry（`vp09/vpcC`；裸帧样片，固件直送解码器）。
+/// VP9 entry（`vp09/vpcC`；裸帧样片，固件直送解码器；level 按分辨率取，
+/// 与 hevc 同表：L4.1/5.0/6.0）。
 pub(crate) fn vp9_entry(w: u32, h: u32) -> SampleEntry {
     use shiguredo_mp4::boxes::{Vp09Box, VpccBox};
+    let level = match mp_level_tier(w, h) {
+        2 => 60, // L6.0
+        1 => 50, // L5.0（1440p 档）
+        _ => 41, // L4.1
+    };
     SampleEntry::Vp09(Vp09Box {
         visual: visual_fields(w, h),
         vpcc_box: VpccBox {
             profile: 0,
-            level: 41,
+            level,
             bit_depth: Uint::new(8),
             chroma_subsampling: Uint::new(1),
             video_full_range_flag: Uint::new(1),
@@ -2189,9 +2242,23 @@ mod transcode_tests {
         assert_eq!(parse_res_wh("1920x1080"), Ok(Some((1920, 1080))));
         assert_eq!(parse_res_wh("1280*720"), Ok(Some((1280, 720))));
         assert_eq!(parse_res_wh("853X480"), Ok(Some((852, 480))));
+        // QHD 上限 4096：1440p/4K 宽高放行，超 4096 仍拒。
+        assert_eq!(parse_res_wh("2560x1440"), Ok(Some((2560, 1440))));
+        assert_eq!(parse_res_wh("4096x2160"), Ok(Some((4096, 2160))));
         assert!(parse_res_wh("abc").is_err());
         assert!(parse_res_wh("10x10").is_err());
+        assert!(parse_res_wh("4097x1080").is_err());
         assert!(parse_res_wh("9999x1080").is_err());
+    }
+
+    #[test]
+    fn mp_level_tier_matrix() {
+        // L4.x 上限 2228224 像素（1080p 在内），L5.x 上限 8912896（1440p 在内）。
+        assert_eq!(mp_level_tier(1920, 1080), 0);
+        assert_eq!(mp_level_tier(2048, 1080), 0);
+        assert_eq!(mp_level_tier(2560, 1440), 1);
+        assert_eq!(mp_level_tier(4096, 2160), 1);
+        assert_eq!(mp_level_tier(4096, 4096), 2);
     }
 
     #[test]

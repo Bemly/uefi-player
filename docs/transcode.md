@@ -39,6 +39,10 @@
   1920x1080 后立即编码、立即释放；压缩包累积（小），裸帧不过组不驻留。
   解码器整轨只建一次（avc/hevc/vp9 各一），状态跨组保持。
 - 几何：默认文本框 `1920x1080`；留空跟源，H263 无视走内接标准尺寸+黑边；跟源时固件侧 `display.fit` 保比适配。
+  分辨率框上限 4096（16..=4096 + 偶数；1440p/QHD 可直填）：avc/hevc/vp9 按像素量升 level
+  （L4.x≤2228224 / L5.0≤8912896 / 再上 L5.1+/L6.0，见 `mp_level_tier`）；
+  mpeg2v 只到 MP@HL（1920x1152），超了 job 直接拒单（显式档 UI 侧先拦一道）；
+  h263 无视分辨率（内接标准档）；theora 超大帧走编码器报错（无静默坏输出）。
 - 帧率：滑条 0=跟源（原速），1-240 按此时长重采样（降帧丢帧，升帧补帧，流式不断组）。
 - 取消：点取消后界面立即清零（进度条消失），worker 在下一个小批次边界停下来（解复用每 32 样片、编码每分段查一次），状态显示已取消而不是报错。
 - 色彩：YUV↔RGBA 用 BT.601 全范围整数近似（正向与固件
@@ -49,7 +53,7 @@
 | 目标 | 编码器 | 容器/布局 |
 |---|---|---|
 | avc → `./<yymmddhhmmss>.mp4` | 硬解优先（mac VideoToolbox H.264 Baseline/CAVLC / Win-Linux Vulkan Video Baseline；段首恒关键帧，30 帧一段与 CPU 时代同语义；失败回退 `less-avc` baseline，1080p 裁剪由轮内 `frame_cropping` 兜底） | `shiguredo_mp4::Mp4FileMuxer`（avc1/avcC + 长度前缀；与固件 demux **同轮子**，回读零口径差） |
-| hevc → `./<yymmddhhmmss>.mp4` | 硬解优先（mac VideoToolbox HEVC Main 8-bit / Win-Linux Vulkan Video Main；VPS/SPS/PPS 进 hvcc，in-band 参数集照收；失败回退 `oxideav-h265` registry） | 同 muxer（hvc1/hvcC + 长度前缀；Main 8-bit 420 保守值，level 按帧率取 4.0/4.1） |
+| hevc → `./<yymmddhhmmss>.mp4` | 硬解优先（mac VideoToolbox HEVC Main 8-bit / Win-Linux Vulkan Video Main；VPS/SPS/PPS 进 hvcc，in-band 参数集照收；失败回退 `oxideav-h265` registry） | 同 muxer（hvc1/hvcC + 长度前缀；Main 8-bit 420 保守值，level 按分辨率取 4.x/5.0/5.1（名义 30fps 时钟，1440p60+ 名义上要更高 tier，固件不校验）） |
 | vp9 → `./<yymmddhhmmss>.mp4` | `rusty_vp9`（crf32 + lag8 + speed3） | 同 muxer（vp09/vpcC，裸帧样片；stss 按 keyframe 写） |
 | h263 → `./<yymmddhhmmss>.h263` | `oxideav-h263` registry（只收 §5.1.3 五档标准源格式，生产按源取最大内接档 + 黑边保比，如 1440p 源进 16CIF；固件按帧几何 1:1 左上播） | 裸流 PSC 分隔 |
 | mpeg2v → `./<yymmddhhmmss>.m2v` | `oxideav-mpeg12video` registry | 裸基本流（`00 00 01 B3` 起始） |
@@ -82,7 +86,8 @@ avc/hevc/vp9 三档同名 `video.mp4`（播哪个由 `[play] format` 开关决�
   这里不要纹理互操作，只要字节流）。
   搜过不用：`ffmpeg-next 9`（系统动态库，brew 升版即断 ABI）；内置 ffmpeg 二进制
   （30~80MB + 进程开销）；`egui-video` 系（播放件，不是编码轮子）。
-  码控口径：1080p 8Mbps 上限（两家统一）；nominal 30fps 只定码控时钟
+  码控口径：1080p 8Mbps 上限（两家统一；1440p 同上限，单位像素码率同比下降）；
+  nominal 30fps 只定码控时钟
   （PTS 自洽，与源 fps 无关，见 `codecs.rs` 头注释）；AVC Baseline + CAVLC
   （与旧 CPU 输出同 profile，固件解码零风险），HEVC Main 8-bit；B 帧全关
   （in-order 输出，与旧管线同序）。
