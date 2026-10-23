@@ -1,0 +1,15 @@
+[package]
+name = "gui-pack"
+version = "0.1.0"
+edition = "2021"
+description = "config-gui 打包工具：图标全家桶 + macOS .app（host 工具，与 UEFI 固件包独立）"
+
+# 取代原 `tools/config-gui/make_icon.py`（PIL）+ `bundle_macos.sh`（sh），
+# 仓库方向全 Rust（AGENTS「测试 100% Rust」的同一口径延伸到工具脚本）。
+# 轮子选择（见根 AGENTS.md「轮子优先」）：
+# - image 0.25：与 config-gui 同版本（caret），默认特性自带 png + ico 编码
+#  （`IcoEncoder` 多尺寸合一），覆盖 PIL 的 crop/resize(NEAREST)/save 全部用法。
+# - 不引 clap：两个子命令 + 两个位置参数手写解析。
+# - 系统工具只当子进程调：`iconutil`（macOS 出 .icns）、`cargo`（编 GUI）。
+[dependencies]
+image = "0.25"

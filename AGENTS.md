@@ -45,10 +45,13 @@ x86 引导加载器（基于 sprout 扩展）+ SIMD 加速矩阵 + UEFI 播放�
  （各家 no_std 移植，`patches/*.patch` 即功能 delta）。
   新 clone 跑一次 `git submodule update --init` + `patches/README.md` 里的 apply 全套。
   需要上游能力先看 sprout 5 个 lib 有没有，没有才在 `src/` 自研。
-- `tools/config-gui`：host 侧独立 crate（`std`），跨平台 `player.toml` 编辑器。
-  与 UEFI 主包零依赖关系，见下文“双构建”。
-- `docs/`：给人看的设计文档 + 真机报告（`FWINFO*/HWBENCH*.TXT`）。
-  `usb_reports/` 只留本地二进制（测试片源/EFI，不入库）。
+- `tools/`：host 工具 workspace（`tools/Cargo.toml`，共用 `tools/target`，与根 UEFI 包隔离）：
+  `config-gui`（跨平台 `player.toml` 编辑器）/ `qemu-matrix`（QEMU 黑盒矩阵）/
+  `gui-pack`（图标 + macOS .app 打包）/ `patch-sync`（submodule 补丁重打）/
+  `au-shape`（Annex-B 切分单测）。与 UEFI 主包零依赖关系，见下文“双构建”。
+- `docs/`：给人看的设计文档；真机报告（`FWINFO*/HWBENCH*.TXT`）归档在 `docs/reports/`。
+  `usb_reports/` 只留本地二进制（测试片源/EFI，不入库）；本地测试片源放
+  `usb_reports/media/`，不许堆在仓库根（根 `.gitignore` 兜底挡媒体扩展名）。
 
 ## 双构建（UEFI 与 host 严格隔离）
 
@@ -65,8 +68,14 @@ cargo fmt -p uefi-player --check
 cargo run --manifest-path tools/config-gui/Cargo.toml --target "$(rustc -vV | sed -n 's/^host: //p')"
 ```
 
-- `tools/config-gui` 保持独立包：不要把它加进根 `[workspace] members`，
-  不要让根 UEFI 包依赖任何 `std` / GUI 轮子。
+- macOS 全新编译（新 clone / 清过 `tools/target`）须带 `SDKROOT="$(xcrun --show-sdk-path)"`：
+  `shiguredo_video_toolbox` 的 bindgen 不自带 sysroot，缺它报 `TargetConditionals.h` 找不到
+  （有缓存的增量编译不触发，故长期没暴露）。
+
+- `tools/*` 只进 `tools/Cargo.toml` 这个 host workspace：不要给根包加 `[workspace]`
+  收它们，不要让根 UEFI 包依赖任何 `std` / GUI 轮子。
+- 工具脚本同样只用 Rust（原 `make_icon.py`/`bundle_macos.sh` 已改 `tools/gui-pack`），
+  系统工具（`iconutil`/`hdiutil`/`qemu`）只当子进程调。
 - `no_std` 侧新增依赖必须支持 `default-features = false` + `alloc`。
 
 ## 轮子优先（强制流程）

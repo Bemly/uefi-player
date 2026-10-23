@@ -1,0 +1,10 @@
+# host 工具 workspace（与根 UEFI 固件包严格隔离：根 Cargo.toml 无 [workspace]，
+# 也不把这里列为成员；本 workspace 只收 `std` 工具箱，固件侧零依赖关系）。
+#
+# 目的：各工具共用一个 `tools/target`（原各自一份，config-gui 单份 17G，
+# serde/toml/image 等公共依赖重复编译），以及一份统一的依赖解析。
+# 各成员命令不变：`cargo run --manifest-path tools/<name>/Cargo.toml --target <host>`
+# （cargo 向上找到本 workspace，产物落 `tools/target/<host>/...`）。
+[workspace]
+resolver = "2"
+members = ["au-shape", "config-gui", "gui-pack", "patch-sync", "qemu-matrix"]
