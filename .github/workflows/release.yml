@@ -118,30 +118,56 @@ jobs:
         run: |
           export SDKROOT="$(xcrun --show-sdk-path)"
           cargo run --release --manifest-path tools/gui-pack/Cargo.toml --target "$HOST" -- bundle-macos release
-      - name: Package
+      # 交付形态（用户拍板：拿到即用，不套压缩包）：
+      # - Windows：裸 .exe；
+      # - macOS：.app 装进 .dmg（Release 只收单文件，.app 是目录；dmg 内附
+      #   Applications 快捷方式，拖进去即装，mac 惯例）；
+      # - Linux：AppImage（单文件，chmod +x 双击即跑，不依赖发行版包管理；
+      #   wayland/x11/vulkan 均为运行时 dlopen，宿主系统自带）。
+      - name: Package (Windows .exe)
+        if: runner.os == 'Windows'
+        run: |
+          mkdir -p dist
+          cp "tools/target/$HOST/release/player-config-gui.exe" "dist/UEFI-Player-${{ matrix.name }}.exe"
+      - name: Package (macOS .dmg)
+        if: runner.os == 'macOS'
         run: |
           set -eux
-          mkdir -p dist
-          case "${{ runner.os }}" in
-            Linux)
-              cp "tools/target/$HOST/release/player-config-gui" dist/
-              tar -C dist -czf "player-config-gui-${{ matrix.name }}.tar.gz" player-config-gui
-              ;;
-            Windows)
-              cp "tools/target/$HOST/release/player-config-gui.exe" dist/
-              (cd dist && 7z a "../player-config-gui-${{ matrix.name }}.zip" player-config-gui.exe)
-              ;;
-            macOS)
-              ditto -c -k --keepParent "tools/target/bundle/UEFI Player.app" "player-config-gui-${{ matrix.name }}.zip"
-              ;;
-          esac
-          ls -la
+          mkdir -p dist dmg
+          cp -R "tools/target/bundle/UEFI Player.app" dmg/
+          ln -s /Applications dmg/Applications
+          hdiutil create -volname "UEFI Player" -srcfolder dmg -ov -format UDZO \
+            "dist/UEFI-Player-${{ matrix.name }}.dmg"
+      - name: Package (Linux AppImage)
+        if: runner.os == 'Linux'
+        env:
+          # CI 无 FUSE：appimagetool 自解压运行。
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+        run: |
+          set -eux
+          mkdir -p dist AppDir/usr/bin
+          cp "tools/target/$HOST/release/player-config-gui" AppDir/usr/bin/
+          cp tools/config-gui/assets/icon.png AppDir/uefi-player.png
+          cat > AppDir/uefi-player.desktop <<'EOF'
+          [Desktop Entry]
+          Type=Application
+          Name=UEFI Player
+          Name[zh_CN]=UEFI播放器
+          Comment=player.toml editor for uefi-player
+          Exec=player-config-gui
+          Icon=uefi-player
+          Categories=Utility;
+          EOF
+          printf '#!/bin/sh\nexec "$(dirname "$(readlink -f "$0")")/usr/bin/player-config-gui" "$@"\n' > AppDir/AppRun
+          chmod +x AppDir/AppRun
+          curl -fsSL -o appimagetool \
+            https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x appimagetool
+          ARCH=x86_64 ./appimagetool AppDir "dist/UEFI-Player-${{ matrix.name }}.AppImage"
       - uses: actions/upload-artifact@v4
         with:
           name: gui-${{ matrix.name }}
-          path: |
-            player-config-gui-${{ matrix.name }}.tar.gz
-            player-config-gui-${{ matrix.name }}.zip
+          path: dist/*
           if-no-files-found: error
 
   release:
