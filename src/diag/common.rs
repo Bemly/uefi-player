@@ -16,7 +16,7 @@ use alloc::format;
 use alloc::string::String;
 use uefi::boot;
 use uefi::data_types::CString16;
-use uefi::proto::console::text::Key;
+use uefi::proto::console::text::{Key, ScanCode};
 use uefi::system::with_config_table;
 use uefi::table::cfg::ConfigTableEntry as cfg;
 
@@ -45,9 +45,36 @@ fn key_to_char(key: Key) -> Option<(char, u16)> {
             let raw = u16::from(c);
             Some((char::from_u32(raw as u32).unwrap_or('\u{FFFD}'), raw))
         }
-        Key::Special(_) => None,
+        Key::Special(sc) => {
+            // TUI 导航键折进私用区字符（`KEY_*`），旧调用方按“未知键”处理即可；
+            // 其余特殊键（含修饰键独敲的 NULL）照旧过滤。
+            let c = match sc {
+                ScanCode::UP => KEY_UP,
+                ScanCode::DOWN => KEY_DOWN,
+                ScanCode::LEFT => KEY_LEFT,
+                ScanCode::RIGHT => KEY_RIGHT,
+                ScanCode::PAGE_UP => KEY_PGUP,
+                ScanCode::PAGE_DOWN => KEY_PGDN,
+                ScanCode::HOME => KEY_HOME,
+                ScanCode::END => KEY_END,
+                ScanCode::ESCAPE => KEY_ESC,
+                _ => return None,
+            };
+            Some((c, c as u16))
+        }
     }
 }
+
+/// 导航键（`Key::Special` 折成的私用区字符；ESC 用 ASCII 0x1B）。
+pub const KEY_UP: char = '\u{F700}';
+pub const KEY_DOWN: char = '\u{F701}';
+pub const KEY_LEFT: char = '\u{F702}';
+pub const KEY_RIGHT: char = '\u{F703}';
+pub const KEY_PGUP: char = '\u{F704}';
+pub const KEY_PGDN: char = '\u{F705}';
+pub const KEY_HOME: char = '\u{F706}';
+pub const KEY_END: char = '\u{F707}';
+pub const KEY_ESC: char = '\u{1B}';
 
 /// 排空输入队列里的陈旧按键，避免菜单刚画出来就被之前的按键误触发。
 ///

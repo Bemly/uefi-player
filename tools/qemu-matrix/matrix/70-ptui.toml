@@ -1,5 +1,5 @@
 # 70-ptui.toml：QEMU 黑盒矩阵分组（`matrix/` 目录，TUI 前端用例）。
-# 共 5 cases，单文件 ≤1000 行（AGENTS 口径）。新增 case 按前缀落对应文件，并写 `covers`。
+# 共 9 cases，单文件 ≤1000 行（AGENTS 口径）。新增 case 按前缀落对应文件，并写 `covers`。
 #
 # TUI 串口契约（以外壳已落地实现为准，见 `src/ptui/mod.rs` + `src/idle.rs`）：
 # - 待机按 p：`idle: ptui mode`（warn）→ `ptui: open`（warn）→ `ptui: page=home`；
@@ -16,6 +16,11 @@
 # - 调档行 `ptui: set <key>=<value>`（`state::set` 双写）：加速页 `n` 下一档记
 #   `ptui: set accel.level=<str>`；壁纸页 `f` 轮换 + `s` 落盘记
 #   `ptui: wallpaper saved ([wallpaper] only)`（只写 `[wallpaper]` 表）。
+# - 面板化（`ptui/ui.rs`）：↑↓ 选行（QEMU `up`/`down`）、←→ 拨档（`left`/`right`）、
+#   Enter（`ret`）进入/确认、`q`/Esc 返回；旧数字/字母键全保留。
+# - 悬浮跳转菜单（`ptui/jump.rs`，Tab 呼出，TUI 全部页 + 测试页 + 启动弹窗）：
+#   `jump: open from=<页名|boot>` → `jump: go <页名|boot|idle>` 或 `jump: close`；
+#   跳去启动弹窗记 `ptui: exit to boot`，弹窗内直跳子页走 `ptui: open` + 该页 marker。
 # forbid 沿全局红线（panicked/CpuDeadLoop/空解码等），不另加。
 
 # TUI 冒烟（P6 原文口径）：待机按 p（`idle: ptui mode`）进首页
@@ -139,11 +144,12 @@ keys = [
 expect = ["ptui: open", "ptui: page=home", "ptui: page=wallpaper", "ptui: set wallpaper.fps=30", "ptui: wallpaper saved ([wallpaper] only)", "ptui: back to idle"]
 artifact = { glob = "player.toml", contains = ["fps = \"30\""], volume = 1 }
 
-# 字体冒烟：进 TUI 首页即走字形路（中文页标题经 `draw_str` → `src/video/ascii_font.rs`），
-# 不断言画面，只看无 panic（全局 forbid 红线）+ `ptui: open`。
+# 字体冒烟：进 TUI 首页即走字形路（中文面板经 `Screen::draw_text_at` → `src/font/`
+# 全量 10px 表，`build.rs` 构建期烘焙），不断言画面，只看无 panic（全局 forbid 红线）
+# + 全量字表自检行 `ptui: font cjk glyphs=25909`（防回退成子集）。
 [[case]]
 name = "font-smoke"
-covers = ["src/video/ascii_font.rs", "src/ptui/"]
+covers = ["src/font/", "src/graphics/text.rs", "build.rs", "src/ptui/"]
 timeout_sec = 180
 config = """
 version = 1
@@ -165,7 +171,7 @@ boot_expect = ["cfg: version=1", "idle: ready"]
 keys = [
   { send = "p", wait_for = ["idle: ready (press any key)"], wait_after = 3 },
 ]
-expect = ["idle: ptui mode", "ptui: open", "ptui: page=home"]
+expect = ["idle: ptui mode", "ptui: open", "ptui: font cjk glyphs=25909", "ptui: page=home"]
 
 # 播片按键退出（`video/loops.rs` 任意键返回 `Ok` 的回归锁）：
 # 首页 `1` 进播放页 → 数字 `1` 播小片源（`needs_h263video`，QCIF 128x96×10 帧，
@@ -214,3 +220,120 @@ keys = [
   { send = "x", wait_for = ["ptui: play 0 path=video.h263"], wait_after = 3 },
 ]
 expect = ["ptui: open", "ptui: page=home", { pat = "ptui: page=play", count = 2 }, "ptui: media dir='<root>' count=1", "ptui: play 0 path=video.h263", "play: path=direct_loop", "ptui: back from play 0"]
+
+# 方向键导航（面板化回归锁）：首页 `down` 移到“加速” → `ret` 进加速页 →
+# `right` 拨一档（`ptui: set accel.level=`）→ `esc` 回首页（光标留在“加速”）→
+# `down` 移到“渲染” → `ret` 进渲染页（默认光标在 tune.frames）→ `right` 记
+# `ptui: set render.tune.frames=` → `up` ×3 到 render.mode → `left` 记
+# `ptui: set render.mode=` → `q` 回首页 → `esc` 回待机（`ptui: back to idle`）。
+[[case]]
+name = "ptui-arrow-nav"
+covers = ["src/ptui/", "src/diag/common.rs"]
+timeout_sec = 180
+config = """
+version = 1
+[render]
+mode = "direct"
+vsync = "off"
+[wallpaper]
+enable = false
+[schedule]
+backend = "manual"
+workers = "bsp_only"
+dist = "static"
+"""
+boot_expect = ["cfg: version=1", "idle: ready"]
+keys = [
+  { send = "p", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
+  { send = "down", wait_for = ["ptui: page=home"], wait_after = 1 },
+  { send = "ret", wait_after = 2 },
+  { send = "right", wait_for = ["ptui: page=accel"], wait_after = 1 },
+  { send = "esc", wait_for = ["ptui: set accel.level="], wait_after = 2 },
+  { send = "down", wait_for = [{ pat = "ptui: page=home", count = 2 }], wait_after = 1 },
+  { send = "ret", wait_after = 2 },
+  { send = "right", wait_for = ["ptui: page=render"], wait_after = 1 },
+  { send = "up", wait_for = ["ptui: set render.tune.frames="], wait_after = 1 },
+  { send = "up", wait_after = 1 },
+  { send = "up", wait_after = 1 },
+  { send = "left", wait_after = 1 },
+  { send = "q", wait_for = ["ptui: set render.mode="], wait_after = 2 },
+  { send = "esc", wait_for = [{ pat = "ptui: page=home", count = 3 }], wait_after = 2 },
+]
+expect = ["ptui: page=accel", "ptui: set accel.level=", "ptui: page=render", "ptui: set render.tune.frames=", "ptui: set render.mode=", "ptui: back to idle"]
+
+# 悬浮跳转菜单（TUI 内）：首页 Tab（`jump: open from=home`）→ `5` 直跳解码页
+# （`jump: go decode` + `ptui: page=decode`）→ Tab → `esc` 关浮层（`jump: close`）
+# → Tab → `down` + `ret` 跳下一项（解码页光标起于自身，下一项即“显示”：
+# `jump: go display`）→ Tab → `7` 去测试页（`menu: ready`）→ 测试页内 Tab
+# （`jump: open from=tests`）→ `0` 回首页（`jump: go home` + `menu: back to ptui`）
+# → Tab → `w` 回壁纸待机（`jump: go idle` + `ptui: back to idle` + 第二次 `idle: ready`）。
+[[case]]
+name = "ptui-jump-overlay"
+covers = ["src/ptui/", "src/menu.rs", "src/idle.rs"]
+timeout_sec = 240
+config = """
+version = 1
+[render]
+mode = "direct"
+vsync = "off"
+[wallpaper]
+enable = false
+[schedule]
+backend = "manual"
+workers = "bsp_only"
+dist = "static"
+"""
+boot_expect = ["cfg: version=1", "idle: ready"]
+keys = [
+  { send = "p", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
+  { send = "tab", wait_for = ["ptui: page=home"], wait_after = 1 },
+  { send = "5", wait_for = ["jump: open from=home"], wait_after = 2 },
+  { send = "tab", wait_for = ["ptui: page=decode"], wait_after = 1 },
+  { send = "esc", wait_for = ["jump: open from=decode"], wait_after = 1 },
+  { send = "tab", wait_for = ["jump: close"], wait_after = 1 },
+  { send = "down", wait_for = [{ pat = "jump: open from=decode", count = 2 }], wait_after = 1 },
+  { send = "ret", wait_after = 2 },
+  { send = "tab", wait_for = ["ptui: page=display"], wait_after = 1 },
+  { send = "7", wait_for = ["jump: open from=display"], wait_after = 2 },
+  { send = "tab", wait_for = ["menu: ready (press key)"], wait_after = 1 },
+  { send = "0", wait_for = ["jump: open from=tests"], wait_after = 2 },
+  { send = "tab", wait_for = ["menu: back to ptui"], wait_after = 1 },
+  { send = "w", wait_for = [{ pat = "jump: open from=home", count = 2 }], wait_after = 2 },
+]
+expect = ["jump: go decode", "jump: close", "jump: go display", "jump: go tests", "jump: go home", "jump: go idle", "ptui: back to idle", { pat = "idle: ready", count = 2 }]
+
+# 悬浮跳转菜单 ↔ 启动弹窗：TUI 首页 Tab → `b` 去启动选项（`jump: go boot` +
+# `ptui: exit to boot` + `popup: open`）→ 弹窗内 Tab（`jump: open from=boot`）→
+# `2` 直跳加速页（`jump: go accel` + 第二次 `ptui: open` + `ptui: page=accel`）→
+# `q` 回首页 → `q` 退 TUI 回待机（`popup: back to idle`）→ 任意键 `x` 再开弹窗 →
+# `up`（无默认项时光标从末行“返回壁纸”起）→ `ret` 执行（第二次 `popup: back to idle`）。
+[[case]]
+name = "popup-jump-arrow"
+covers = ["src/idle.rs", "src/ptui/jump.rs", "src/ptui/ui.rs"]
+timeout_sec = 240
+config = """
+version = 1
+[render]
+mode = "direct"
+vsync = "off"
+[wallpaper]
+enable = false
+[schedule]
+backend = "manual"
+workers = "bsp_only"
+dist = "static"
+"""
+boot_expect = ["cfg: version=1", "idle: ready"]
+keys = [
+  { send = "p", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
+  { send = "tab", wait_for = ["ptui: page=home"], wait_after = 1 },
+  { send = "b", wait_for = ["jump: open from=home"], wait_after = 2 },
+  { send = "tab", wait_for = ["popup: open"], wait_after = 1 },
+  { send = "2", wait_for = ["jump: open from=boot"], wait_after = 2 },
+  { send = "q", wait_for = ["ptui: page=accel"], wait_after = 2 },
+  { send = "q", wait_for = [{ pat = "ptui: page=home", count = 2 }], wait_after = 2 },
+  { send = "x", wait_for = [{ pat = "idle: ready (press any key)", count = 2 }], wait_after = 2 },
+  { send = "up", wait_for = [{ pat = "popup: open", count = 2 }], wait_after = 1 },
+  { send = "ret", wait_after = 2 },
+]
+expect = ["jump: go boot", "ptui: exit to boot", "jump: open from=boot", "jump: go accel", { pat = "ptui: open", count = 2 }, { pat = "popup: back to idle", count = 2 }]

@@ -9,15 +9,20 @@
 src/main.rs      入口：关看门狗 → 采固件 OSXSAVE → config::load → seed_runtime + resolve_accel
                  → Screen::new（首选 1080p）→ ensure_render_calibrated → idle::run（永不返回）
 src/idle.rs      顶层交互：壁纸待机（全屏循环，任意键弹窗；p 直进 TUI）+ 启动选项弹窗
-                 （条目直选交权 / p 进 TUI / f 固件设置 / s 关机 / r 重启 / q 回待机）
-src/ptui/        TUI 外壳（中文页栈，p 进 q 逐层回）：mod（run 值进值出 Screen）+
+                 （面板化 ↑↓/Enter；条目直选交权 / p 进 TUI / f 固件设置 / s 关机 / r 重启 /
+                 q 回待机 / Tab 悬浮跳转直达 TUI 子页）
+src/ptui/        TUI 外壳（中文页栈，p 进 q/Esc 逐层回，Tab 悬浮跳转）：mod（run/run_at 值进值出
+                 Screen，回 Exit 去向）+ ui（标题栏/边框面板/高亮行/底栏 + 统一按键语义）+
+                 jump（悬浮跳转菜单：页面/启动选项/壁纸待机/固件设置/重启/关机）+
                  state（Next 导航/文件串小写表/调档 helpers）+ media（media_dir 单层扫描 +
                  tagged 探针只读识别）+ pages/（home 九宫 / play 扫描播片+调档 /
                  accel 31 档 / render 路径+微调 / schedule 后端+核 / decode 八格式 /
                  display 适配+黑边 / tests 透传诊断页 / wallpaper 四键+显式落盘）
-src/menu.rs      TUI 测试页（诊断透传；播片入口已搬 play 页经 play_path；行区壁纸背景，q 回 TUI 上级）
-src/font/        TUI 点阵字体：latin（英文 8x16）+ cjk（中文 16x16 子集 31 字 + 豆腐块）+
-                 layout（度量 8/16/行高 18/换行，WP_TOP 布局依赖）
+src/menu.rs      TUI 测试页（诊断透传，面板化；播片入口已搬 play 页经 play_path；面板下行区壁纸背景，
+                 q 回 TUI 上级，Tab 悬浮跳转）
+src/font/        TUI 点阵字体：latin（英文 8x16，像素不变）+ cjk（fusion-pixel 10px 全量 25909 字，
+                 根 build.rs 构建期 fontdue 烘焙 + include_bytes!，缺字豆腐块）+ layout（比例宽/行高 18）
+src/graphics/text.rs  文本上屏：整段内存光栅后一次 Blt（draw_str / draw_text_at / fill_rect）
 src/graphics.rs  Screen（GOP 独占封装）：draw_str/upload_frame(+region)/bench 矩阵/asm 拷贝族
                  + present（display.fit 五档 + align 五档 + bar 留边几何，全由 present::geometry 定）
 src/video.rs     播放器：video_run → blt_loop（单线程 Blt）/ direct_loop（BSP 直写）
@@ -58,7 +63,11 @@ src/diag/        真机诊断项（非 cargo test）：registry 注册 + common�
   `p` 进 TUI 外壳（`ptui::run`，`q` 逐层回到此）；其余任意键走原引导弹窗。
 - 弹窗内同样保留 `p` 入口（与待机直达对称）；`q` 回壁纸待机，
   条目数字键直选交权（回来继续待机），`f/s/r` 固定项不变。
-- TUI 内：首页九宫数字进子页，子页 `q` 回首页，首页 `q` 回调用方（待机/弹窗页栈继续）；
+- TUI 内：首页面板 ↑↓+Enter 或数字进子页，子页 `q`/Esc 回首页，首页 `q` 回调用方（待机/弹窗页栈继续）；
+  子页 ↑↓ 选行、←→ 拨档，旧单键全保留；
+- 悬浮跳转菜单（`ptui::jump`，Tab 呼出，TUI 全部页 + 测试页 + 启动弹窗）：去 TUI 子页由首页
+  统一分发（页栈不加深）；去启动选项 `ptui::run` 回 `Exit::Boot` 由 `idle` 开弹窗；回壁纸待机
+  `Exit::Idle`；固件设置/重启/关机浮层内当场执行。串口 `jump: open from=/go/close`；
   播片中按任意键停播回播放页（`play_path` 内按键退出，见 `docs/player.md`）。
 - 菜单（`menu::run_test_page`）只剩诊断透传：播片入口已搬 TUI 播放页，
   `q` 回 TUI 上级（不再直回壁纸待机）。
@@ -73,5 +82,5 @@ src/diag/        真机诊断项（非 cargo test）：registry 注册 + common�
   落盘只有壁纸页 `s`，只写 `[wallpaper]` 表；`measured_*` 留文件由固件回写）。
 - 壁纸：画廊 Clip（`preload` 按项封顶）→ `upload_frame`/`upload_frame_region`
  （源几何取 Clip 真实 `w/h`，`display.fit` 生效）→ A 行区循环 / B 全屏过渡。
-- 文本：统一 `Screen::draw_str`（`src/font/` 点阵，英文 8x16 + 中文 16x16 子集）；
+- 文本：统一 `Screen::draw_str` / `draw_text_at`（`src/font/` 点阵，英文 8x16 + 10px 像素字全量）；
   串口保留 `log::*`（`emit!` 双写）。

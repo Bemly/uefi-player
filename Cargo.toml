@@ -1,6 +1,6 @@
 [package]
 name = "uefi-player"
-version = "26.10.23"
+version = "26.10.24"
 edition = "2024"
 
 [dependencies]
@@ -128,3 +128,8 @@ strip = true
 # 兼容 `common` 的 `accel?/` 弱依赖；`wide 0.7` 不动；`global-alloc` 保持关闭）。
 [patch.crates-io]
 rusty_h264-accel = { path = "third_party/rusty_h264/crates/rusty_h264-accel" }
+
+# 构建期（host）依赖：只给根 `build.rs` 把 10px 中文像素字体全量烘成点阵表，
+# 不进固件运行时（no_std 侧零新增）；轮子结论见 `build.rs` 头注释。
+[build-dependencies]
+fontdue = "0.9"

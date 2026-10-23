@@ -139,16 +139,18 @@ pub fn threads_str(t: DecodeThreads) -> &'static str {
 
 // ---------- 屏显 + 串口 ----------
 
-/// 进页：串口记 `ptui: page=<name>`，屏显清屏复位（调用方接着画标题）。
+/// 进页：串口记 `ptui: page=<name>`，清状态栏（页面随后经 `ui::draw` 整页重画）。
 pub fn goto(screen: &mut Screen, name: &str) {
     log::info!("ptui: page={}", name);
-    let _ = screen.clear();
+    super::ui::clear_status();
     screen.reset_cursor();
 }
 
-/// 调档：串口屏显双写 `ptui: set <key>=<value>`（矩阵断言用）。
-pub fn set(screen: &mut Screen, key: &str, val: &str) {
-    crate::emit!(screen, "ptui: set {}={}", key, val);
+/// 调档：串口记 `ptui: set <key>=<value>`（矩阵断言用）+ 底栏状态显示
+/// （面板整页重画，旧的 `emit!` 屏显行会被立即盖掉，故屏显改走状态栏）。
+pub fn set(_screen: &mut Screen, key: &str, val: &str) {
+    log::info!("ptui: set {}={}", key, val);
+    super::ui::set_status(alloc::format!("已设 {}={}", key, val));
 }
 
 // ---------- 读写小 helpers（各页共用，口径与 `runtime::apply_cfg` 一致） ----------

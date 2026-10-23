@@ -1,261 +1,110 @@
-//! 中文 16x16 点阵子集（31 字，Unifont 15.1.05 子集转写）+ 豆腐块。
+//! 中文（及一切非 ASCII）10px 像素字全量点阵 + 豆腐块。
 //!
-//! 来源：GNU Unifont 15.1.05 `unifont.hex`（OFL-1.1 / GPL-2+，含字体嵌入例外；
-//! 固件侧允许子集，本模块仅收录 TUI 常用 31 字，体积约 1KB，见 `src/font/mod.rs`
-//! 轮子结论）。字形为 16 行 `u16`，bit15 在左（与 `unifont` crate `Fullwidth`
-//! 同序），英文 8x16 高位在左（`0x80 >> col`）对齐左缘，混排基线一致。
-//! 缺字一律回豆腐块（16x16 空心框），不断行、不 panic。
+//! 来源：`tools/config-gui/assets/fusion-pixel-10px-proportional-zh_hans.ttf`
+//! （与 host GUI 同源，OFL-1.1，见同目录 `OFL.txt`），构建期 `build.rs` 全量烘焙
+//! cmap 全部 25909 码点（禁止子集化，AGENTS 口径），`include_bytes!` 进固件。
+//! 格式见 `build.rs` 头注释：12 字节索引（按码点升序，二分查）+ 逐字位流。
+//! 比例字：advance 取字体自带（中文 10px，西文附加符号 4-8px 不等），
+//! 字形落在 16 行字格内（与英文 8x16 同高、底行齐），缺字回豆腐块，不断行、不 panic。
 
-/// 中文行高：16px 字 + 2px 间隙 = 18px，与英文路一致（`WP_TOP` 不动）。
-#[allow(dead_code)]
-pub const CJK_W: usize = 16;
-#[allow(dead_code)]
-pub const CJK_H: usize = 16;
+/// 全量索引（12 字节/字）。
+static INDEX: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/cjk_index.bin"));
+/// 全量位流。
+static BITS: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/cjk_bits.bin"));
 
-/// 缺字豆腐块：16x16 空心框（首末行全满，中间行仅左右框）。
-pub const TOFU_ROWS: [u16; 16] = [
-    0xFFFF, 0x8001, 0x8001, 0x8001, 0x8001, 0x8001, 0x8001, 0x8001, 0x8001, 0x8001, 0x8001, 0x8001,
-    0x8001, 0x8001, 0x8001, 0xFFFF,
-];
+/// 索引记录字节数。
+const REC: usize = 12;
 
-/// （字，16 行位点）。按码点升序排，线性查表即可（31 项，菜单文本量小）。
-const TABLE: [(char, [u16; 16]); 31] = [
-    (
-        '中',
-        [
-            0x0100, 0x0100, 0x0100, 0x0100, 0x3FF8, 0x2108, 0x2108, 0x2108, 0x2108, 0x2108, 0x3FF8,
-            0x2108, 0x0100, 0x0100, 0x0100, 0x0100,
-        ],
-    ), // U+4E2D
-    (
-        '关',
-        [
-            0x1010, 0x0810, 0x0820, 0x0000, 0x3FF8, 0x0100, 0x0100, 0x0100, 0xFFFE, 0x0100, 0x0280,
-            0x0280, 0x0440, 0x0820, 0x3018, 0xC006,
-        ],
-    ), // U+5173
-    (
-        '出',
-        [
-            0x0100, 0x0100, 0x2108, 0x2108, 0x2108, 0x2108, 0x3FF8, 0x0108, 0x0100, 0x0100, 0x4104,
-            0x4104, 0x4104, 0x4104, 0x7FFC, 0x0004,
-        ],
-    ), // U+51FA
-    (
-        '单',
-        [
-            0x1010, 0x0820, 0x0440, 0x3FF8, 0x2108, 0x2108, 0x3FF8, 0x2108, 0x2108, 0x3FF8, 0x0100,
-            0x0100, 0xFFFE, 0x0100, 0x0100, 0x0100,
-        ],
-    ), // U+5355
-    (
-        '取',
-        [
-            0x0000, 0xFF80, 0x22FC, 0x2244, 0x3E44, 0x2244, 0x2244, 0x3E44, 0x2228, 0x2228, 0x27A8,
-            0xFA10, 0x4210, 0x0228, 0x0244, 0x0282,
-        ],
-    ), // U+53D6
-    (
-        '启',
-        [
-            0x0100, 0x0080, 0x1FFC, 0x1004, 0x1004, 0x1004, 0x1FFC, 0x1000, 0x1000, 0x1000, 0x17FC,
-            0x2404, 0x2404, 0x4404, 0x87FC, 0x0404,
-        ],
-    ), // U+542F
-    (
-        '器',
-        [
-            0x0000, 0x3E7C, 0x2244, 0x2244, 0x3E7C, 0x0120, 0x0110, 0xFFFE, 0x0280, 0x0C60, 0x3018,
-            0xC006, 0x3E7C, 0x2244, 0x2244, 0x3E7C,
-        ],
-    ), // U+5668
-    (
-        '回',
-        [
-            0x0000, 0x3FFC, 0x2004, 0x2004, 0x27E4, 0x2424, 0x2424, 0x2424, 0x2424, 0x2424, 0x27E4,
-            0x2004, 0x2004, 0x3FFC, 0x2004, 0x0000,
-        ],
-    ), // U+56DE
-    (
-        '壁',
-        [
-            0x0040, 0x7C20, 0x45FC, 0x4488, 0x7C50, 0x43FE, 0x7C20, 0xA5FC, 0x2420, 0x3D20, 0x0100,
-            0x3FF8, 0x0100, 0x0100, 0xFFFE, 0x0000,
-        ],
-    ), // U+58C1
-    (
-        '导',
-        [
-            0x0000, 0x3FF0, 0x2010, 0x2010, 0x3FF0, 0x2004, 0x2004, 0x1FFC, 0x0020, 0x0020, 0xFFFE,
-            0x0820, 0x0420, 0x0420, 0x00A0, 0x0040,
-        ],
-    ), // U+5BFC
-    (
-        '引',
-        [
-            0x0008, 0x7F08, 0x0108, 0x0108, 0x0108, 0x3F08, 0x2008, 0x2008, 0x4008, 0x7F08, 0x0108,
-            0x0108, 0x0108, 0x0108, 0x0A08, 0x0408,
-        ],
-    ), // U+5F15
-    (
-        '按',
-        [
-            0x1040, 0x1020, 0x1020, 0x13FE, 0xFA02, 0x1444, 0x1040, 0x1BFE, 0x3088, 0xD088, 0x1108,
-            0x10D0, 0x1020, 0x1050, 0x5088, 0x2304,
-        ],
-    ), // U+6309
-    (
-        '播',
-        [
-            0x2078, 0x27C0, 0x2248, 0x2150, 0xFBFC, 0x2150, 0x2248, 0x2C06, 0x33F8, 0xE248, 0x2248,
-            0x23F8, 0x2248, 0x2248, 0xA3F8, 0x4208,
-        ],
-    ), // U+64AD
-    (
-        '放',
-        [
-            0x2040, 0x1040, 0x0040, 0xFE80, 0x20FE, 0x2108, 0x3E88, 0x2488, 0x2488, 0x2450, 0x2450,
-            0x2420, 0x4450, 0x5488, 0x8904, 0x0202,
-        ],
-    ), // U+653E
-    (
-        '文',
-        [
-            0x0200, 0x0100, 0x0100, 0xFFFE, 0x1010, 0x1010, 0x0820, 0x0820, 0x0440, 0x0280, 0x0100,
-            0x0280, 0x0440, 0x0820, 0x3018, 0xC006,
-        ],
-    ), // U+6587
-    (
-        '机',
-        [
-            0x1000, 0x11F0, 0x1110, 0x1110, 0xFD10, 0x1110, 0x3110, 0x3910, 0x5510, 0x5510, 0x9110,
-            0x1112, 0x1112, 0x1212, 0x120E, 0x1400,
-        ],
-    ), // U+673A
-    (
-        '消',
-        [
-            0x0040, 0x2248, 0x1148, 0x1150, 0x8040, 0x43F8, 0x4A08, 0x0A08, 0x13F8, 0x1208, 0xE208,
-            0x23F8, 0x2208, 0x2208, 0x2228, 0x0210,
-        ],
-    ), // U+6D88
-    (
-        '确',
-        [
-            0x0040, 0x0040, 0xFC7C, 0x1084, 0x1108, 0x22FE, 0x3C92, 0x6492, 0x64FE, 0xA492, 0x2492,
-            0x24FE, 0x3C92, 0x2512, 0x210A, 0x0204,
-        ],
-    ), // U+786E
-    (
-        '纸',
-        [
-            0x1008, 0x103C, 0x23E0, 0x2220, 0x4A20, 0xFA20, 0x1220, 0x23FE, 0x4220, 0xFA10, 0x4210,
-            0x0212, 0x1A0A, 0xE28A, 0x4306, 0x0202,
-        ],
-    ), // U+7EB8
-    (
-        '继',
-        [
-            0x1020, 0x1220, 0x2220, 0x2324, 0x4AA8, 0xF220, 0x13FC, 0x2220, 0x4270, 0xFAA8, 0x4324,
-            0x0220, 0x1A20, 0xE220, 0x43FE, 0x0000,
-        ],
-    ), // U+7EE7
-    (
-        '续',
-        [
-            0x1020, 0x1020, 0x21FC, 0x2420, 0x4420, 0xFBFE, 0x1002, 0x2094, 0x4050, 0xFD10, 0x4090,
-            0x03FE, 0x1C28, 0xE044, 0x4082, 0x0302,
-        ],
-    ), // U+7EED
-    (
-        '置',
-        [
-            0x7FFC, 0x4444, 0x4444, 0x7FFC, 0x0100, 0xFFFE, 0x0200, 0x1FF0, 0x1010, 0x1FF0, 0x1010,
-            0x1FF0, 0x1010, 0x1FF0, 0x1010, 0xFFFE,
-        ],
-    ), // U+7F6E
-    (
-        '菜',
-        [
-            0x0820, 0x0820, 0xFFFE, 0x0820, 0x0010, 0x00F8, 0x3F00, 0x1110, 0x0820, 0x0100, 0x7FFC,
-            0x0540, 0x0920, 0x3118, 0xC106, 0x0100,
-        ],
-    ), // U+83DC
-    (
-        '认',
-        [
-            0x0040, 0x2040, 0x1040, 0x1040, 0x0040, 0x0040, 0xF040, 0x1040, 0x10A0, 0x10A0, 0x10A0,
-            0x1510, 0x1910, 0x1208, 0x0404, 0x0802,
-        ],
-    ), // U+8BA4
-    (
-        '设',
-        [
-            0x0000, 0x21F0, 0x1110, 0x1110, 0x0110, 0x020E, 0xF400, 0x13F8, 0x1108, 0x1110, 0x1090,
-            0x14A0, 0x1840, 0x10A0, 0x0318, 0x0C06,
-        ],
-    ), // U+8BBE
-    (
-        '误',
-        [
-            0x0000, 0x43F8, 0x2208, 0x2208, 0x03F8, 0x0000, 0xE7FC, 0x2040, 0x2040, 0x2FFE, 0x2040,
-            0x20A0, 0x28A0, 0x3110, 0x2208, 0x0406,
-        ],
-    ), // U+8BEF
-    (
-        '返',
-        [
-            0x0008, 0x203C, 0x13C0, 0x1200, 0x0200, 0x03FC, 0xF204, 0x1288, 0x1250, 0x1220, 0x1250,
-            0x1488, 0x1504, 0x2800, 0x47FE, 0x0000,
-        ],
-    ), // U+8FD4
-    (
-        '退',
-        [
-            0x03F8, 0x2208, 0x1208, 0x13F8, 0x0208, 0x0208, 0xF3F8, 0x1244, 0x1228, 0x1210, 0x1288,
-            0x1304, 0x1204, 0x2800, 0x47FE, 0x0000,
-        ],
-    ), // U+9000
-    (
-        '重',
-        [
-            0x0010, 0x00F8, 0x3F00, 0x0100, 0xFFFE, 0x0100, 0x1FF0, 0x1110, 0x1FF0, 0x1110, 0x1FF0,
-            0x0100, 0x3FF8, 0x0100, 0xFFFE, 0x0000,
-        ],
-    ), // U+91CD
-    (
-        '错',
-        [
-            0x2110, 0x2110, 0x3910, 0x27FC, 0x4110, 0x7910, 0xAFFE, 0x2000, 0xFBF8, 0x2208, 0x2208,
-            0x23F8, 0x2A08, 0x3208, 0x23F8, 0x0208,
-        ],
-    ), // U+9519
-    (
-        '键',
-        [
-            0x2010, 0x2010, 0x3B7C, 0x2114, 0x41FE, 0x7A14, 0xA27C, 0x2710, 0xF97C, 0x2510, 0x25FE,
-            0x2210, 0x2A10, 0x3500, 0x28FE, 0x0000,
-        ],
-    ), // U+952E
-];
+/// 单字点阵视图（位流借全局表，零拷贝）。
+#[derive(Clone, Copy)]
+pub struct Glyph {
+    /// 前进宽（px）。
+    pub adv: u8,
+    /// 字形左缘相对笔位的偏移（px，可负）。
+    pub xmin: i8,
+    /// 字形顶行（16 行字格内的行号）。
+    pub top: u8,
+    pub w: u8,
+    pub h: u8,
+    bits: &'static [u8],
+}
 
-/// 查中文位点：命中回字形，缺字回 `None`（调用方取豆腐块，不断行）。
-pub fn lookup(ch: char) -> Option<&'static [u16; 16]> {
-    for (c, rows) in TABLE.iter() {
-        if *c == ch {
-            return Some(rows);
+impl Glyph {
+    /// 字形内 `(x, y)` 是否着色（越界为否）。
+    pub fn on(&self, x: usize, y: usize) -> bool {
+        if x >= self.w as usize || y >= self.h as usize {
+            return false;
+        }
+        let i = y * self.w as usize + x;
+        self.bits
+            .get(i / 8)
+            .map(|b| (b >> (7 - i % 8)) & 1 == 1)
+            .unwrap_or(false)
+    }
+}
+
+/// 缺字豆腐块：9x9 空心框，advance 10（与中文字身同尺寸，不断行、保对齐）。
+static TOFU_BITS: [u8; 11] = tofu_bits();
+pub const TOFU: Glyph = Glyph {
+    adv: 10,
+    xmin: 0,
+    top: 3,
+    w: 9,
+    h: 9,
+    bits: &TOFU_BITS,
+};
+
+const fn tofu_bits() -> [u8; 11] {
+    let mut out = [0u8; 11];
+    let mut y = 0;
+    while y < 9 {
+        let mut x = 0;
+        while x < 9 {
+            if y == 0 || y == 8 || x == 0 || x == 8 {
+                let i = y * 9 + x;
+                out[i / 8] |= 0x80 >> (i % 8);
+            }
+            x += 1;
+        }
+        y += 1;
+    }
+    out
+}
+
+/// 全量字数（25909 = cmap 全集，供自检/串口）。
+pub fn coverage() -> usize {
+    INDEX.len() / REC
+}
+
+/// 码点 → 点阵；表内无此字回 `None`（二分查）。
+pub fn lookup(ch: char) -> Option<Glyph> {
+    let want = ch as u32;
+    let (mut lo, mut hi) = (0usize, coverage());
+    while lo < hi {
+        let mid = (lo + hi) / 2;
+        let r = &INDEX[mid * REC..mid * REC + REC];
+        let cp = r[0] as u32 | (r[1] as u32) << 8 | (r[2] as u32) << 16;
+        if cp == want {
+            let off = u32::from_le_bytes([r[4], r[5], r[6], r[7]]) as usize;
+            return Some(Glyph {
+                adv: r[3],
+                xmin: r[8] as i8,
+                top: r[9],
+                w: r[10],
+                h: r[11],
+                bits: BITS.get(off..).unwrap_or(&[]),
+            });
+        }
+        if cp < want {
+            lo = mid + 1;
+        } else {
+            hi = mid;
         }
     }
     None
 }
 
-/// 中文位点或豆腐块：`Screen::draw_str` 非 ASCII 路统一经此，永不回 `None`。
-pub fn rows_or_tofu(ch: char) -> &'static [u16; 16] {
-    lookup(ch).unwrap_or(&TOFU_ROWS)
-}
-
-/// 子集字数（矩阵/串口断言用，不画屏）。
-#[allow(dead_code)]
-pub fn coverage() -> usize {
-    TABLE.len()
+/// 查表或豆腐块（`Screen` 非 ASCII 路统一经此，永不回空）。
+pub fn glyph_or_tofu(ch: char) -> Glyph {
+    lookup(ch).unwrap_or(TOFU)
 }

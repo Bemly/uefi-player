@@ -1,11 +1,13 @@
 //! TUI 测试页（P4 收敛后形态）：只跑诊断项，播片入口已搬走。
 //!
-//! - 入口：`run_test_page(screen: Screen) -> Screen`（P3 前身 `run_menu` 已删，破坏式）。
+//! - 入口：`run_test_page(screen: Screen) -> (Screen, Flow)`（P3 前身 `run_menu` 已删，破坏式）；
+//!   面板化（`ptui::ui`，compact 底栏紧贴列表）：↑↓ 选、Enter 跑，旧单键直跑保留，
+//!   Tab 呼出悬浮跳转菜单（选中去处回 `Flow::Jump` 交首页分发）。
 //! - 诊断分发：`diag::registry::ITEMS` 逐项调用保留；`fatal_on_error` 项（生产播片
 //!   `video_run`）跳过不列，由 TUI 首页经 `video::play::play_path` 接管
 //!   （`registry.rs` 零改，播片键 `0` 在此页按未知键处理）。
-//! - 背景：`WP_TOP` 以下行区播壁纸，源几何取 clip 真实 `w/h`（`display.fit` 生效，
-//!   不写死 `WP_W/WP_H`）。
+//! - 背景：`max(WP_TOP, 面板底)` 以下行区播壁纸，源几何取 clip 真实 `w/h`
+//!   （`display.fit` 生效，不写死 `WP_W/WP_H`）。
 //! - 行区 paint 失败：记 `log::warn!` 再停背景（不静默杀，方便矩阵定位）。
 //!
 //! 错误策略：
@@ -16,10 +18,17 @@ use core::time::Duration;
 
 use uefi::boot::stall;
 
+use alloc::format;
+use alloc::string::String;
+use alloc::vec::Vec;
+
 use crate::diag::common::{flush_keys, pause_return, poll_key};
 use crate::diag::registry::{Entry, ITEMS};
 use crate::error::{NyaStatus, Result, handle_fatal};
 use crate::graphics::{Screen, calibrate_tps, tsc};
+use crate::ptui::jump::{Flow, Target};
+use crate::ptui::state::Next;
+use crate::ptui::ui::{self, Act, Row, View};
 use crate::video::decoder::Clip;
 use crate::wallpaper::{self, WP_H, WP_TOP, WP_W};
 
@@ -29,23 +38,32 @@ fn is_playback(item: &crate::diag::registry::Item) -> bool {
     item.fatal_on_error
 }
 
-fn draw_menu(screen: &mut Screen) {
-    let _ = screen.clear();
-    screen.reset_cursor();
-    screen.draw_str("== TUI Tests ==");
-    for item in ITEMS {
-        if is_playback(item) {
-            continue;
-        }
-        screen.draw_str(&alloc::format!(
-            "[{}] {} - {}",
-            item.key,
-            item.name,
-            item.desc
-        ));
-    }
-    screen.draw_str("[r] 重启  [q] 返回上级");
-    screen.draw_str("按键选择：");
+/// 可列的诊断项（播片项剔除）。
+fn items() -> impl Iterator<Item = &'static crate::diag::registry::Item> {
+    ITEMS.iter().filter(|it| !is_playback(it))
+}
+
+/// 测试页面板（compact：底栏紧贴列表，下方留给壁纸行区）；返回行区起点。
+fn draw_menu(screen: &mut Screen, sel: usize, note: Option<&str>) -> usize {
+    let keys: Vec<String> = items().map(|it| format!("{}", it.key)).collect();
+    let mut rows: Vec<Row> = items()
+        .zip(keys.iter())
+        .map(|(it, k)| Row::new(k, it.name, String::from(it.desc)))
+        .collect();
+    rows.push(Row::new("r", "重启", String::from("冷重启整机")));
+    let notes: Vec<String> = note.map(String::from).into_iter().collect();
+    let bottom = ui::draw(
+        screen,
+        &View {
+            title: "测试 / 诊断",
+            rows: &rows,
+            sel: Some(sel),
+            notes: &notes,
+            hint: "↑↓ 选择  Enter 运行  单键直跑  Tab 跳转  q 返回上级",
+            compact: true,
+        },
+    );
+    bottom.max(WP_TOP)
 }
 
 /// 诊断项的可返回式报错：显示错误，等任意键回测试页（不 halt）。
@@ -99,10 +117,9 @@ fn load_background(screen: &mut Screen) -> Option<WpState> {
     })
 }
 
-/// 阻塞等按键，空闲时按帧预算在文字区下方播壁纸（`WP_TOP` 以下行区，
-/// 测试页文字不重画——`draw_str` 逐像素 `VideoFill` 跟不上帧率）。
+/// 阻塞等按键，空闲时按帧预算在面板下方播壁纸（`top` 以下行区，面板不重画）。
 /// 无壁纸时等价旧 `wait_key_ex`（轮询 + 短 stall）。
-fn wait_key_or_animate(screen: &mut Screen, wp: &mut Option<WpState>) -> (char, u16) {
+fn wait_key_or_animate(screen: &mut Screen, wp: &mut Option<WpState>, top: usize) -> (char, u16) {
     loop {
         if let Some((key, raw)) = poll_key() {
             return (key, raw);
@@ -115,7 +132,7 @@ fn wait_key_or_animate(screen: &mut Screen, wp: &mut Option<WpState>) -> (char, 
                 // 行区 paint 失败就停背景（先记 warn，不静默，方便矩阵定位）。
                 // 源几何取 clip 真实 `w/h`（`wallpaper::load` 已带几何），不写死 `WP_W/WP_H`。
                 if screen
-                    .upload_frame_region(st.set.w, st.set.h, WP_TOP, st.set.frame(st.idx))
+                    .upload_frame_region(st.set.w, st.set.h, top, st.set.frame(st.idx))
                     .is_ok()
                 {
                     // 画廊步进：list 回绕，once 到末帧停留（见 `wallpaper::next_gallery_index`）。
@@ -150,41 +167,70 @@ struct WpState {
 }
 
 /// TUI 测试页主循环（P4-A：菜单背景预载逻辑不变；播片入口已搬走）：
-/// 值进值出 `Screen`，`q` 回 TUI 上级（调用方继续页栈），`r` 重启。
-pub fn run_test_page(mut screen: Screen) -> Screen {
+/// 值进值出 `Screen`，`q` 回 TUI 上级（调用方继续页栈），`r` 重启，Tab 浮层跳转。
+pub fn run_test_page(mut screen: Screen) -> (Screen, Flow) {
     // P4-A：测试页背景预载（关/无片源/分辨率不对 → None，纯静态页）。
     let mut wp = load_background(&mut screen);
-    let mut wp_warned = false;
+    // 开着但没片源：备注行提示（随页常驻）。
+    let note = if crate::config::wallpaper_enabled() && wp.is_none() {
+        Some("wallpaper: enabled but no frames, static menu.")
+    } else {
+        None
+    };
+    let n = items().count() + 1;
+    let mut sel = 0usize;
+    ui::clear_status();
     // 就绪标记（串口可断言；QEMU 黑盒矩阵靠它定发送按键的时机
     // 早发的键会被下面的 flush_keys 当陈旧输入排空）。
     log::info!("menu: ready (press key)");
     loop {
-        draw_menu(&mut screen);
-        // 开着但没片源：提示一次（随后重画不再刷，避免挤占行区预留）。
-        if crate::config::wallpaper_enabled() && wp.is_none() && !wp_warned {
-            screen.draw_str("wallpaper: enabled but no frames, static menu.");
-            wp_warned = true;
-        }
+        let top = draw_menu(&mut screen, sel, note);
         flush_keys();
-        let (key, raw) = wait_key_or_animate(&mut screen, &mut wp);
-
-        if key_match('q', key, raw) {
-            // 回 TUI 上级（调用方页栈继续）。
-            log::info!("menu: back to ptui");
-            return screen;
-        }
-        if key_match('r', key, raw) {
+        let (key, raw) = wait_key_or_animate(&mut screen, &mut wp, top);
+        // 先按原始码兜底比对旧单键（固件把扫描码塞进 unicode_char 的容错），再走统一语义。
+        let key = if key_match('q', key, raw) {
+            'q'
+        } else if key_match('r', key, raw) {
+            'r'
+        } else {
+            key
+        };
+        let run_key = match ui::map(&mut screen, Target::Page(Next::Tests), key) {
+            Act::Back => {
+                // 回 TUI 上级（调用方页栈继续）。
+                log::info!("menu: back to ptui");
+                return (screen, Flow::Back);
+            }
+            Act::Jump(t) => {
+                log::info!("menu: back to ptui");
+                return (screen, Flow::Jump(t));
+            }
+            Act::Up => {
+                sel = ui::step_sel(sel, n, true);
+                continue;
+            }
+            Act::Down => {
+                sel = ui::step_sel(sel, n, false);
+                continue;
+            }
+            Act::Enter | Act::Right => match items().nth(sel) {
+                Some(it) => it.key,
+                None => 'r',
+            },
+            Act::Key(c) => c,
+            Act::Left | Act::Redraw => continue,
+        };
+        if run_key == 'r' {
             uefi::runtime::reset(uefi::runtime::ResetType::COLD, uefi::Status::SUCCESS, None);
         }
 
         let mut matched = false;
-        for item in ITEMS {
-            if is_playback(item) {
-                // 生产播片入口搬走（TUI 首页经 `play_path` 接管），本页跳过。
-                continue;
-            }
-            if key_match(item.key, key, raw) {
+        for (i, item) in items().enumerate() {
+            // 生产播片入口已剔除（TUI 首页经 `play_path` 接管）。
+            if key_match(item.key, run_key, raw) || item.key == run_key {
                 matched = true;
+                sel = i;
+                ui::clear_status();
                 match item.run {
                     Entry::Shared(f) => {
                         run_shared(&mut screen, f, item.fatal_on_error);
@@ -213,12 +259,9 @@ pub fn run_test_page(mut screen: Screen) -> Screen {
 
         if !matched {
             // 带上原始键值：固件若把扫描码塞进 unicode_char，这里能看出来。
-            screen.draw_str(&alloc::format!(
-                "Unknown key: code U+{:04X} ('{}') - try again.",
-                raw,
-                key
-            ));
-            stall(Duration::from_millis(500));
+            log::info!("menu: unknown key U+{:04X}", raw);
+            ui::set_status(format!("未知按键 U+{:04X}（↑↓ Enter / 单键）", raw));
+            stall(Duration::from_millis(100));
         }
     }
 }
