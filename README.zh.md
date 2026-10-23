@@ -147,4 +147,6 @@ docs/              设计文档（唯一口径）+ 真机报告（docs/reports/�
 
 ## 许可证
 
-项目本身尚未选定许可证。第三方组件沿用各自的许可证：`third_party/` 下的 submodule 跟随上游，内置的缝合像素字体（Fusion Pixel）为 OFL-1.1（见 `tools/config-gui/assets/OFL.txt`）。
+[WTFNMFPL](LICENSE)（Do What The Fuck You Want To But It's Not My Fault Public License，第 1 版）：想怎么用就怎么用，出了任何问题都不要找作者。
+
+第三方组件沿用各自的许可证：`third_party/` 下的 submodule 跟随上游，内置的缝合像素字体（Fusion Pixel）为 OFL-1.1（见 `tools/config-gui/assets/OFL.txt`）。

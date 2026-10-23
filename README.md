@@ -149,4 +149,6 @@ The design docs are written in Chinese.
 
 ## License
 
-The project itself has no license yet. Third-party components keep their own licenses: the submodules under `third_party/` follow their upstreams, and the bundled Fusion Pixel font is OFL-1.1 (see `tools/config-gui/assets/OFL.txt`).
+[WTFNMFPL](LICENSE) (Do What The Fuck You Want To But It's Not My Fault Public License, v1). Do whatever you want with it; just don't hold the authors liable for anything that goes wrong.
+
+Third-party components keep their own licenses: the submodules under `third_party/` follow their upstreams, and the bundled Fusion Pixel font is OFL-1.1 (see `tools/config-gui/assets/OFL.txt`).
