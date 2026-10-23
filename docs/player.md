@@ -163,6 +163,7 @@
 | `zero_copy` | 单复用帧缓冲逐显示帧即时解码（调用方须立即上传） | qois |
 | `single`（NEW） | 每帧重读文件 + 重解码，零缓存下限对照（旧单帧循环的 Clip 化） | qois + hevc 代表格式 |
 
+- 全量预解码预算：`clip`/`eager` 共收口 256MB（1080p BGRA 约 30 帧，超预算直接 Err“帧太多切 stream 供片”不断播；40s@60fps 全量约 19GB 故长片切 `stream`，懒路径不受影响）。
 - 只切 `Clip` 内部拿帧方式：`blt`/`direct`/`mp_draw`/`nano_pump`/`dynamic_draw`
   上传路零改，只消费 `next_frame`/`rewind`/`len`/`frame`。
 - per-codec 覆盖（`[decode.<fmt>] fetch`）：缺省（None）继承全局 `[play] feed`；

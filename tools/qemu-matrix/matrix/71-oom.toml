@@ -1,0 +1,50 @@
+# 71-oom.toml：QEMU 黑盒矩阵分组（`matrix/` 目录，clip 全量预解码预算 OOM 熔断）。
+# 共 1 case（长片 clip 全预解码超 256MB 预算干净报错），单文件 ≤1000 行（AGENTS 口径）。
+# 新增 case 按前缀落对应文件（OOM 类进本文件），并写 `covers`。
+#
+# 预算口径（`src/video/decoder/mod.rs` 共收口 `check_clip_budget`）：
+# 256MB（1080p BGRA 约 30 帧；40s@60fps 全量约 19GB 故长片必须切 stream，
+# 见 `docs/transcode.md` 内存纪律，与 handover 同源）；超预算直接 Err
+# （帧太多切 stream 供片），绝不 panic/OOM；stream/zero_copy/single 懒路径不受影响。
+# 片源合成（runner 纯 Rust 现场合成，零新二进制入库）：复用
+# `usb_reports/1080p/video.qois` 首帧真 QOI 负载（含 14B 头），按几何算超预算帧数+8 余量
+# 重复拼 `u32le len` 串（1080p 约 40 帧，解码约 320MB > 256MB）。
+# 断言：`ptui: play 0 path=` + `too many frames for clip, use stream`（干净报错行，
+# 外层 `playlist: skip` / `ptui: play failed` 原样透出，不断播）；
+# forbid 走全局红线（无 panic 即覆盖），不断言画质。
+# 起播键流（TUI 外壳口径）：p → 首页 `1` 进播放页 → 数字 `1` 播首项（失败停留报错页，soak 只看红线）。
+
+[[case]]
+name = "oom-clip-budget"
+covers = ["src/video/decoder/", "src/wallpaper.rs"]
+timeout_sec = 180
+needs_oom_qois = true
+config = """
+version = 1
+[accel]
+level = "auto"
+[render]
+mode = "direct"
+vsync = "off"
+[play]
+fps = "max"
+feed = "clip"
+[playlist]
+loop = "loop_list"
+[[playlist.items]]
+path = "video.qois"
+[wallpaper]
+enable = false
+[schedule]
+backend = "manual"
+workers = "all"
+dist = "static"
+"""
+boot_expect = ["cfg: version=1", "idle: ready"]
+keys = [
+  { send = "p", wait_for = ["idle: ready (press any key)"], wait_after = 2 },
+  { send = "1", wait_for = ["ptui: page=home"], wait_after = 2 },
+  { send = "1", wait_for = ["ptui: page=play"], wait_after = 5 },
+]
+expect = ["ptui: play 0 path=video.qois", "too many frames for clip, use stream"]
+soak_sec = 10

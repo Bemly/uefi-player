@@ -136,6 +136,45 @@ pub(crate) fn raw_file_path(dir: &str, name: &str) -> alloc::string::String {
     }
 }
 
+/// 全量预解码内存预算（eager 共收口，八格式共用）：256MB。
+/// 口径：1080p BGRA 单帧 1920*1080*4 ≈ 8MB，256MB ≈ 30 帧；
+/// 长片 40s@60fps 全预解码要 ~19GB（见 `docs/transcode.md` 内存纪律，与 handover 同源），
+/// 固件侧不可能常驻，故超预算直接 Err（帧太多切 stream 供片），绝不 panic/OOM。
+/// 只卡全量预分配（clip/壁纸/mp 强制 eager + `ensure_eager` 全量兜底）；
+/// stream/zero_copy/single 懒路径（窗口/单槽/零缓存）不受影响。
+pub(crate) const CLIP_BUDGET_BYTES: usize = 256 * 1024 * 1024;
+
+/// 逐帧累加预算检查（eager 全量分配唯一收口逻辑）：`frames` 为将达到的帧数，
+/// `w*h*4` 为单帧 BGRA 字节；超预算即 warn + Err（`NyaStatus::_Debug` feeder 口径，
+/// 文案含“too many frames for clip, use stream”+“帧太多切 stream 供片”，
+/// 外层 `playlist: skip` / `ptui: play failed` 原样透出，不断播）。
+pub(crate) fn check_clip_budget(
+    frames: usize,
+    w: usize,
+    h: usize,
+    tag: &str,
+) -> crate::error::Result<()> {
+    let per = w.saturating_mul(h).saturating_mul(4);
+    let need = (frames as u64).saturating_mul(per as u64);
+    if need > CLIP_BUDGET_BYTES as u64 {
+        log::warn!(
+            "{}: too many frames for clip, use stream (帧太多切 stream 供片, {} frames {}x{} > 256MB budget)",
+            tag,
+            frames,
+            w,
+            h
+        );
+        return Err(crate::error::NyaStatus::_Debug(alloc::format!(
+            "{}: too many frames for clip, use stream (帧太多切 stream 供片, {} frames {}x{} > 256MB budget)",
+            tag,
+            frames,
+            w,
+            h
+        )));
+    }
+    Ok(())
+}
+
 //////// 统一播放剪辑：预解码帧集（`Vec<Vec<BltPixel>>` + 游标），`[play] feed` 五档供片。
 //////// 对外 API 冻结（`video.rs`/`menu.rs`/`wallpaper.rs`/`exec.rs` 零改）：
 //////// 字段 `w,h,frames,cursor` + 方法 `next_frame/rewind/len/frame` 签名不变；
@@ -176,17 +215,25 @@ pub struct Clip {
 }
 
 impl Clip {
-    /// 全预解码构造（`eager.rs` 落点共用）：`lazy` 为空，`total` 即帧数。
-    pub(crate) fn eager(w: usize, h: usize, frames: Vec<Vec<BltPixel>>) -> Self {
+    /// 全预解码构造（`eager.rs` 落点共用，八格式唯一收口）：`lazy` 为空，`total` 即帧数。
+    /// 预算即 `check_clip_budget`（256MB，1080p ≈ 30 帧，与 handover 19GB/40s@60fps 同源）；
+    /// 超预算直接 Err（帧太多切 stream 供片），绝不 panic；懒路径不进此函数。
+    pub(crate) fn eager(
+        w: usize,
+        h: usize,
+        frames: Vec<Vec<BltPixel>>,
+        tag: &str,
+    ) -> crate::error::Result<Self> {
+        check_clip_budget(frames.len(), w, h, tag)?;
         let total = frames.len();
-        Self {
+        Ok(Self {
             w,
             h,
             frames,
             cursor: 0,
             lazy: None,
             total,
-        }
+        })
     }
 
     /// qois 字节流解码（`tag` 只进串口：`video` / `wallpaper`）。

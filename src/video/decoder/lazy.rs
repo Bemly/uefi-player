@@ -401,6 +401,8 @@ impl LazyState {
     /// 强制全量（`Clip::ensure_eager` 唯一落点）：停淘汰，余块全解进 `frames`。
     /// 前提 load 后即调（cursor==0，`frames=[F0]`）；失败留半集转全量，
     /// 调用方按加载失败处理（与构造期报错同 UX）。
+    /// 预算与 eager 共收口（`check_clip_budget`，256MB，超预算直接 Err 帧太多切 stream，
+    /// 绝不 panic；窗口/单槽懒播放不进此函数，不受影响）。
     pub(crate) fn drain_all(
         &mut self,
         frames: &mut Vec<Vec<BltPixel>>,
@@ -410,6 +412,8 @@ impl LazyState {
         let mut geom = Some((w, h));
         self.window = usize::MAX;
         while !self.finished {
+            // 逐帧预算（共收口；mp/dynamic 强制全量兜底亦卡，避免长片 OOM panic）。
+            super::check_clip_budget(frames.len() + 1, w, h, "video")?;
             if !self.fill(&mut geom) {
                 self.finished = true;
                 break;

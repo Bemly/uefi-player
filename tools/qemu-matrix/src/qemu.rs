@@ -198,6 +198,42 @@ pub(crate) fn run_case(
             Err(_) => return (false, format!("missing {src}")),
         }
     }
+    if case.needs_oom_qois {
+        // OOM 合成：复用真 QOI 帧头+逐帧复制拼 `u32le len` 串，零新二进制入库。
+        // 取 `video.qois` 首帧真负载（含 14B QOI 头），按几何算超 256MB 所需帧数+余量重复。
+        let src = format!("{ROOT}/usb_reports/1080p/video.qois");
+        match std::fs::read(&src) {
+            Ok(d) => {
+                if d.len() < 18 {
+                    return (false, format!("oom src too short {src}"));
+                }
+                let n = u32::from_le_bytes([d[0], d[1], d[2], d[3]]) as usize;
+                if d.len() < 4 + n || n < 14 {
+                    return (false, format!("oom src trunc {src}"));
+                }
+                let payload = &d[4..4 + n];
+                // QOI 头大端宽高（`qoif` + BE w/h），与固件 `decode_header` 同口径。
+                let w = u32::from_be_bytes([payload[4], payload[5], payload[6], payload[7]])
+                    as usize;
+                let h = u32::from_be_bytes([payload[8], payload[9], payload[10], payload[11]])
+                    as usize;
+                if w == 0 || h == 0 {
+                    return (false, format!("oom bad geom {w}x{h}"));
+                }
+                let per = w.saturating_mul(h).saturating_mul(4);
+                // 256MB 预算 + 8 帧余量（1080p 约 32 帧超限，取 40 帧；小几何自适应多拼）。
+                let need = (256usize * 1024 * 1024) / per.max(1) + 8;
+                let mut out = Vec::with_capacity((n + 4) * need);
+                let len_bytes = (n as u32).to_le_bytes();
+                for _ in 0..need {
+                    out.extend_from_slice(&len_bytes);
+                    out.extend_from_slice(payload);
+                }
+                files.push(("video.qois", out));
+            }
+            Err(_) => return (false, format!("missing {src}")),
+        }
+    }
     for i in 0..case.needs_wallpaper {
         // 黑场 BGRA 帧（1920x1080x4），只走通路不断言画质。
         files.push((

@@ -70,6 +70,10 @@ pub(crate) fn from_qois_bytes(data: &[u8], tag: &str) -> crate::error::Result<Ea
             _ => {}
         }
 
+        // 逐帧预算（共收口 `check_clip_budget`：256MB，1080p ≈ 30 帧；
+        // 超预算直接 Err 帧太多切 stream，绝不继续分配致 OOM panic）。
+        super::check_clip_budget(frames.len() + 1, w, h, tag)?;
+
         let mut pixel_buffer = vec![BltPixel::new(0, 0, 0); pixel_count];
 
         if qoi::decode_to_buf(
@@ -114,7 +118,7 @@ pub(crate) fn from_qois_bytes(data: &[u8], tag: &str) -> crate::error::Result<Ea
         );
     }
 
-    Ok(EagerClip::eager(w, h, frames))
+    Ok(EagerClip::eager(w, h, frames, tag)?)
 }
 
 /// hevc 字节流解码核心（`tag` 只进串口）：Annex-B 经 vendor `rusty_h265`
@@ -182,6 +186,8 @@ pub(crate) fn from_hevc_bytes(data: &[u8], tag: &str) -> crate::error::Result<Ea
             skipped += 1;
             continue;
         }
+        // 逐帧预算（共收口，超预算直接 Err 帧太多切 stream，绝不 OOM）。
+        super::check_clip_budget(frames.len() + 1, w, h, tag)?;
         frames.push(super::Clip::yuv420_to_bgra(ypl, upl, vpl, w, h));
     }
 
@@ -201,12 +207,13 @@ pub(crate) fn from_hevc_bytes(data: &[u8], tag: &str) -> crate::error::Result<Ea
         );
     }
 
-    Ok(EagerClip::eager(w, h, frames))
+    Ok(EagerClip::eager(w, h, frames, tag)?)
 }
 
 /// vp9 单样片解码结果收集（IVF/MP4 双路共用）：只要显示帧
 /// （隐藏 altref 无画面，直接跳过），只收 8-bit 4:2:0。
 /// 坏帧计数跳过，全坏/几何不一致调用方报错（与其它路同策略）。
+/// 逐帧预算共收口：超预算直接 Err 帧太多切 stream，绝不 OOM。
 fn collect_vp9_frame(
     frames: &mut Vec<Vec<BltPixel>>,
     skipped: &mut u32,
@@ -214,7 +221,8 @@ fn collect_vp9_frame(
     w: &mut usize,
     h: &mut usize,
     decoded: Vec<vp9dec::DecodedFrame>,
-) {
+    tag: &str,
+) -> crate::error::Result<()> {
     for d in decoded {
         // 隐藏帧（altref）无显示画面：不收，不记坏。
         let Some(f) = d.frame else { continue };
@@ -241,8 +249,10 @@ fn collect_vp9_frame(
             }
             _ => {}
         }
+        super::check_clip_budget(frames.len() + 1, *w, *h, tag)?;
         frames.push(super::Clip::yuv420_to_bgra(y, u, v, *w, *h));
     }
+    Ok(())
 }
 
 /// vp9 字节流解码核心（`tag` 只进串口）：IVF 容器经 vendor `vp9dec`
@@ -285,7 +295,8 @@ pub(crate) fn from_vp9_bytes(data: &[u8], tag: &str) -> crate::error::Result<Eag
             &mut w,
             &mut h,
             decoded,
-        );
+            tag,
+        )?;
     }
 
     if frames.is_empty() {
@@ -304,7 +315,7 @@ pub(crate) fn from_vp9_bytes(data: &[u8], tag: &str) -> crate::error::Result<Eag
         );
     }
 
-    Ok(EagerClip::eager(w, h, frames))
+    Ok(EagerClip::eager(w, h, frames, tag)?)
 }
 
 /// vp9 裸帧序列解码核心（MP4 `Vp09` 轨用）：样片即完整 VP9 帧，
@@ -335,7 +346,8 @@ pub(crate) fn from_vp9_raw_frames(
             &mut w,
             &mut h,
             decoded,
-        );
+            tag,
+        )?;
     }
 
     if frames.is_empty() {
@@ -354,7 +366,7 @@ pub(crate) fn from_vp9_raw_frames(
         );
     }
 
-    Ok(EagerClip::eager(w, h, frames))
+    Ok(EagerClip::eager(w, h, frames, tag)?)
 }
 
 /// avc 字节流解码核心（`tag` 只进串口）：Annex-B 经 vendor
@@ -392,6 +404,8 @@ pub(crate) fn from_avc_bytes(data: &[u8], tag: &str) -> crate::error::Result<Eag
             }
             _ => {}
         }
+        // 逐帧预算（共收口，超预算直接 Err 帧太多切 stream，绝不 OOM）。
+        super::check_clip_budget(frames.len() + 1, w, h, tag)?;
         frames.push(super::Clip::yuv420_to_bgra(
             planes.y, planes.u, planes.v, w, h,
         ));
@@ -413,7 +427,7 @@ pub(crate) fn from_avc_bytes(data: &[u8], tag: &str) -> crate::error::Result<Eag
         );
     }
 
-    Ok(EagerClip::eager(w, h, frames))
+    Ok(EagerClip::eager(w, h, frames, tag)?)
 }
 
 /// h263 裸流解码核心（`tag` 只进串口）：vendor `h263-rs` 流式解码
@@ -472,6 +486,8 @@ pub(crate) fn from_h263_bytes(data: &[u8], tag: &str) -> crate::error::Result<Ea
             skipped += 1;
             continue;
         }
+        // 逐帧预算（共收口，超预算直接 Err 帧太多切 stream，绝不 OOM）。
+        super::check_clip_budget(frames.len() + 1, w, h, tag)?;
         frames.push(super::Clip::yuv420_to_bgra(y, u, v, w, h));
     }
 
@@ -491,7 +507,7 @@ pub(crate) fn from_h263_bytes(data: &[u8], tag: &str) -> crate::error::Result<Ea
         );
     }
 
-    Ok(EagerClip::eager(w, h, frames))
+    Ok(EagerClip::eager(w, h, frames, tag)?)
 }
 
 /// mpeg2 裸流解码核心（`tag` 只进串口）：vendor `filmcraft-mpeg2v`
@@ -506,16 +522,17 @@ pub(crate) fn from_mpeg2v_bytes(data: &[u8], tag: &str) -> crate::error::Result<
     let mut expect: Option<(u32, u32)> = None;
     let mut w = 0usize;
     let mut h = 0usize;
-    let push_pic = |pic: &filmcraft_mpeg2v::Picture,
-                    frames: &mut Vec<Vec<BltPixel>>,
-                    skipped: &mut u32,
-                    expect: &mut Option<(u32, u32)>,
-                    w: &mut usize,
-                    h: &mut usize| {
+    let mut push_pic = |pic: &filmcraft_mpeg2v::Picture,
+                        frames: &mut Vec<Vec<BltPixel>>,
+                        skipped: &mut u32,
+                        expect: &mut Option<(u32, u32)>,
+                        w: &mut usize,
+                        h: &mut usize|
+     -> crate::error::Result<()> {
         // 只收 4:2:0（转换器唯一口径；422/444 记数跳过）。
         if pic.chroma != filmcraft_mpeg2v::ChromaFormat::Yuv420 {
             *skipped += 1;
-            return;
+            return Ok(());
         }
         match *expect {
             None => {
@@ -525,7 +542,7 @@ pub(crate) fn from_mpeg2v_bytes(data: &[u8], tag: &str) -> crate::error::Result<
             }
             Some((ew, eh)) if (pic.width, pic.height) != (ew, eh) => {
                 *skipped += 1;
-                return;
+                return Ok(());
             }
             _ => {}
         }
@@ -534,8 +551,10 @@ pub(crate) fn from_mpeg2v_bytes(data: &[u8], tag: &str) -> crate::error::Result<
         let cb = (*w / 2).saturating_mul(*h / 2);
         if pic.y.len() < yb || pic.cb.len() < cb || pic.cr.len() < cb {
             *skipped += 1;
-            return;
+            return Ok(());
         }
+        // 逐帧预算（共收口，超预算直接 Err 帧太多切 stream，绝不 OOM）。
+        super::check_clip_budget(frames.len() + 1, *w, *h, tag)?;
         frames.push(super::Clip::yuv420_to_bgra(
             &pic.y[..yb],
             &pic.cb[..cb],
@@ -543,12 +562,13 @@ pub(crate) fn from_mpeg2v_bytes(data: &[u8], tag: &str) -> crate::error::Result<
             *w,
             *h,
         ));
+        Ok(())
     };
     for (i, r) in filmcraft_mpeg2v::access_units(data).iter().enumerate() {
         match dec.decode(&data[r.clone()], i as i64) {
             Ok(pics) => {
                 for pic in &pics {
-                    push_pic(pic, &mut frames, &mut skipped, &mut expect, &mut w, &mut h);
+                    push_pic(pic, &mut frames, &mut skipped, &mut expect, &mut w, &mut h)?;
                 }
             }
             Err(_) => {
@@ -557,7 +577,7 @@ pub(crate) fn from_mpeg2v_bytes(data: &[u8], tag: &str) -> crate::error::Result<
         }
     }
     for pic in dec.flush() {
-        push_pic(&pic, &mut frames, &mut skipped, &mut expect, &mut w, &mut h);
+        push_pic(&pic, &mut frames, &mut skipped, &mut expect, &mut w, &mut h)?;
     }
 
     if frames.is_empty() {
@@ -576,7 +596,7 @@ pub(crate) fn from_mpeg2v_bytes(data: &[u8], tag: &str) -> crate::error::Result<
         );
     }
 
-    Ok(EagerClip::eager(w, h, frames))
+    Ok(EagerClip::eager(w, h, frames, tag)?)
 }
 
 /// theora 包序列解码核心（`tag` 只进串口）：vendor `oxideav-theora`
@@ -640,6 +660,8 @@ pub(crate) fn from_theora_packets(
             skipped += 1;
             continue;
         }
+        // 逐帧预算（共收口，超预算直接 Err 帧太多切 stream，绝不 OOM）。
+        super::check_clip_budget(frames.len() + 1, w, h, tag)?;
         frames.push(super::Clip::yuv420_to_bgra_vflip(
             &c.samples_y,
             &c.samples_cb,
@@ -665,7 +687,7 @@ pub(crate) fn from_theora_packets(
         );
     }
 
-    Ok(EagerClip::eager(w, h, frames))
+    Ok(EagerClip::eager(w, h, frames, tag)?)
 }
 
 /// raw 序列目录（`frameNNNN.raw`，BGRA 直存）：`want` 封顶预载数，
@@ -709,9 +731,14 @@ pub(crate) fn from_raw_dir(
     }
 
     let _ = super::decode_threads(MediaFormat::Raw);
+    // RAW-GEOM：帧几何取 `[decode.raw]` 生效值（与调用方 `frame_bytes` 同源，恒一致）；
+    // 提前取以便逐帧预算（共收口，超预算直接 Err 帧太多切 stream）。
+    let (rw, rh) = crate::config::decode_raw_wh();
     let mut frames = Vec::new();
     let mut skipped = 0u32;
     for name in names.into_iter().take(want.max(1)) {
+        // 逐帧预算：先卡帧数再读盘，避免长目录 OOM（绝不 panic）。
+        super::check_clip_budget(frames.len() + 1, rw, rh, tag)?;
         let path = super::raw_file_path(dir, &name);
         let cstr = match uefi::data_types::CString16::try_from(path.as_str()) {
             Ok(c) => c,
@@ -745,9 +772,7 @@ pub(crate) fn from_raw_dir(
     if skipped > 0 {
         log::warn!("{}: skipped {} bad frame(s)", tag, skipped);
     }
-    // RAW-GEOM：帧几何取 `[decode.raw]` 生效值（与调用方 `frame_bytes` 同源，恒一致）。
-    let (rw, rh) = crate::config::decode_raw_wh();
-    Ok(EagerClip::eager(rw, rh, frames))
+    Ok(EagerClip::eager(rw, rh, frames, tag)?)
 }
 
 /// raws 单文件（`video.raws`，BGRA 帧首尾相接无头）：按 `frame_bytes`
@@ -773,8 +798,10 @@ pub(crate) fn from_raws_bytes(data: &[u8], tag: &str) -> crate::error::Result<Ea
     }
     let mut frames = Vec::with_capacity(data.len() / frame_bytes);
     for chunk in data.chunks_exact(frame_bytes) {
+        // 逐帧预算（共收口，超预算直接 Err 帧太多切 stream，绝不 OOM）。
+        super::check_clip_budget(frames.len() + 1, rw, rh, tag)?;
         frames.push(super::bytes_as_pixels(chunk.to_vec()));
     }
     log::info!("{}: predecoded {} raws frames", tag, frames.len());
-    Ok(EagerClip::eager(rw, rh, frames))
+    Ok(EagerClip::eager(rw, rh, frames, tag)?)
 }

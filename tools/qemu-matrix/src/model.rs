@@ -96,6 +96,10 @@ pub(crate) struct Case {
     ///（`[wallpaper] format = "avc"` 用，验壁纸侧容器拆轨 + 预载）。
     #[serde(default)]
     pub(crate) needs_avcwallpaper: bool,
+    /// OOM 合成片源：现场合成超预算 `video.qois`（复用真 QOI 帧头+逐帧复制拼
+    /// `u32le len` 串，零新二进制入库；解码帧数×帧字节超 256MB 预算触发干净报错）。
+    #[serde(default)]
+    pub(crate) needs_oom_qois: bool,
     /// chainload 自举：镜像里再放一份 efi + 一条 BLS entry（单盘场景）。
     #[serde(default)]
     pub(crate) needs_chainload: bool,
