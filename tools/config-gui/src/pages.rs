@@ -417,9 +417,6 @@ impl App {
                 ui.add_space(4.0);
                 self.content_small(ui, display_bar_desc(self.cfg.display.bar));
             }
-            Page::Playlist => {
-                self.playlist_page(ui);
-            }
             Page::Decode => {
                 self.content_heading(ui, t!("decode.heading"));
                 self.content_small(ui, t!("decode.hint"));

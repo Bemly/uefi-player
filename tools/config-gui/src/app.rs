@@ -21,7 +21,6 @@ pub(crate) mod playlist;
 pub(crate) enum Page {
     File,
     Accel,
-    Playlist,
     Decode,
     Wallpaper,
     Boot,
@@ -1239,7 +1238,6 @@ impl eframe::App for App {
                 ui.horizontal(|ui| {
                     ui.selectable_value(&mut self.page, Page::File, t!("nav.file"));
                     ui.selectable_value(&mut self.page, Page::Accel, t!("nav.accel"));
-                    ui.selectable_value(&mut self.page, Page::Playlist, t!("nav.playlist"));
                     ui.selectable_value(&mut self.page, Page::Decode, t!("nav.decode"));
                     ui.selectable_value(&mut self.page, Page::Wallpaper, t!("nav.wallpaper"));
                     ui.selectable_value(&mut self.page, Page::Boot, t!("nav.boot"));
@@ -1357,7 +1355,6 @@ impl eframe::App for App {
                     ui.heading(egui::RichText::new(t!("nav.sections")).color(nav_fg));
                     self.nav_button(ui, Page::File, t!("nav.file").into_owned());
                     self.nav_button(ui, Page::Accel, t!("nav.accel").into_owned());
-                    self.nav_button(ui, Page::Playlist, t!("nav.playlist").into_owned());
                     self.nav_button(ui, Page::Decode, t!("nav.decode").into_owned());
                     self.nav_button(ui, Page::Wallpaper, t!("nav.wallpaper").into_owned());
                     self.nav_button(ui, Page::Boot, t!("nav.boot").into_owned());

@@ -221,6 +221,7 @@ impl App {
     }
 
     /// 播放列表编辑器（循环行 + 列表；`fps`/`feed` 全局默认已搬解码页顶）。
+    /// 调用方：图库页右侧栏底部（WE 式；独立 tab 已摘除）。
     pub(crate) fn playlist_list_editor(&mut self, ui: &mut egui::Ui) {
         self.playlist_loop_row(ui);
         ui.add_space(8.0);
@@ -254,14 +255,6 @@ impl App {
         );
         self.cfg.wallpaper.items = items;
         self.wallpaper_sel = sel;
-    }
-
-    /// 播放列表页（循环 + 画廊列表；`fps`/`feed` 全局默认见解码页顶）。
-    pub(crate) fn playlist_page(&mut self, ui: &mut egui::Ui) {
-        self.content_heading(ui, t!("playlist.heading"));
-        self.content_small(ui, t!("playlist.hint"));
-        ui.add_space(4.0);
-        self.playlist_list_editor(ui);
     }
 }
 
