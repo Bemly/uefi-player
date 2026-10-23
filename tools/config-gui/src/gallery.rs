@@ -32,7 +32,7 @@ pub(crate) const CARD_GAP: f32 = 12.0;
 /// 封面宽封顶（pt/px 等比；单张约 230KB，十张常驻约 2MB）。
 pub(crate) const COVER_W: u32 = 320;
 
-/// 图库一行（文件名 + 字节数 + 固件侧格式标签 + 封面元数据）。
+/// 图库一行（文件名 + 字节数 + 固件侧格式标签 + 封面元数据 + mtime）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct GalleryEntry {
     pub(crate) name: String,
@@ -44,6 +44,8 @@ pub(crate) struct GalleryEntry {
     pub(crate) codec: Option<&'static str>,
     /// 封面线程回填（None = 还没回来/不支持）。
     pub(crate) meta: Option<ThumbMeta>,
+    /// mtime 秒（默认从旧到新排序用；读不到按 0，即最老）。
+    pub(crate) mtime: u64,
 }
 
 /// 封面元数据（几何 + 计时；计时仅 mp4 有）。
@@ -176,7 +178,15 @@ pub(crate) fn display_kind(kind: &'static str, codec: Option<&'static str>) -> &
 }
 
 /// 列图库：根目录与 `wallpaper/` 下的 regular 文件（大小 + 标签；1080p/ 不再扫描）。
+/// 默认按 mtime 从旧到新（同秒按名），`dsxhgm.mp4` 触古即恒居首。
 /// 缺目录/读错静默空集（图库是装饰，不断任何流程）。
+fn entry_mtime(meta: &std::fs::Metadata) -> u64 {
+    meta.modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
 pub(crate) fn list_gallery(dir: &str) -> Vec<GalleryEntry> {
     let mut out = Vec::new();
     // 转码产物直接落在图库根目录（时间戳默认名）：同样列出
@@ -197,6 +207,7 @@ pub(crate) fn list_gallery(dir: &str) -> Vec<GalleryEntry> {
                 name,
                 codec: None,
                 meta: None,
+                mtime: entry_mtime(&meta),
             });
         }
     }
@@ -218,10 +229,11 @@ pub(crate) fn list_gallery(dir: &str) -> Vec<GalleryEntry> {
                 kind: media_kind(&name),
                 codec: None,
                 meta: None,
+                mtime: entry_mtime(&meta),
             });
         }
     }
-    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out.sort_by(|a, b| (a.mtime, &a.name).cmp(&(b.mtime, &b.name)));
     out
 }
 
@@ -730,6 +742,33 @@ mod gallery_tests {
             !names
                 .iter()
                 .any(|n| n.ends_with(".toml") || n.ends_with(".txt")),
+            "{names:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn list_sorts_old_to_new() {
+        // 默认从旧到新（同秒按名）；`dsxhgm.mp4` 触古即恒居首的机制。
+        let dir =
+            std::env::temp_dir().join(format!("uefi-player-gallery-sort-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        std::fs::write(dir.join("b.mp4"), [0u8; 8]).expect("write");
+        std::thread::sleep(std::time::Duration::from_millis(1200));
+        std::fs::write(dir.join("a.mp4"), [0u8; 8]).expect("write");
+        let names: Vec<String> = list_gallery(&dir.display().to_string())
+            .into_iter()
+            .map(|e| e.name)
+            .collect();
+        assert_eq!(
+            names.iter().position(|n| n == "b.mp4"),
+            Some(0),
+            "{names:?}"
+        );
+        assert_eq!(
+            names.iter().position(|n| n == "a.mp4"),
+            Some(1),
             "{names:?}"
         );
         let _ = std::fs::remove_dir_all(&dir);

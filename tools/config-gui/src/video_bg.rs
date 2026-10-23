@@ -1,6 +1,6 @@
 //! 动态背景 GPU 转换版：硬解在 GPU，CPU 只搬运不算像素，玻璃在 live 内采样。
 //!
-//! 链路（默认 `input.mp4` 前 40s 循环，缺片/失败静默回静态底，不断任何流程；
+//! 链路（默认图库首个 avc/hevc 整片循环，缺片/失败静默回静态底，不断任何流程；
 //! 图库选中 avc/hevc 片源即接管背景（`resolve_source`，切源杀旧 worker 重起）：
 //! worker 线程硬解（mac VideoToolbox / Win-Linux Vulkan `BytesDecoder`）→
 //! 只传 NV12（Y + 交错 UV，不做 BT.601，不转 RGBA）→ UI 线程 DMA 直传两张
@@ -19,18 +19,14 @@
 //! 在 `tick`（闭包外）做，闭包内只读当前 native id 绘制。paint 回调（nounwind，
 //! panic 即 abort，血泪）里本模块零逻辑——转换提交全在 `tick` 内同步做完。
 //!
-//! 内存纪律：40s 循环 + `sync_channel(4)` 背压（NV12 约 5.6MB），UI 按
-//! min(源 fps, 15) 定速消费，超窗即重建解码器回绕（干净 IDR，无跨轮参考）。
+//! 内存纪律：整片循环 + `sync_channel(4)` 背压（NV12 约 5.6MB），UI 按
+//! min(源 fps, 15) 定速消费，播完即重建解码器回绕（干净 IDR，无跨轮参考）。
 
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TryRecvError};
 use std::time::{Duration, Instant};
 
 use egui_wgpu::wgpu;
 
-/// 片源（绝对路径，用户拍板；不存在即静默回退，不报错挡流程）。
-pub(crate) const VIDEO_PATH: &str = "/Users/bemly/Movies/input.mp4";
-/// 循环窗（秒）：只播前 40s，到点即回绕。
-pub(crate) const LOOP_SECS: f64 = 40.0;
 /// 后台→UI 有界队列（背压节流硬解；NV12 单帧约 1.4MB，4 帧约 5.6MB）。
 pub(crate) const QUEUE_DEPTH: usize = 4;
 /// 显示封顶帧率（与片源一致，60fps 全速；CPU 换流畅，见 tick 注释）。
@@ -65,7 +61,7 @@ pub(crate) struct VideoBg {
     rs: Option<egui_wgpu::RenderState>,
     gpu: Option<GpuYuv>,
     front: Option<(egui::TextureId, f32, f32)>,
-    /// 当前片源（None = 默认 `VIDEO_PATH`；`set_source` 换源即杀旧 worker 重起）。
+    /// 当前片源（None = 无视频 → 静态底；默认由调用方按图库首个 avc/hevc 填入）。
     source: Option<String>,
 }
 
@@ -98,19 +94,38 @@ impl VideoBg {
     }
 
     /// 选中接管背景的纯规则（可单测，无 IO）：选中项编解码在集内才接管，
-    /// 否则 None（=默认片源）。集：mac `avc/hevc`（VT 双解）；Win/Linux 仅
-    /// `avc`（`gpu-video` 0.4 无 HEVC 解码器）。`codec` 由图库封面线程探针回填。
+    /// 否则回落图库首个集内项（默认背景跟随图库，不硬编码）。集：mac
+    /// `avc/hevc`（VT 双解）；Win/Linux 仅 `avc`（`gpu-video` 0.4 无 HEVC 解码器）。
+    /// `codec` 由图库封面线程探针回填；图库按 mtime 从旧到新，`dsxhgm.mp4` 触古恒居首。
     pub(crate) fn resolve_source(
         entries: &[crate::gallery::GalleryEntry],
         selected: Option<usize>,
         dir: &str,
     ) -> Option<String> {
-        let e = selected.and_then(|i| entries.get(i))?;
-        let ok = matches!(e.codec, Some("avc"))
-            || (cfg!(target_os = "macos") && matches!(e.codec, Some("hevc")));
-        if !ok {
-            return None;
+        if let Some(e) = selected.and_then(|i| entries.get(i)) {
+            let ok = matches!(e.codec, Some("avc"))
+                || (cfg!(target_os = "macos") && matches!(e.codec, Some("hevc")));
+            if ok {
+                return Some(
+                    std::path::Path::new(dir)
+                        .join(&e.name)
+                        .display()
+                        .to_string(),
+                );
+            }
         }
+        Self::default_first_source(entries, dir)
+    }
+
+    /// 默认背景：图库首个集内项（mtime 从旧到新；无集内项即 None → 静态底）。
+    pub(crate) fn default_first_source(
+        entries: &[crate::gallery::GalleryEntry],
+        dir: &str,
+    ) -> Option<String> {
+        let e = entries.iter().find(|e| {
+            matches!(e.codec, Some("avc"))
+                || (cfg!(target_os = "macos") && matches!(e.codec, Some("hevc")))
+        })?;
         Some(
             std::path::Path::new(dir)
                 .join(&e.name)
@@ -134,22 +149,13 @@ impl VideoBg {
         }
     }
 
-    /// 循环预算帧数（40s × fps，原片 720p60 即 2400；纯规则，可测）。
-    pub(crate) fn loop_budget_frames(fps: u32) -> u64 {
-        (LOOP_SECS * fps.max(1) as f64).round() as u64
-    }
-
-    /// 是否该回绕（pts 秒数 ≥40 即绕；纯规则，可测）。
+    /// 实时节拍：elapsed 超 wall 才睡（纯规则，可测）。
     pub(crate) fn pace_sleep_ms(elapsed_secs: f64, wall_secs: f64) -> u64 {
         if elapsed_secs > wall_secs {
             ((elapsed_secs - wall_secs) * 1000.0).round() as u64
         } else {
             0
         }
-    }
-
-    pub(crate) fn should_loop(elapsed_secs: f64) -> bool {
-        elapsed_secs >= LOOP_SECS
     }
 
     /// 显示节拍（秒）：min(源 fps, 15) 取倒数；纯规则，可测。
@@ -184,10 +190,11 @@ impl VideoBg {
         }
         if !self.started {
             self.started = true;
-            let src = self
-                .source
-                .clone()
-                .unwrap_or_else(|| VIDEO_PATH.to_string());
+            let Some(src) = self.source.clone() else {
+                self.fallback = Some(String::from("video bg: no source, fallback solid"));
+                self.playing = false;
+                return false;
+            };
             if !Self::should_try_start(std::path::Path::new(&src).exists()) {
                 self.fallback = Some(String::from("video bg: no file, fallback solid"));
                 self.playing = false;
@@ -668,7 +675,7 @@ fn decode_loop(path: &str, tx: SyncSender<BgMsg>) {
         h: 720,
         fps,
     });
-    // 外层即 40s 回绕：SPS/PPS 固化一次，每轮重建硬解器（干净 IDR，无跨轮参考）。
+    // 外层即整片回绕：SPS/PPS 固化一次，每轮重建硬解器（干净 IDR，无跨轮参考）。
     let params = if hevc {
         match split_hevc_param_sets(&demuxed.annexb_prefix) {
             Some((v, sv, p)) => BgParams::Hevc {
@@ -709,16 +716,10 @@ fn decode_loop(path: &str, tx: SyncSender<BgMsg>) {
             }
         };
         let mut elapsed = 0.0f64;
-        let mut sent = 0u64;
-        let budget = VideoBg::loop_budget_frames(fps);
         // 首组前缀（SPS/PPS）VideoToolbox 建会话时已消费，此处只喂样片负载
         // （length-prefixed AVCC，与 `nalu_len_bytes` 一致，无需转 Annex-B）。
-        'groups: for g in &demuxed.groups {
+        for g in &demuxed.groups {
             for r in g {
-                // 到窗即绕（按 pts，不按帧数，B 帧重排下 pts 更准）。
-                if VideoBg::should_loop(elapsed) || sent >= budget {
-                    break 'groups;
-                }
                 elapsed += r.dur;
                 match dec.decode(&r.payload) {
                     Ok(Some(frame)) => {
@@ -727,7 +728,6 @@ fn decode_loop(path: &str, tx: SyncSender<BgMsg>) {
                             if tx.send(BgMsg::FrameNv12 { w, h, y, uv }).is_err() {
                                 return;
                             }
-                            sent += 1;
                             let wall_secs = wall_start.elapsed().as_secs_f64();
                             let sleep_ms = VideoBg::pace_sleep_ms(elapsed, wall_secs);
                             if sleep_ms > 0 {
@@ -745,15 +745,14 @@ fn decode_loop(path: &str, tx: SyncSender<BgMsg>) {
                 }
             }
         }
-        // 一轮播完（40s 窗满）即回绕；整文件不足 40s 则从头再播（同 loop 语义）。
-        let _ = elapsed;
+        // 整片播完即回绕（从头再播，同 loop 语义）。
     }
 }
 
 /// VideoToolbox 解码器构造（SPS/PPS/length_size 直给会话；NV12 输出，CPU 只搬运）。
 #[cfg(target_os = "macos")]
 /// 背景解码参数集（Avc/Hevc 会话二选一；`'static` 泄漏固化进程级常驻，
-/// 40s 回绕重建会话只借用不重复泄漏）。
+/// 整片回绕重建会话只借用不重复泄漏）。
 #[cfg(target_os = "macos")]
 enum BgParams {
     Avc {
@@ -886,7 +885,7 @@ fn decode_loop(path: &str, tx: SyncSender<BgMsg>) {
         h: 720,
         fps,
     });
-    // Vulkan 硬解设备只建一次（40s 回绕只重建 `BytesDecoder`，device 复用）。
+    // Vulkan 硬解设备只建一次（整片回绕只重建 `BytesDecoder`，device 复用）。
     let instance = match gpu_video::VulkanInstance::new() {
         Ok(i) => i,
         Err(e) => {
@@ -912,7 +911,7 @@ fn decode_loop(path: &str, tx: SyncSender<BgMsg>) {
                 return;
             }
         };
-    // 外层即 40s 回绕：每轮重建 `BytesDecoder`（干净 IDR，无跨轮参考）。
+    // 外层即整片回绕：每轮重建 `BytesDecoder`（干净 IDR，无跨轮参考）。
     loop {
         let wall_start = std::time::Instant::now();
         let mut dec = match device
@@ -928,13 +927,8 @@ fn decode_loop(path: &str, tx: SyncSender<BgMsg>) {
         // 本仓 `length_size` 前缀先转 Annex-B，与固件 `demux_mp4_track` 同式）。
         let mut first = true;
         let mut elapsed = 0.0f64;
-        let mut sent = 0u64;
-        let budget = VideoBg::loop_budget_frames(fps);
-        'groups: for g in &demuxed.groups {
+        for g in &demuxed.groups {
             for r in g {
-                if VideoBg::should_loop(elapsed) || sent >= budget {
-                    break 'groups;
-                }
                 elapsed += r.dur;
                 let mut annexb = Vec::new();
                 if first {
@@ -954,14 +948,10 @@ fn decode_loop(path: &str, tx: SyncSender<BgMsg>) {
                                 if tx.send(BgMsg::FrameNv12 { w, h, y, uv }).is_err() {
                                     return;
                                 }
-                                sent += 1;
                                 let wall_secs = wall_start.elapsed().as_secs_f64();
                                 let sleep_ms = VideoBg::pace_sleep_ms(elapsed, wall_secs);
                                 if sleep_ms > 0 {
                                     std::thread::sleep(std::time::Duration::from_millis(sleep_ms));
-                                }
-                                if sent >= budget {
-                                    break 'groups;
                                 }
                             }
                         }
@@ -974,8 +964,7 @@ fn decode_loop(path: &str, tx: SyncSender<BgMsg>) {
                 }
             }
         }
-        // 40s 窗满即回绕（`flush` 把重排延迟帧吐完再绕，不丢尾）。
-        let _ = elapsed;
+        // 整片播完即回绕（`flush` 把重排延迟帧吐完再绕，不丢尾）。
     }
 }
 
@@ -1034,11 +1023,11 @@ mod video_bg_tests {
     }
 
     #[test]
-    fn loop_window_is_40s() {
-        assert_eq!(VideoBg::loop_budget_frames(60), 2400);
-        assert_eq!(VideoBg::loop_budget_frames(30), 1200);
-        assert!(VideoBg::should_loop(40.0));
-        assert!(!VideoBg::should_loop(39.9));
+    fn full_file_loops_without_window() {
+        // 整片循环：无预算无窗口函数，纯靠播完回绕（解码循环内证）。
+        // 此处只锁死实时节拍仍在（逐帧按 pts 睡，不赶帧）。
+        assert_eq!(VideoBg::pace_sleep_ms(2.0, 1.0), 1000);
+        assert_eq!(VideoBg::pace_sleep_ms(1.0, 2.0), 0);
     }
 
     #[test]
@@ -1083,6 +1072,7 @@ mod video_bg_tests {
             kind: "mp4",
             codec,
             meta: None,
+            mtime: 0,
         }
     }
 
@@ -1098,18 +1088,37 @@ mod video_bg_tests {
             VideoBg::resolve_source(&entries, Some(0), "/usb"),
             Some(String::from("/usb/1080p/a.mp4"))
         );
-        // hevc 在 mac 接管，Win/Linux 回默认（轮子无 HEVC 解码器）。
+        // hevc 在 mac 接管，Win/Linux 回落图库首个 avc（轮子无 HEVC 解码器）。
         let h = VideoBg::resolve_source(&entries, Some(1), "/usb");
         #[cfg(target_os = "macos")]
         assert_eq!(h, Some(String::from("/usb/1080p/h.mp4")));
         #[cfg(not(target_os = "macos"))]
-        assert_eq!(h, None);
-        // vp9/无探针/越界/未选一律不接管（=默认片源）。
-        assert_eq!(VideoBg::resolve_source(&entries, Some(2), "/usb"), None);
-        assert_eq!(VideoBg::resolve_source(&entries, Some(3), "/usb"), None);
-        assert_eq!(VideoBg::resolve_source(&entries, Some(9), "/usb"), None);
-        assert_eq!(VideoBg::resolve_source(&entries, None, "/usb"), None);
+        assert_eq!(h, Some(String::from("/usb/1080p/a.mp4")));
+        // vp9/无探针/越界/未选一律回落图库首个 avc（默认跟随，不硬编码）。
+        assert_eq!(
+            VideoBg::resolve_source(&entries, Some(2), "/usb"),
+            Some(String::from("/usb/1080p/a.mp4"))
+        );
+        assert_eq!(
+            VideoBg::resolve_source(&entries, Some(3), "/usb"),
+            Some(String::from("/usb/1080p/a.mp4"))
+        );
+        assert_eq!(
+            VideoBg::resolve_source(&entries, Some(9), "/usb"),
+            Some(String::from("/usb/1080p/a.mp4"))
+        );
+        assert_eq!(
+            VideoBg::resolve_source(&entries, None, "/usb"),
+            Some(String::from("/usb/1080p/a.mp4"))
+        );
+        // 空图库/无集内项即 None（→ 静态底）。
         assert_eq!(VideoBg::resolve_source(&[], Some(0), "/usb"), None);
+        assert_eq!(VideoBg::resolve_source(&[], None, "/usb"), None);
+        let noavc = vec![
+            bg_entry("1080p/v.mp4", Some("vp9")),
+            bg_entry("wallpaper/w.qois", None),
+        ];
+        assert_eq!(VideoBg::resolve_source(&noavc, None, "/usb"), None);
     }
 
     #[test]

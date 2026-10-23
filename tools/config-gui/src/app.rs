@@ -1278,7 +1278,8 @@ impl eframe::App for App {
         // 推进只能在闭包外做（`live.run` 闭包禁写状态/禁时钟，见上游 `live.rs`；
         // 转换提交也在 tick 内同步做完，paint 回调零逻辑，避 nounwind abort）。
         if self.glass {
-            // 图库选中 avc/hevc 片源即接管动态背景（无选中/非编解码即默认片源）。
+            // 图库选中 avc/hevc 片源即接管动态背景；无选中/非编解码回落图库首个
+            // avc/hevc（默认跟随图库 mtime 最老的，不硬编码路径），都没有即静态底。
             // 会话级，无落盘（转码页状态本就不进 player.toml）。
             let want = crate::video_bg::VideoBg::resolve_source(
                 &self.gallery.entries,
