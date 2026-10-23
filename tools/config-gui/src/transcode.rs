@@ -214,6 +214,9 @@ pub(crate) struct TranscodeState {
     pub(crate) seg_text: String,
     /// 输出重命名（仅 stem，扩展名与子目录固定跟目标走；空串 = 默认名）。
     pub(crate) out_stem: String,
+    /// 选源对话框会话（winit macOS 禁止事件处理内再进事件循环，对话框必须
+    /// 后台线程跑阻塞版，UI 侧每帧收结果，见 `file_pick` 头注释血泪）。
+    pub(crate) pick: crate::file_pick::FilePick,
 }
 
 impl TranscodeState {
@@ -231,6 +234,7 @@ impl TranscodeState {
             fps_f: 0.0,
             seg_text: String::from("10"),
             out_stem: String::new(),
+            pick: crate::file_pick::FilePick::new(),
         }
     }
 
@@ -886,6 +890,11 @@ impl App {
     /// 转码页：源行 + 探针行 + 目标行 + 输出行 + 编码按钮 + 状态。
     pub(crate) fn transcode_page(&mut self, ui: &mut eframe::egui::Ui) {
         use eframe::egui;
+        // rfd 收果（后台线程框选完落袋；见 `file_pick`，winit 重入 abort 血泪）。
+        if let Some(f) = self.transcode.pick.take().flatten() {
+            self.transcode.source = f.display().to_string();
+            self.refresh_probe();
+        }
         use rust_i18n::t;
         // 先收 worker 进度（UI 线程只 try_recv，不阻塞）。
         self.poll_transcode_job();
@@ -913,17 +922,19 @@ impl App {
                 .show(ui)
                 .clicked()
             {
-                let dir = crate::gallery::gallery_dir(&self.path);
-                if let Some(f) = rfd::FileDialog::new()
-                    .set_directory(dir)
-                    .add_filter(
-                        "video/image",
-                        &["mp4", "png", "jpg", "jpeg", "bmp", "raw", "raws"],
-                    )
-                    .pick_file()
-                {
-                    self.transcode.source = f.display().to_string();
-                    self.refresh_probe();
+                // 后台线程跑阻塞框（winit 重入 abort 血泪，见 `file_pick`）；
+                // 框开着时不再起新框。
+                if !self.transcode.pick.pending() {
+                    let dir = crate::gallery::gallery_dir(&self.path);
+                    self.transcode.pick.open(move || {
+                        rfd::FileDialog::new()
+                            .set_directory(dir)
+                            .add_filter(
+                                "video/image",
+                                &["mp4", "png", "jpg", "jpeg", "bmp", "raw", "raws"],
+                            )
+                            .pick_file()
+                    });
                 }
             }
             if egui_glass::GlassButton::new(t!("transcode.example"))

@@ -136,6 +136,12 @@ pub(crate) struct App {
     pub(crate) gallery: GalleryState,
     /// 转码状态（worker 线程跑，UI 只轮询）。
     pub(crate) transcode: TranscodeState,
+    /// rfd 文件对话框会话（打开/保存/播放列表加项各持一个：winit macOS 禁止
+    /// 事件处理内再进事件循环，对话框必须后台线程跑阻塞版，UI 侧每帧收结果，
+    /// 见 `file_pick` 头注释血泪）。
+    pub(crate) open_pick: crate::file_pick::FilePick,
+    pub(crate) save_pick: crate::file_pick::FilePick,
+    pub(crate) list_pick: crate::file_pick::FilePick,
     /// 右上 toast：`status` 一变就弹，`TOAST_SECS` 后自动收。
     toast: Option<Toast>,
     /// toast 已播记忆：播过的 status 不再续弹（否则过期即重建变循环播放）。
@@ -350,6 +356,9 @@ impl App {
             video_bg,
             gallery: GalleryState::new(),
             transcode: TranscodeState::new(),
+            open_pick: crate::file_pick::FilePick::new(),
+            save_pick: crate::file_pick::FilePick::new(),
+            list_pick: crate::file_pick::FilePick::new(),
             toast: None,
             toast_seen: String::new(),
             icons,
@@ -934,14 +943,26 @@ impl App {
     }
 
     pub(crate) fn do_action(&mut self, ctx: &egui::Context, act: Action) {
+        // rfd 收果（每帧轮询：后台线程框选完落袋/取消；见 `file_pick`）。
+        if let Some(f) = self.open_pick.take().flatten() {
+            self.load_path(f.display().to_string());
+        }
+        if let Some(f) = self.save_pick.take().flatten() {
+            let p = f.display().to_string();
+            self.path = p.clone();
+            self.save_to(&p);
+        }
         match act {
             Action::None => {}
             Action::Open => {
-                if let Some(f) = rfd::FileDialog::new()
-                    .add_filter("TOML", &["toml"])
-                    .pick_file()
-                {
-                    self.load_path(f.display().to_string());
+                // 后台线程跑阻塞框（winit 重入 abort 血泪，见 `file_pick`）；
+                // 框开着时不再起新框。
+                if !self.open_pick.pending() {
+                    self.open_pick.open(|| {
+                        rfd::FileDialog::new()
+                            .add_filter("TOML", &["toml"])
+                            .pick_file()
+                    });
                 }
             }
             Action::Save => {
@@ -949,14 +970,13 @@ impl App {
                 self.save_to(&p);
             }
             Action::SaveAs => {
-                if let Some(f) = rfd::FileDialog::new()
-                    .add_filter("TOML", &["toml"])
-                    .set_file_name("player.toml")
-                    .save_file()
-                {
-                    let p = f.display().to_string();
-                    self.path = p.clone();
-                    self.save_to(&p);
+                if !self.save_pick.pending() {
+                    self.save_pick.open(|| {
+                        rfd::FileDialog::new()
+                            .add_filter("TOML", &["toml"])
+                            .set_file_name("player.toml")
+                            .save_file()
+                    });
                 }
             }
             Action::Reset => {

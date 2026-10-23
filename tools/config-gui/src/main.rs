@@ -57,6 +57,7 @@ mod codecs;
 // RAW-GEOM：`[decode]` 子分类（`schema` 已到行数上限，拆出；重导出路径不变）。
 mod decode_cfg;
 mod display;
+mod file_pick;
 mod gallery;
 mod pages;
 mod rules;

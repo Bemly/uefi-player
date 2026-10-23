@@ -163,20 +163,24 @@ impl App {
         }
         *sel = next_sel;
         ui.add_space(4.0);
+        // rfd 收果（后台线程框选完落袋；见 `file_pick`，winit 重入 abort 血泪）。
+        if let Some(f) = self.list_pick.take().flatten() {
+            let rel = relativize(gallery_dir.as_str(), &f);
+            items.push(PlaylistItem { path: rel.clone() });
+            *sel = Some(items.len() - 1);
+            self.status = t!("playlist.added", v = rel).into_owned();
+        }
         // 动作行（全玻璃；上/下是拖拽的零依赖兜底，SPEC fallback）。
         ui.horizontal_wrapped(|ui| {
             if egui_glass::GlassButton::new(t!("playlist.add"))
                 .show(ui)
                 .clicked()
             {
-                if let Some(f) = rfd::FileDialog::new()
-                    .set_directory(gallery_dir.as_str())
-                    .pick_file()
-                {
-                    let rel = relativize(gallery_dir.as_str(), &f);
-                    items.push(PlaylistItem { path: rel.clone() });
-                    *sel = Some(items.len() - 1);
-                    self.status = t!("playlist.added", v = rel).into_owned();
+                // 后台线程跑阻塞框（框开着时不再起新框）；目录先搬进 owned 再 move。
+                if !self.list_pick.pending() {
+                    let dir = gallery_dir.clone();
+                    self.list_pick
+                        .open(move || rfd::FileDialog::new().set_directory(dir).pick_file());
                 }
             }
             if egui_glass::GlassButton::new(t!("playlist.remove"))
