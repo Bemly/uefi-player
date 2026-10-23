@@ -126,5 +126,16 @@ pub fn load() -> Result<Option<Clip>> {
         m,
         config::wallpaper_preload()
     );
-    Ok(Some(Clip::eager(w, h, frames)))
+    // 画廊拼接亦走 eager 预算收口（超预算直接 Err 转 Ok(None) 无壁纸，绝不 panic）。
+    let clip = match Clip::eager(w, h, frames, "wallpaper") {
+        Ok(c) => c,
+        Err(e) => {
+            log::warn!(
+                "playlist: skip wallpaper gallery (too many frames for clip, use stream: {:?})",
+                e
+            );
+            return Ok(None);
+        }
+    };
+    Ok(Some(clip))
 }
